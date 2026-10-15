@@ -1,0 +1,1206 @@
+/* style.css — version finale corrigée */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  height: 100%; background: #f0f0f0;
+  color: #222; font-family: Arial, sans-serif;
+  font-size: 13px; overflow: hidden;
+}
+body { display: flex; flex-direction: column; }
+#main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
+
+/* ── Topbar ── */
+#topbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px; background: #1a1a2e; flex-shrink: 0;
+}
+#dot { width: 9px; height: 9px; border-radius: 50%; background: #555; flex-shrink: 0; }
+#dot.ok  { background: #00e87a; box-shadow: 0 0 5px #00e87a; }
+#dot.err { background: #ff4444; }
+#ip-label { color: #aaa; font-size: 11px; flex: 1; }
+#topbar button {
+  background: #2a2a4a; color: #aaa; border: 1px solid #444;
+  border-radius: 3px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+}
+
+/* ── Tabs ── */
+#tabs {
+  display: flex; background: #1a1a2e; flex-shrink: 0;
+  border-bottom: 2px solid #0066cc;
+}
+.tab {
+  flex: 1; text-align: center; padding: 7px 0;
+  color: #888; cursor: pointer; font-size: 12px;
+}
+.tab.active { color: #fff; background: #0066cc; }
+
+/* ── Pages ── */
+#page-term, #page-fft, #page-analyse, #page-calc, #page-balance, #page-harmonic {
+  display: flex; flex-direction: column; flex: 1; overflow: hidden;
+}
+#page-fft, #page-analyse, #page-calc, #page-harmonic { display: none; }
+
+/* ── Terminal ── */
+#terminal {
+  flex: 1; overflow-y: auto; padding: 8px 10px;
+  background: #fff; font-family: 'Courier New', monospace; font-size: 12px;
+}
+.line { padding: 1px 0; line-height: 1.5; white-space: pre-wrap; word-break: break-all; }
+.line.sys  { color: #999; font-style: italic; }
+.line.sent { color: #0066cc; }
+.line.menu { color: #0055aa; font-weight: bold; }
+
+#shortcuts {
+  display: flex; flex-wrap: wrap; gap: 4px;
+  padding: 5px 8px; background: #e8e8e8; border-top: 1px solid #ccc;
+}
+.sc {
+  background: #fff; color: #333; border: 1px solid #bbb;
+  border-radius: 3px; padding: 5px 9px; font-size: 12px; cursor: pointer; min-width: 34px;
+  text-align: center;
+}
+.sc:active { background: #ddd; }
+.sc.accent  { background: #0066cc; color: #fff; border-color: #0055aa; }
+.sc.danger  { background: #fff; color: #cc2200; border-color: #cc2200; }
+
+#input-row {
+  display: flex; gap: 5px; padding: 5px 8px;
+  background: #e8e8e8; border-top: 1px solid #ccc; flex-shrink: 0;
+}
+#term-input {
+  flex: 1; background: #fff; color: #222; border: 1px solid #bbb;
+  border-radius: 3px; padding: 7px 10px;
+  font-family: 'Courier New', monospace; font-size: 13px; outline: none;
+}
+#term-input:focus { border-color: #0066cc; }
+#btn-send {
+  background: #0066cc; color: #fff; border: none;
+  border-radius: 3px; padding: 7px 14px; font-size: 14px; cursor: pointer;
+}
+
+/* ── Graphiques communs ── */
+.graph-header {
+  padding: 4px 10px; background: #1a1a2e;
+  display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;
+}
+.graph-header span { color: #00e87a; font-size: 11px; font-family: 'Courier New', monospace; }
+.graph-header .meta { color: #888; font-size: 10px; }
+
+.cursor-bar {
+  padding: 3px 10px; background: #fff; border-bottom: 1px solid #ddd;
+  font-size: 11px; font-family: 'Courier New', monospace;
+  color: #0066cc; min-height: 20px; flex-shrink: 0;
+}
+
+.canvas-wrap {
+  flex: 1; position: relative; background: #fff; min-height: 0;
+  touch-action: none;
+}
+
+/* CORRECTION : position absolute UNIQUEMENT pour les canvas dans .canvas-wrap */
+.canvas-wrap canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.ctrl-bar {
+  display: flex; gap: 4px; padding: 5px 8px;
+  background: #e8e8e8; border-top: 1px solid #ccc; flex-shrink: 0;
+}
+.ctrl-bar button {
+  background: #fff; color: #333; border: 1px solid #bbb;
+  border-radius: 3px; padding: 7px 11px; font-size: 12px; cursor: pointer;
+}
+.ctrl-bar button:active { background: #ddd; }
+.ctrl-bar button.btn-primary { background: #0066cc; color: #fff; border-color: #0055aa; flex: 1; }
+.ctrl-bar button.running { background: #cc2200; color: #fff; border-color: #aa1100; }
+.ctrl-bar button.active  { background: #004499; color: #fff; border-color: #003377; }
+.ctrl-bar button.active.vel { background: #007744; color: #fff; border-color: #005533; }
+.ctrl-bar button.off { color: #aaa; border-color: #ddd; }
+
+/* ── Analyse stats ── */
+#an-stats {
+  display: flex; gap: 12px; padding: 4px 10px;
+  background: #f8f8f8; border-bottom: 1px solid #ddd;
+  font-size: 11px; font-family: 'Courier New', monospace; flex-shrink: 0;
+}
+#an-stats b { color: #0066cc; }
+#an-fs { font-size: 10px !important; color: #aaa !important; }
+
+/* ── Progression acquisition temporelle ── */
+#an-canvas-wrap { position: relative; }
+.an-acq-overlay {
+  position: absolute; inset: 0; z-index: 12;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  background: rgba(248, 248, 248, 0.88);
+  pointer-events: none;
+}
+#an-acq-ring { width: 96px; height: 96px; display: block; }
+#an-acq-label {
+  margin-top: 10px; font-size: 11px; color: #444;
+  font-family: 'Courier New', monospace; text-align: center; line-height: 1.35;
+}
+
+/* ── BumpTest dans l'onglet Analyse ───────────────────────── */
+#an-bump-panel {
+  flex-shrink: 0;
+  display: none;
+  flex-direction: column;
+  justify-content: flex-start;
+  align-items: stretch;
+  gap: 8px;
+  padding: 8px 10px;
+  background: #f8f8f8;
+  border-top: 1px solid #ddd;
+  border-bottom: 1px solid #ddd;
+}
+.an-bump-title {
+  font-size: 11px;
+  font-weight: bold;
+  color: #1a1a2e;
+  letter-spacing: 0.06em;
+}
+#an-bump-monitor {
+  width: 100%;
+  min-height: 44px;
+  max-height: 92px;
+  overflow-y: auto;
+  background: #f7f7fb;
+  border: 1px solid #d9d9e6;
+  border-radius: 4px;
+  color: #003366;
+  font-family: "Courier New", monospace;
+  font-size: 11px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  padding: 6px 8px;
+}
+.an-bump-actions {
+  display: flex;
+  gap: 6px;
+}
+.an-bump-actions button {
+  background: #fff;
+  color: #333;
+  border: 1px solid #bbb;
+  border-radius: 3px;
+  padding: 7px 11px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.an-bump-actions #btn-bump-start {
+  flex: 1;
+  background: #0066cc;
+  color: #fff;
+  border-color: #0055aa;
+}
+.an-bump-actions #btn-bump-exit {
+  min-width: 90px;
+}
+
+/* ── Filtre actif ── */
+#an-filter-label {
+  color: #007744; font-weight: bold; font-size: 10px;
+  background: #e6f4ee; border: 1px solid #007744;
+  border-radius: 3px; padding: 1px 5px;
+}
+#btn-an-reset {
+  background: #cc2200; color: #fff; border-color: #aa1100;
+}
+
+/* ── Playback audio ── */
+#btn-an-play.running {
+  background: #cc2200; color: #fff; border-color: #aa1100;
+}
+
+/* ── Sélection temporelle ── */
+#btn-an-fft-sel {
+  background: #005500; color: #fff; border-color: #003300;
+  font-weight: bold;
+}
+#btn-an-sel-clear {
+  background: #cc8800; color: #fff; border-color: #aa6600;
+}
+
+/* ===== PAGE CALCULATRICE ===== */
+#page-calc {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow-y: auto;
+  background: #f5f5f5;
+  padding: 10px;
+}
+
+.calc-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 15px;
+  border-bottom: 1px solid #ccc;
+  padding-bottom: 8px;
+}
+
+.calc-tab {
+  background: #fff;
+  color: #333;
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.calc-tab:active {
+  background: #ddd;
+}
+
+.calc-tab.active {
+  background: #0066cc;
+  color: #fff;
+  border-color: #0055aa;
+}
+
+.calc-pane {
+  display: none;
+  background: white;
+  border-radius: 8px;
+  padding: 15px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+.calc-pane.active {
+  display: block;
+}
+
+.calc-input-group {
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.calc-input-group label {
+  width: 130px;
+  font-weight: bold;
+  color: #333;
+}
+
+.calc-input-group input {
+  flex: 1;
+  min-width: 120px;
+  padding: 6px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.calc-btn {
+  background: #0066cc;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 16px;
+  font-size: 14px;
+  cursor: pointer;
+  margin-top: 5px;
+  margin-bottom: 15px;
+}
+
+.calc-result {
+  background: #f0f0f0;
+  border-radius: 4px;
+  padding: 8px 12px;
+  margin-top: 10px;
+  font-family: 'Courier New', monospace;
+  font-size: 14px;
+}
+
+.calc-result label {
+  font-weight: bold;
+  margin-right: 12px;
+}
+
+.calc-result span {
+  color: #0066cc;
+  font-weight: bold;
+}
+/* ===== PAGE ÉQUILIBRAGE ===== */
+#page-balance {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  min-height: 0;
+  background: #f5f5f5;
+}
+
+.bal-layout {
+  display: flex;
+  flex: 1;
+  gap: 8px;
+  padding: 8px;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ── Zone graphique ── */
+.bal-chart-area {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+#bal-canvas-wrap {
+  position: relative;
+  width: min(42vw, 340px);
+  height: min(42vw, 340px);
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#bal-canvas { display: block; }
+
+/* ── RPM live ── */
+.bal-rpm-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  padding: 5px 12px;
+  width: min(42vw, 340px);
+  box-sizing: border-box;
+}
+.bal-rpm-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  transition: background 0.4s;
+}
+.bal-rpm-dot--ok   { background: #00b050; box-shadow: 0 0 5px #00b05088; }
+.bal-rpm-dot--lost { background: #ccc; }
+.bal-rpm-label {
+  font-family: 'Courier New', monospace;
+  font-size: 11px; color: #888; flex-shrink: 0;
+}
+.bal-rpm-val {
+  font-family: 'Courier New', monospace;
+  font-size: 22px; font-weight: bold;
+  color: #1a1a2e; margin-left: auto;
+}
+
+/* ── Légende ── */
+.bal-legend {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  font-size: 10px; color: #666;
+  font-family: 'Courier New', monospace;
+}
+.bal-leg-item { display: flex; align-items: center; gap: 3px; }
+.bal-leg-dot  { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+
+/* ── Zone contrôle ── */
+.bal-ctrl-area {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* ── Status ── */
+.bal-status {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  background: #fff;
+  border: 1px solid #ccc;
+  color: #555;
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.bal-st-ok   { background: #e6f4ec; border-color: #00b050; color: #00723a; }
+.bal-st-err  { background: #fde8e8; border-color: #cc2200; color: #aa1100; }
+.bal-st-wait {
+  background: #fffbe6; border-color: #cc8800; color: #886600;
+  animation: bal-pulse 1.2s ease-in-out infinite;
+}
+@keyframes bal-pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+/* ── Paramètres R2 ── */
+.bal-params    { display: flex; flex-direction: column; gap: 4px; flex-shrink: 0; }
+.bal-param-row { display: flex; align-items: center; gap: 6px; }
+.bal-param-label {
+  font-size: 11px; color: #555;
+  width: 80px; flex-shrink: 0;
+}
+.bal-input {
+  width: 80px;
+  background: #fff; border: 1px solid #bbb; border-radius: 3px;
+  color: #222; font-family: 'Courier New', monospace;
+  font-size: 12px; padding: 3px 6px; text-align: right;
+}
+.bal-input:focus { outline: none; border-color: #0066cc; }
+.bal-param-unit { font-size: 11px; color: #888; }
+
+/* ── Résultat correction ── */
+.bal-correction {
+  background: #e6f4ec;
+  border: 1px solid #00b050;
+  border-radius: 5px;
+  padding: 8px 10px;
+  font-family: 'Courier New', monospace;
+  flex-shrink: 0;
+}
+.bal-corr-label {
+  font-size: 9px; color: #00723a;
+  letter-spacing: .08em; margin-bottom: 3px;
+  text-transform: uppercase;
+}
+.bal-corr-mass  { font-size: 26px; color: #1a1a2e; font-weight: bold; line-height: 1; }
+.bal-unit       { font-size: 13px; color: #555; font-weight: normal; }
+.bal-corr-ang   { font-size: 15px; color: #00723a; margin-top: 2px; }
+.bal-corr-sep   { height: 1px; background: #cce5d2; margin: 6px 0; }
+.bal-corr-detail { font-size: 10px; color: #555; line-height: 1.7; }
+.bal-corr-detail b { color: #222; }
+
+.bal-run-check {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  padding: 3px 6px; margin-top: 3px;
+  background: #fff; border-radius: 3px;
+  border-left: 3px solid currentColor;
+  flex-shrink: 0;
+}
+
+/* ── Log ── */
+.bal-log {
+  flex: 1;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  padding: 5px 7px;
+  font-family: 'Courier New', monospace;
+  font-size: 10px; color: #666; line-height: 1.5;
+  min-height: 40px;
+}
+.bal-log div:last-child { color: #333; }
+
+/* ── Barre de commandes ── */
+.bal-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  flex-shrink: 0;
+  border-bottom: 1px solid #ddd;
+  background: #f8f8f8;
+}
+.bal-mode-toggle--active {
+  background: #0066cc;
+  color: #fff;
+  border-color: #0055aa;
+}
+.bal-cmdbar {
+  display: flex;
+  align-items: center;
+  padding: 5px 8px;
+  background: #e8e8e8;
+  border-top: 1px solid #ccc;
+  flex-shrink: 0;
+  gap: 0;
+}
+
+.bal-btn {
+  font-size: 12px;
+  padding: 6px 14px;
+  border: 1px solid #bbb;
+  border-radius: 3px;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s;
+}
+.bal-btn:hover:not(:disabled) { background: #e0e0e0; }
+.bal-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+.bal-btn-run  { background: #0066cc; color: #fff; border-color: #0055aa; }
+.bal-btn-run:hover:not(:disabled) { background: #0055aa; }
+
+.bal-btn-reset { color: #cc2200; border-color: #cc2200; margin-left: auto; }
+.bal-btn-reset:hover:not(:disabled) { background: #fde8e8; }
+
+.btn-waiting { animation: bal-pulse .8s ease-in-out infinite; pointer-events: none; }
+
+.bal-cmdbar-sep { width: 1px; height: 20px; background: #ccc; margin: 0 6px; }
+
+/* ── Mobile ── */
+@media (max-width: 600px) {
+  .bal-layout      { flex-direction: column; }
+  #bal-canvas-wrap,
+  .bal-rpm-box     { width: min(88vw, 300px); }
+  #bal-canvas-wrap {
+  position: relative; height: min(88vw, 300px); }
+  .bal-chart-area  { align-self: center; }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   HAMBURGER PANEL — onglet Analyse
+   ═══════════════════════════════════════════════════════════ */
+
+/* Le panel monte depuis la ctrl-bar */
+.ham-panel {
+  position: absolute;
+  bottom: 100%;           /* juste au-dessus de la ctrl-bar */
+  left: 0; right: 0;
+  background: #1e1e2e;
+  border-top: 2px solid #0066cc;
+  padding: 8px 10px;
+  display: grid;
+  gap: 6px;
+  z-index: 200;
+  box-shadow: 0 -4px 16px rgba(0,0,0,0.35);
+}
+
+/* Rangée de boutons */
+.ham-row {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.ham-row button {
+  background: #2a2a4a;
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ham-row button:active { background: #3a3a5a; }
+
+/* Bouton "Analyser Démod" — accent */
+.ham-btn-demod {
+  background: #0055aa !important;
+  color: #fff !important;
+  border-color: #0044aa !important;
+  flex: 1;
+  font-weight: bold;
+}
+.ham-btn-demod:active { background: #004499 !important; }
+
+/* Séparateur horizontal */
+.ham-divider {
+  height: 1px;
+  background: #333;
+  margin: 2px 0;
+}
+
+/* Titre de section */
+.ham-title {
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  color: #666;
+  text-transform: uppercase;
+  padding: 2px 0 0 2px;
+}
+
+/* Champ label + input roulements */
+.ham-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ham-field label {
+  font-size: 11px;
+  font-weight: bold;
+  width: 52px;
+  flex-shrink: 0;
+  font-family: 'Courier New', monospace;
+}
+
+.ham-field input {
+  flex: 1;
+  max-width: 110px;
+  background: #111;
+  color: #eee;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 4px 6px;
+  font-size: 11px;
+  font-family: 'Courier New', monospace;
+}
+.ham-field input:focus {
+  outline: none;
+  border-color: #0066cc;
+}
+
+/* Couleurs label par fréquence */
+.ham-lbl-bpfi { color: #ef9a9a; }
+.ham-lbl-bpfo { color: #a5d6a7; }
+.ham-lbl-bsf  { color: #ce93d8; }
+.ham-lbl-ftf  { color: #80deea; }
+
+/* Bouton hamburger activé */
+#btn-an-ham.active {
+  background: #1e1e2e;
+  color: #7eb8ff;
+  border-color: #0066cc;
+}
+
+/* ctrl-bar : bouton Démod inactif légèrement pâle */
+#btn-an-demod { color: #777; }
+#btn-an-demod.active {
+  background: #7b3a00;
+  color: #ffb347;
+  border-color: #c05a00;
+}
+
+/* g / mm/s boutons fréquence */
+#btn-an-g, #btn-an-vel { min-width: 36px; }
+
+/* ── Toggle Auto / Manuel bande démod ── */
+.ham-band-toggle {
+  flex: 1;
+  background: #2a2a4a;
+  color: #888;
+  border: 1px solid #444;
+  border-radius: 0;
+  padding: 5px 0;
+  font-size: 11px;
+  cursor: pointer;
+}
+.ham-band-toggle:first-child { border-radius: 3px 0 0 3px; }
+.ham-band-toggle:last-child  { border-radius: 0 3px 3px 0; }
+.ham-band-toggle.active {
+  background: #0055aa;
+  color: #fff;
+  border-color: #0066cc;
+}
+
+/* Champs bande manuelle en grid 2 colonnes */
+#demod-band-fields {
+  display: none;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   MENU CONTEXTUEL DANS LA BARRE DE RACCOURCIS
+   ═══════════════════════════════════════════════════════════ */
+
+/* Menu Équilibrage / Analyse — sous la ligne de commande */
+#shortcuts {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+  padding: 6px 8px 8px;
+  flex-shrink: 0;
+  border-top: none;
+}
+
+#menu-tree {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: stretch;
+}
+
+#menu-tree > .sc-menu {
+  flex: 1 1 45%;
+  min-width: 0;
+}
+
+/* Fil d'Ariane + bouton Retour */
+.sc-nav {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  flex-wrap: wrap;
+}
+.sc-back {
+  background: #2a2a4a !important;
+  color: #88aaff !important;
+  border-color: #4466aa !important;
+  font-size: 11px !important;
+  padding: 4px 8px !important;
+}
+.sc-crumb {
+  font-size: 10px;
+  color: #888;
+  font-style: italic;
+}
+
+/* Boutons du menu contextuel — plus larges que les anciens 1-9 */
+.sc-menu {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  background: #fff;
+  color: #222;
+  border: 1px solid #bbb;
+  border-radius: 4px;
+  padding: 5px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  min-width: 80px;
+  line-height: 1.2;
+  text-align: left;
+}
+.sc-menu:active { background: #ddd; }
+
+/* Label principal du bouton menu */
+.sc-label {
+  font-weight: bold;
+  font-size: 12px;
+  color: #111;
+}
+
+/* Sous-titre gris en dessous */
+.sc-sub {
+  font-size: 9px;
+  color: #888;
+  margin-top: 1px;
+}
+
+/* Bouton accent (Équilibrage, Auto, 16 kHz...) */
+.sc-accent-menu {
+  background: #e8f0ff;
+  border-color: #0055cc;
+  color: #003399;
+}
+.sc-accent-menu .sc-label { color: #003399; }
+.sc-accent-menu:active { background: #c8d8ff; }
+
+/* ═══════════════════════════════════════════════════════════
+   CALCULATRICE — Influence coefficients
+   ═══════════════════════════════════════════════════════════ */
+
+/* Titre de section à l'intérieur d'un calc-pane */
+.calc-section-title {
+  font-size: 11px;
+  font-weight: bold;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #0055aa;
+  margin: 10px 0 4px 0;
+  padding-bottom: 3px;
+  border-bottom: 1px solid #dde5f0;
+}
+
+/* Ligne de 2 inputs côte à côte */
+.calc-row2 {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.calc-row2 .calc-input-group {
+  flex: 1;
+  min-width: 110px;
+  margin-bottom: 6px;
+}
+
+.calc-row2 .calc-input-group label {
+  width: auto;
+  font-size: 11px;
+  font-weight: normal;
+  color: #555;
+  display: block;
+  margin-bottom: 2px;
+}
+
+.calc-row2 .calc-input-group input {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 6px;
+  font-size: 13px;
+}
+
+/* Message d'erreur sous les résultats */
+.calc-err {
+  font-size: 11px;
+  color: #cc2200;
+  margin-top: 6px;
+  min-height: 16px;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   ONGLET HARMONIQUE
+   ═══════════════════════════════════════════════════════════ */
+
+#page-harmonic {
+  background: #f5f5f5;
+  padding: 8px;
+  gap: 10px;
+}
+
+.harm-polar-section,
+.harm-speed-section {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #ddd;
+  padding: 10px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+
+.harm-polar-section {
+  flex: 2;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.harm-speed-section {
+  flex: 1;
+  min-height: 180px;
+  display: flex;
+  flex-direction: column;
+}
+
+.harm-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  padding: 0 4px;
+}
+
+.harm-title {
+  font-weight: bold;
+  color: #1a1a2e;
+  font-size: 14px;
+}
+
+.harm-rpm-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #f0f0f0;
+  padding: 3px 10px;
+  border-radius: 20px;
+}
+
+#harm-rpm-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ccc;
+  transition: background 0.3s;
+}
+#harm-rpm-dot.ok {
+  background: #00b050;
+  box-shadow: 0 0 5px #00b05088;
+}
+
+#harm-rpm-val {
+  font-family: 'Courier New', monospace;
+  font-size: 18px;
+  font-weight: bold;
+  color: #1a1a2e;
+}
+
+#harm-polar-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+#harm-polar-canvas {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  display: block;
+  background: #fff;
+}
+
+#harm-speed-wrap {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+}
+
+#harm-speed-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  background: #fafafa;
+}
+
+#harm-info {
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  color: #444;
+  padding: 4px 8px;
+  background: #f8f8f8;
+  border-radius: 4px;
+  margin-top: 4px;
+  line-height: 1.6;
+}
+
+.hm-order-label {
+  display: inline-block;
+  width: 24px;
+  font-weight: bold;
+}
+.hm-order-label[data-o="1"] { color: #1a6fc4; }
+.hm-order-label[data-o="2"] { color: #2a8a3e; }
+.hm-order-label[data-o="3"] { color: #c45a00; }
+.hm-order-label[data-o="4"] { color: #8e24aa; }
+
+/* ── Barre sélection visage Harmonique / Suivi Phase ───── */
+.harm-view-bar {
+  display: flex; align-items: center; gap: 6px;
+  padding: 4px 8px; background: #f0f0f0;
+  border-radius: 8px; border: 1px solid #ddd;
+  margin-bottom: 6px;
+}
+.harm-view-bar .harm-rpm-indicator { margin-left: auto; }
+.harm-view-btn {
+  padding: 5px 12px; border: 1px solid #ccc; border-radius: 6px;
+  background: #fff; font-size: 13px; font-weight: bold; color: #555; cursor: pointer;
+}
+.harm-view-btn.harm-view-active {
+  background: #0066cc; color: #fff; border-color: #0055aa;
+}
+
+/* ── Suivi de phase ──────────────────────────────────────── */
+#harm-classic-view {
+  flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 10px;
+}
+#harm-phase-view {
+  flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 6px;
+}
+.pt-circle-section {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  background: #fff; border-radius: 8px; border: 1px solid #ddd;
+  padding: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+#pt-canvas-wrap {
+  flex: 1; min-height: 0;
+  display: flex; justify-content: center; align-items: center;
+}
+#pt-canvas {
+  display: block; background: #fff;
+}
+.pt-amp-line {
+  font-family: 'Courier New', monospace; font-size: 14px; font-weight: bold;
+  text-align: center; padding: 4px 0; color: #333;
+}
+.pt-sat-badge {
+  font-family: 'Courier New', monospace; font-size: 11px; font-weight: bold;
+  color: #c45a00; background: #fff3e0; padding: 2px 8px; border-radius: 10px;
+}
+.pt-hist-section {
+  background: #fff; border-radius: 8px; border: 1px solid #ddd;
+  padding: 6px 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.pt-history {
+  font-family: 'Courier New', monospace; font-size: 11px; color: #444;
+  line-height: 1.8;
+}
+.pt-hist-entry { display: inline-block; margin-right: 10px; white-space: nowrap; }
+.pt-hist-entry.pt-latest { font-weight: bold; }
+.pt-hist-entry.pt-sat { color: #c45a00; }
+
+/* Responsive */
+@media (max-width: 600px) {
+  #page-harmonic { padding: 4px; gap: 6px; }
+  .harm-polar-section, .harm-speed-section { padding: 6px; }
+  .harm-view-btn { font-size: 11px; padding: 4px 8px; }
+}
+/* ═══════════════════════════════════════════════════════════
+   ÉQUILIBRAGE v14 — Mode sélection + 2P polaires côte à côte
+═══════════════════════════════════════════════════════════ */
+
+/* Écran sélection mode */
+#bal-mode-select {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  flex: 1; gap: 20px; padding: 24px;
+  background: #f5f5f5;
+}
+.bal-mode-title {
+  font-size: 16px; font-weight: bold;
+  color: #1a1a2e; letter-spacing: .05em;
+}
+.bal-mode-btns { display: flex; gap: 18px; }
+.bal-mode-btn {
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 6px; width: 130px; height: 130px;
+  border: 2px solid #bbb; border-radius: 12px;
+  background: #fff; cursor: pointer;
+  transition: all .15s;
+  box-shadow: 0 2px 6px rgba(0,0,0,.08);
+}
+.bal-mode-btn:hover {
+  border-color: #0066cc;
+  box-shadow: 0 4px 14px rgba(0,102,204,.2);
+  transform: translateY(-2px);
+}
+.bal-mode-icon { font-size: 36px; line-height: 1; }
+.bal-mode-lbl  { font-size: 16px; font-weight: bold; color: #1a1a2e; }
+.bal-mode-sub  { font-size: 10px; color: #888; text-align: center; }
+
+/* Titre params dans input masse */
+.bal-params-title {
+  font-size: 10px; color: #0066cc;
+  font-weight: bold; text-transform: uppercase;
+  letter-spacing: .05em; margin-bottom: 2px;
+}
+
+/* ── 2P : deux polaires côte à côte ── */
+.bal-2p-polars {
+  display: flex;
+  gap: 6px;
+  padding: 6px 8px 4px 8px;
+  flex-shrink: 0;
+  align-items: flex-start;
+}
+
+/* Carte polaire (tappable) */
+.bal-polar-card {
+  flex: 1;
+  display: flex; flex-direction: column;
+  align-items: center;
+  background: #fff;
+  border: 2.5px solid #ddd;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+  user-select: none;
+  -webkit-user-select: none;
+  aspect-ratio: 1 / 1;
+}
+.bal-polar-card:hover { border-color: #aaa; }
+
+/* État sonde active — encadrement bleu */
+.bal-polar-active {
+  border-color: #0066cc !important;
+  box-shadow: 0 0 0 2px rgba(0,102,204,.25);
+}
+
+/* Titre de la carte polaire */
+.bal-polar-card-title {
+  display: flex; align-items: center; gap: 5px;
+  width: 100%; padding: 4px 8px;
+  font-size: 11px; font-weight: bold;
+  font-family: 'Courier New', monospace;
+  color: #333; background: #f8f8f8;
+  border-bottom: 1px solid #eee;
+  box-sizing: border-box;
+}
+.bal-polar-sensor-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%; flex-shrink: 0;
+}
+/* Label "◀ sonde" — affiché sur la carte active seulement */
+.bal-polar-sensor-lbl {
+  font-size: 9px; color: #0066cc;
+  margin-left: auto; opacity: 0;
+  transition: opacity .15s;
+}
+.bal-polar-active .bal-polar-sensor-lbl { opacity: 1; }
+
+/* Canvas à l'intérieur de la carte */
+.bal-polar-card canvas {
+  display: block;
+  width: 100% !important;
+  max-width: 100%;
+  position: static;
+  pointer-events: none;  /* CORRECTION : laisse passer les clics à la carte */
+}
+
+/* ── Correction 2P ── */
+.bal-corr-plan-lbl {
+  font-size: 10px; font-weight: bold;
+  letter-spacing: .06em; text-transform: uppercase;
+  margin-top: 4px;
+}
+
+/* ── Mobile ── */
+@media (max-width: 600px) {
+  .bal-mode-btns { gap: 12px; }
+  .bal-mode-btn  { width: 110px; height: 110px; }
+  .bal-mode-icon { font-size: 28px; }
+  .bal-mode-lbl  { font-size: 13px; }
+  .bal-2p-polars { padding: 4px 5px 2px 5px; gap: 4px; }
+}
+
+/* ===== AMÉLIORATIONS MODE 2P ===== */
+#bal-layout-2p {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  gap: 8px;
+}
+
+.bal-2p-polars {
+  flex-shrink: 0;
+}
+
+.bal-ctrl-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+}
+
+#bal-layout-2p .bal-status {
+  flex: 1;
+  font-size: 20px;
+  font-weight: bold;
+  padding: 12px;
+  background: #fff;
+  border-radius: 6px;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.bal-params,
+#bal-result-2p {
+  flex-shrink: 0;
+}
+
+#bal-layout-2p .bal-log {
+  flex-shrink: 0;
+  height: 100px;
+  overflow-y: auto;
+  font-size: 9px;
+  background: #fff;
+  border-radius: 4px;
+  padding: 5px 7px;
+}
