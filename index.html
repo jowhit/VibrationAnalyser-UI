@@ -1,0 +1,666 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>ESP32 Analyseur</title>
+<meta name="theme-color" content="#1a1a2e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Analyseur">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css?v=19">
+<link rel="manifest" href="manifest.json">
+<script>
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('service-worker.js')
+      .then(function (reg) { if (reg && reg.update) reg.update(); })
+      .catch(function (err) {
+        console.warn('Service worker refusé:', err);
+      });
+  }
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    window._pwaPrompt = e;
+    var btn = document.getElementById('pwa-install-btn');
+    if (btn) btn.style.display = 'inline-block';
+    var box = document.getElementById('pwa-install');
+    if (box && localStorage.getItem('pwaInstallDismissed') !== '1') box.style.display = 'block';
+  });
+  function dismissPwa() {
+    try { localStorage.setItem('pwaInstallDismissed', '1'); } catch (e) {}
+    var box = document.getElementById('pwa-install');
+    if (box) box.style.display = 'none';
+  }
+  function installPwa() {
+    var p = window._pwaPrompt;
+    if (!p) return;
+    p.prompt();
+    p.userChoice.finally(function () { window._pwaPrompt = null; dismissPwa(); });
+  }
+  document.addEventListener('DOMContentLoaded', function () {
+    try {
+      if (localStorage.getItem('pwaInstallDismissed') === '1') return;
+    } catch (e) { return; }
+    var box = document.getElementById('pwa-install');
+    if (box) box.style.display = 'block';
+  });
+</script>
+</head>
+<body>
+
+<div id="pwa-install" style="display:none;background:#10243d;color:#d6e8ff;padding:10px 12px;font-size:14px;border-bottom:1px solid #2a4a6a">
+  <b>Installer l'application</b>
+  <p style="margin:8px 0">Ouvre cette page en HTTPS (GitHub Pages), puis menu Chrome → Installer l'application. L'interface reste disponible sans ESP32.</p>
+  <div style="display:flex;gap:8px">
+    <button type="button" id="pwa-install-btn" onclick="installPwa()" style="display:none;padding:8px 12px">Installer</button>
+    <button type="button" onclick="dismissPwa()" style="padding:8px 12px">Compris</button>
+  </div>
+</div>
+
+<div id="ip-banner" style="display:none;background:#3d2a00;color:#ffd080;padding:10px 12px;font-size:14px;border-bottom:1px solid #665500">
+  <div id="ip-banner-title">Connexion perdue</div>
+  <p id="ip-banner-hint" style="margin:6px 0;font-size:13px">Entre l'IP de l'ESP32 sur le hotspot. Connexion : ws://IP:81</p>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">
+    <input id="ip-banner-input" type="text" placeholder="10.42.0.5"
+      style="flex:1;min-width:140px;padding:8px;border-radius:6px;border:1px solid #665500;background:#222;color:#eee">
+    <button type="button" onclick="ipBannerReconnect()" style="padding:8px 12px">Reconnecter</button>
+  </div>
+</div>
+
+<div id="topbar">
+  <span id="dot"></span>
+  <span id="ip-label">Deconnecte</span>
+  <button type="button" onclick="clearVaSession()" title="Effacer la mémoire de session (navigateur + reset équilibrage)">Reset session</button>
+  <button onclick="changeIP()">Adr.</button>
+</div>
+
+<div id="tabs">
+  <div class="tab active" onclick="showTab('term')">Terminal</div>
+  <div class="tab"        onclick="showTab('fft')">Live FFT</div>
+  <div class="tab"        onclick="showTab('analyse')">Analyse</div>
+  <div class="tab"        onclick="showTab('calc')">Calculatrice</div>
+  <div class="tab"        onclick="showTab('balance')">⚖ Bal</div>
+  <div class="tab"        onclick="showTab('harmonic')">📊 Harm</div>
+</div>
+
+<div id="main">
+
+  <!-- TERMINAL -->
+  <div id="page-term">
+    <div id="terminal"></div>
+    <div id="input-row">
+      <input id="term-input" type="text" placeholder="commande..."
+        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <button id="btn-send" onclick="termSendInput()">&#9654;</button>
+    </div>
+    <div id="shortcuts">
+      <div id="menu-tree"></div>
+    </div>
+  </div>
+
+  <!-- LIVE FFT -->
+  <div id="page-fft">
+    <div class="graph-header">
+      <span id="fft-status">En attente...</span>
+      <span id="fft-meta" class="meta"></span>
+    </div>
+    <div id="fft-cursor-info" class="cursor-bar">Toucher le spectre pour lire une valeur</div>
+    <div id="fft-canvas-wrap" class="canvas-wrap">
+      <canvas id="fft-canvas"></canvas>
+    </div>
+    <div class="ctrl-bar">
+      <button id="btn-fft-start" class="btn-primary" onclick="fftToggle()">&#9654; Live FFT</button>
+      <button id="btn-fft-unit" onclick="fftToggleUnit()">g</button>
+      <button onclick="fftManualZoom(2)">&#8722;</button>
+      <button onclick="fftManualZoom(0.5)">+</button>
+    </div>
+  </div>
+
+  <!-- ANALYSE -->
+  <div id="page-analyse">
+    <div class="graph-header">
+      <span id="an-fs">En attente d'acquisition...</span>
+    </div>
+    <div id="an-stats">
+      <span>RMS: <b id="an-rms">—</b></span>
+      <span>Pic: <b id="an-peak">—</b></span>
+      <span>Crest: <b id="an-crest">—</b></span>
+      <span id="an-filter-label" style="display:none"></span>
+    </div>
+    <div id="an-canvas-wrap" class="canvas-wrap">
+      <canvas id="an-canvas"></canvas>
+      <div id="an-acq-overlay" class="an-acq-overlay" style="display:none" aria-hidden="true">
+        <canvas id="an-acq-ring" width="120" height="120"></canvas>
+        <span id="an-acq-label">Acquisition…</span>
+      </div>
+    </div>
+    <div id="an-bump-panel" style="display:none;">
+      <div class="an-bump-title">MODE BUMP TEST</div>
+      <pre id="an-bump-monitor">Mode pret - appuyez DEMARRER</pre>
+      <div class="an-bump-actions">
+        <button id="btn-bump-start" class="btn-primary" onclick="bumpSendStart()">DEMARRER</button>
+        <button id="btn-bump-exit" onclick="bumpExit()">EXIT</button>
+      </div>
+    </div>
+    <div style="position:relative; flex-shrink:0;">
+      <div id="an-ham-panel" class="ham-panel" style="display:none;">
+        <div class="ham-row">
+          <button onclick="analyseZoomIn()">＋ Zoom</button>
+          <button onclick="analyseZoomOut()">－ Zoom</button>
+          <button id="btn-an-play" onclick="analysePlay()">▶ Play</button>
+          <button onclick="analyseExportWAV()">💾 WAV</button>
+          <button onclick="analyseExportCSV()">CSV</button>
+        </div>
+        <div class="ham-row">
+          <button onclick="analyseFilter()">🎸 Filtre</button>
+          <button id="btn-an-reset" onclick="analyseFilterReset()" style="display:none">✗ Reset</button>
+          <button id="btn-an-fft-sel" onclick="analyseFFTSel()" style="display:none">FFT Sél</button>
+          <button id="btn-an-sel-clear" onclick="analyseSelClear()" style="display:none">✗ Sél</button>
+        </div>
+        <div class="ham-divider"></div>
+        <div class="ham-title">BANDE DE DÉMODULATION</div>
+        <div class="ham-row" style="gap:0;">
+          <button id="btn-demod-auto" class="ham-band-toggle active" onclick="demodSetBandMode('auto')">Auto</button>
+          <button id="btn-demod-man"  class="ham-band-toggle"        onclick="demodSetBandMode('man')">Manuel</button>
+        </div>
+        <div id="demod-band-fields" style="display:none;">
+          <div class="ham-field"><label style="color:#f0a050;">f bas Hz</label><input id="demod-flo" type="number" placeholder="ex: 600" step="10" min="0"></div>
+          <div class="ham-field"><label style="color:#f0a050;">f haut Hz</label><input id="demod-fhi" type="number" placeholder="ex: 1400" step="10" min="0"></div>
+        </div>
+        <div class="ham-divider"></div>
+        <div class="ham-title">FRÉQUENCES ROULEMENTS</div>
+        <div class="ham-field"><label>RPM</label><input id="demod-rpm" type="number" placeholder="optionnel" step="1" min="0"></div>
+        <div class="ham-field"><label class="ham-lbl-bpfi">BPFi ×</label><input id="demod-bpfi" type="number" placeholder="ex: 5.6" step="0.01" min="0"></div>
+        <div class="ham-field"><label class="ham-lbl-bpfo">BPFo ×</label><input id="demod-bpfo" type="number" placeholder="ex: 4.2" step="0.01" min="0"></div>
+        <div class="ham-field"><label class="ham-lbl-bsf">BSF ×</label><input id="demod-bsf" type="number" placeholder="ex: 3.1" step="0.01" min="0"></div>
+        <div class="ham-field"><label class="ham-lbl-ftf">FTF ×</label><input id="demod-ftf" type="number" placeholder="ex: 0.4" step="0.01" min="0"></div>
+        <div class="ham-row"><button class="ham-btn-demod" onclick="analyseRunDemod()">⚙ Analyser Démod</button></div>
+      </div>
+      <div class="ctrl-bar">
+        <button id="btn-an-fft"   onclick="analyseToggleFFT()">FFT</button>
+        <button id="btn-an-g"     onclick="anSetUnit('g')">g</button>
+        <button id="btn-an-vel"   onclick="anSetUnit('mm/s')">mm/s</button>
+        <button id="btn-an-demod" onclick="analyseToggleDemod()">Démod</button>
+        <button id="btn-an-ham"   onclick="anToggleHam()">☰</button>
+        <button class="btn-primary" onclick="analyseSave()">💾 Sauv</button>
+        <button onclick="analyseLoad()">📂 Ouvrir</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- CALCULATRICE -->
+  <div id="page-calc">
+    <div class="calc-tabs">
+      <button id="calc-tab-essai"    class="calc-tab active" data-pane="essai">Masse essai</button>
+      <button id="calc-tab-combiner" class="calc-tab"        data-pane="combiner">Combiner</button>
+      <button id="calc-tab-diviser"  class="calc-tab"        data-pane="diviser">Diviser</button>
+      <button id="calc-tab-ic1"      class="calc-tab"        data-pane="ic1">Influence 1P</button>
+      <button id="calc-tab-ic2"      class="calc-tab"        data-pane="ic2">Influence 2P</button>
+    </div>
+
+    <div id="calc-essai" class="calc-pane active">
+      <div class="calc-input-group">
+        <label>RPM</label>
+        <input type="number" id="calc-essai-rpm" value="3000" step="100">
+      </div>
+      <div class="calc-input-group">
+        <label>Masse rotor (kg)</label>
+        <input type="number" id="calc-essai-masse" value="10" step="0.1">
+      </div>
+      <div class="calc-input-group">
+        <label>Rayon correction (mm)</label>
+        <input type="number" id="calc-essai-rayon" value="200" step="10">
+      </div>
+      <button id="calc-essai-btn" class="calc-btn">Calculer</button>
+      <div class="calc-result">
+        <label>Masse d'essai (g)</label>
+        <span id="calc-essai-result">—</span>
+      </div>
+    </div>
+
+    <div id="calc-combiner" class="calc-pane">
+      <div class="calc-input-group">
+        <label>Masse 1 (g)</label>
+        <input type="number" id="calc-combiner-m1" value="10" step="1">
+      </div>
+      <div class="calc-input-group">
+        <label>Angle 1 (°)</label>
+        <input type="number" id="calc-combiner-a1" value="0" step="1">
+      </div>
+      <div class="calc-input-group">
+        <label>Masse 2 (g)</label>
+        <input type="number" id="calc-combiner-m2" value="10" step="1">
+      </div>
+      <div class="calc-input-group">
+        <label>Angle 2 (°)</label>
+        <input type="number" id="calc-combiner-a2" value="90" step="1">
+      </div>
+      <button id="calc-combiner-btn" class="calc-btn">Calculer</button>
+      <div class="calc-result">
+        <label>Résultante</label>
+        <span id="calc-combiner-result">—</span>
+      </div>
+    </div>
+
+    <div id="calc-diviser" class="calc-pane">
+      <div class="calc-input-group">
+        <label>Masse (g)</label>
+        <input type="number" id="calc-diviser-masse" value="10" step="1">
+      </div>
+      <div class="calc-input-group">
+        <label>Angle de la masse (°)</label>
+        <input type="number" id="calc-diviser-angle" value="45" step="1">
+      </div>
+      <div class="calc-input-group">
+        <label>Angle pale 1 (°)</label>
+        <input type="number" id="calc-diviser-pale1" value="0" step="1">
+      </div>
+      <div class="calc-input-group">
+        <label>Angle pale 2 (°)</label>
+        <input type="number" id="calc-diviser-pale2" value="120" step="1">
+      </div>
+      <button id="calc-diviser-btn" class="calc-btn">Calculer</button>
+      <div class="calc-result">
+        <label>Pale 1</label>
+        <span id="calc-diviser-pale1-result">—</span>
+      </div>
+      <div class="calc-result">
+        <label>Pale 2</label>
+        <span id="calc-diviser-pale2-result">—</span>
+      </div>
+    </div>
+
+    <div id="calc-ic1" class="calc-pane">
+
+      <div class="calc-section-title">Run 1 — Baseline (sans masse)</div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Amplitude</label>
+          <input type="number" id="ic1-a1" value="1.0" step="0.01" min="0">
+        </div>
+        <div class="calc-input-group">
+          <label>Angle (°)</label>
+          <input type="number" id="ic1-p1" value="0" step="1">
+        </div>
+      </div>
+
+      <div class="calc-section-title">Masse d'essai</div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Masse (g)</label>
+          <input type="number" id="ic1-mt" value="10" step="0.1" min="0.01">
+        </div>
+        <div class="calc-input-group">
+          <label>Angle pose (°)</label>
+          <input type="number" id="ic1-at" value="0" step="1">
+        </div>
+      </div>
+
+      <div class="calc-section-title">Run 2 — Avec masse d'essai</div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Amplitude</label>
+          <input type="number" id="ic1-a2" value="1.2" step="0.01" min="0">
+        </div>
+        <div class="calc-input-group">
+          <label>Angle (°)</label>
+          <input type="number" id="ic1-p2" value="30" step="1">
+        </div>
+      </div>
+
+      <button class="calc-btn" onclick="calcInfluence1P()">Calculer correction</button>
+
+      <div class="calc-result">
+        <label>Masse correction</label>
+        <span id="ic1-result-masse">—</span>
+      </div>
+      <div class="calc-result">
+        <label>Angle correction</label>
+        <span id="ic1-result-angle">—</span>
+      </div>
+      <div id="ic1-err" class="calc-err"></div>
+    </div>
+
+    <div id="calc-ic2" class="calc-pane">
+
+      <div class="calc-section-title">Run 1 — Baseline (sans masse)</div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Plan 1 — Ampl.</label>
+          <input type="number" id="ic2-a1p1" value="1.0" step="0.01" min="0">
+        </div>
+        <div class="calc-input-group">
+          <label>Plan 1 — Angle°</label>
+          <input type="number" id="ic2-p1p1" value="0" step="1">
+        </div>
+      </div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Plan 2 — Ampl.</label>
+          <input type="number" id="ic2-a1p2" value="1.0" step="0.01" min="0">
+        </div>
+        <div class="calc-input-group">
+          <label>Plan 2 — Angle°</label>
+          <input type="number" id="ic2-p1p2" value="0" step="1">
+        </div>
+      </div>
+
+      <div class="calc-section-title">Masse d'essai Plan 1</div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Masse (g)</label>
+          <input type="number" id="ic2-mt1" value="10" step="0.1" min="0.01">
+        </div>
+        <div class="calc-input-group">
+          <label>Angle pose (°)</label>
+          <input type="number" id="ic2-at1" value="0" step="1">
+        </div>
+      </div>
+
+      <div class="calc-section-title">Run 2 — Masse sur Plan 1</div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Plan 1 — Ampl.</label>
+          <input type="number" id="ic2-a2p1" value="1.2" step="0.01" min="0">
+        </div>
+        <div class="calc-input-group">
+          <label>Plan 1 — Angle°</label>
+          <input type="number" id="ic2-p2p1" value="30" step="1">
+        </div>
+      </div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Plan 2 — Ampl.</label>
+          <input type="number" id="ic2-a2p2" value="0.9" step="0.01" min="0">
+        </div>
+        <div class="calc-input-group">
+          <label>Plan 2 — Angle°</label>
+          <input type="number" id="ic2-p2p2" value="15" step="1">
+        </div>
+      </div>
+
+      <div class="calc-section-title">Masse d'essai Plan 2</div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Masse (g)</label>
+          <input type="number" id="ic2-mt2" value="10" step="0.1" min="0.01">
+        </div>
+        <div class="calc-input-group">
+          <label>Angle pose (°)</label>
+          <input type="number" id="ic2-at2" value="0" step="1">
+        </div>
+      </div>
+
+      <div class="calc-section-title">Run 3 — Masse sur Plan 2</div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Plan 1 — Ampl.</label>
+          <input type="number" id="ic2-a3p1" value="0.8" step="0.01" min="0">
+        </div>
+        <div class="calc-input-group">
+          <label>Plan 1 — Angle°</label>
+          <input type="number" id="ic2-p3p1" value="20" step="1">
+        </div>
+      </div>
+      <div class="calc-row2">
+        <div class="calc-input-group">
+          <label>Plan 2 — Ampl.</label>
+          <input type="number" id="ic2-a3p2" value="1.3" step="0.01" min="0">
+        </div>
+        <div class="calc-input-group">
+          <label>Plan 2 — Angle°</label>
+          <input type="number" id="ic2-p3p2" value="45" step="1">
+        </div>
+      </div>
+
+      <button class="calc-btn" onclick="calcInfluence2P()">Calculer corrections</button>
+
+      <div class="calc-section-title" style="color:#0055aa;">Correction Plan 1</div>
+      <div class="calc-result">
+        <label>Masse</label>
+        <span id="ic2-r1-masse">—</span>
+      </div>
+      <div class="calc-result">
+        <label>Angle</label>
+        <span id="ic2-r1-angle">—</span>
+      </div>
+
+      <div class="calc-section-title" style="color:#007744;">Correction Plan 2</div>
+      <div class="calc-result">
+        <label>Masse</label>
+        <span id="ic2-r2-masse">—</span>
+      </div>
+      <div class="calc-result">
+        <label>Angle</label>
+        <span id="ic2-r2-angle">—</span>
+      </div>
+      <div id="ic2-err" class="calc-err"></div>
+    </div>
+
+  </div>
+
+
+  <!-- ══════════════════════════════════════════════════════════
+       ÉQUILIBRAGE
+  ══════════════════════════════════════════════════════════ -->
+  <div id="page-balance" style="display:none;">
+
+    <!-- Sélection mode 1P / 2P -->
+    <div id="bal-mode-select" style="display:none;">
+      <div class="bal-mode-title">Mode d'équilibrage</div>
+      <div class="bal-mode-btns">
+        <button class="bal-mode-btn" onclick="BalanceModule.selectMode('1P')">
+          <span class="bal-mode-icon">◎</span>
+          <span class="bal-mode-lbl">1 Plan</span>
+          <span class="bal-mode-sub">Sonde fixe</span>
+        </button>
+        <button class="bal-mode-btn" onclick="BalanceModule.selectMode('2P')">
+          <span class="bal-mode-icon">⊕</span>
+          <span class="bal-mode-lbl">2 Plans</span>
+          <span class="bal-mode-sub">Sonde déplacée</span>
+        </button>
+        <button type="button" id="bal-2p-resume" class="bal-mode-btn" style="display:none;"
+                onclick="BalanceModule.resume2PFromNvs()">
+          <span class="bal-mode-icon">↩</span>
+          <span class="bal-mode-lbl">Reprendre session</span>
+          <span class="bal-mode-sub">2 plans — runs différentiels terminés</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- Interface principale -->
+    <div id="bal-main" style="display:flex; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
+
+      <div class="bal-toolbar">
+        <button type="button" id="btn-bal-start" class="bal-btn">Démarrer</button>
+        <button type="button" id="btn-bal-load-coeff" class="bal-btn" disabled>Load Coeff</button>
+        <button type="button" id="btn-bal-reset-top" class="bal-btn bal-btn-reset">Reset</button>
+        <button type="button" id="btn-bal-save-coeff" class="bal-btn" disabled>Save Coeff</button>
+        <div class="bal-cmdbar-sep"></div>
+        <button type="button" id="btn-bal-mode-1p" class="bal-btn bal-mode-toggle bal-mode-toggle--active">1 Plan</button>
+        <button type="button" id="btn-bal-mode-2p" class="bal-btn bal-mode-toggle">2 Plans</button>
+      </div>
+
+      <!-- ── Layout MODE 1P ─────────────────────────────────── -->
+      <div id="bal-layout-1p" class="bal-layout" style="display:flex;">
+        <div class="bal-chart-area">
+          <div id="bal-rpm" class="bal-rpm-box">
+            <span id="bal-rpm-dot" class="bal-rpm-dot bal-rpm-dot--lost"></span>
+            <span class="bal-rpm-label">RPM</span>
+            <span id="bal-rpm-val" class="bal-rpm-val">0</span>
+          </div>
+          <div id="bal-canvas-wrap">
+            <canvas id="bal-canvas"></canvas>
+          </div>
+          <div class="bal-legend">
+            <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#1a6fc4"></span>R1</span>
+            <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#2a8a3e"></span>R2</span>
+            <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#c45a00"></span>RunX</span>
+          </div>
+        </div>
+        <div class="bal-ctrl-area">
+          <div id="bal-status" class="bal-status">Prêt</div>
+          <div id="bal-params" class="bal-params" style="display:none;">
+            <div id="bal-params-title" class="bal-params-title">Masse essai</div>
+            <div class="bal-param-row">
+              <label class="bal-param-label" for="bal-trial-mass">Masse</label>
+              <input id="bal-trial-mass" type="number" value="100" min="0.1" step="0.1" class="bal-input">
+              <span class="bal-param-unit">g</span>
+            </div>
+            <div class="bal-param-row">
+              <label class="bal-param-label" for="bal-trial-angle">Angle</label>
+              <input id="bal-trial-angle" type="number" value="0" min="0" max="360" step="1" class="bal-input">
+              <span class="bal-param-unit">°</span>
+            </div>
+          </div>
+          <div id="bal-result"></div>
+          <div id="bal-log" class="bal-log"></div>
+        </div>
+      </div>
+
+      <!-- ── Layout MODE 2P ─────────────────────────────────── -->
+      <div id="bal-layout-2p" style="display:none; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
+
+        <!-- RPM live -->
+        <div style="display:flex; align-items:center; gap:8px; padding:5px 8px; flex-shrink:0;">
+          <span id="bal-rpm-dot" class="bal-rpm-dot bal-rpm-dot--lost" style="display:none;"></span>
+          <div id="bal-rpm-2p" class="bal-rpm-box" style="flex:1;">
+            <span id="bal-rpm-dot-2p" class="bal-rpm-dot bal-rpm-dot--lost"></span>
+            <span class="bal-rpm-label">RPM</span>
+            <span id="bal-rpm-val-2p" class="bal-rpm-val">0</span>
+          </div>
+        </div>
+
+        <!-- Deux polaires côte à côte — TAPPABLES -->
+        <div class="bal-2p-polars">
+
+          <!-- Polaire A -->
+          <div id="bal-polar-a" class="bal-polar-card"
+               onclick="BalanceModule.selectSensor('A')">
+            <div class="bal-polar-card-title">
+              <span class="bal-polar-sensor-dot" style="background:#1a6fc4"></span>
+              Palier A
+              <span class="bal-polar-sensor-lbl">◀ sonde</span>
+            </div>
+            <canvas id="bal-canvas-a"></canvas>
+          </div>
+
+          <!-- Polaire B -->
+          <div id="bal-polar-b" class="bal-polar-card"
+               onclick="BalanceModule.selectSensor('B')">
+            <div class="bal-polar-card-title">
+              <span class="bal-polar-sensor-dot" style="background:#2a8a3e"></span>
+              Palier B
+              <span class="bal-polar-sensor-lbl">◀ sonde</span>
+            </div>
+            <canvas id="bal-canvas-b"></canvas>
+          </div>
+        </div>
+
+        <!-- Légende condition -->
+        <div class="bal-legend" style="padding:0 8px; flex-shrink:0;">
+          <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#1a6fc4"></span>Cond.1</span>
+          <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#2a8a3e"></span>Cond.2 (masse A)</span>
+          <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#c45a00"></span>Cond.3 (masse B)</span>
+        </div>
+
+        <!-- Status et contrôles 2P -->
+        <div class="bal-ctrl-area" style="padding:0 8px; overflow:hidden; flex:1; min-height:0;">
+          <div id="bal-status-2p" class="bal-status" style="margin-top:4px;">Prêt</div>
+          <div id="bal-params-2p" class="bal-params" style="display:none;">
+            <div id="bal-params-title" class="bal-params-title">Masse essai</div>
+            <div class="bal-param-row">
+              <label class="bal-param-label" for="bal-trial-mass">Masse</label>
+              <input id="bal-trial-mass" type="number" value="100" min="0.1" step="0.1" class="bal-input">
+              <span class="bal-param-unit">g</span>
+            </div>
+            <div class="bal-param-row">
+              <label class="bal-param-label" for="bal-trial-angle">Angle</label>
+              <input id="bal-trial-angle" type="number" value="0" min="0" max="360" step="1" class="bal-input">
+              <span class="bal-param-unit">°</span>
+            </div>
+          </div>
+          <div id="bal-result-2p"></div>
+          <div id="bal-log-2p" class="bal-log"></div>
+        </div>
+      </div>
+
+      <!-- Barre de commandes -->
+      <div class="bal-cmdbar">
+        <button id="btn-bal-run" class="bal-btn bal-btn-run" disabled>Run</button>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- HARMONIQUE -->
+  <div id="page-harmonic" style="display:none;">
+
+    <!-- Sélecteur de visage -->
+    <div class="harm-view-bar">
+      <button id="btn-harm-view-classic" class="harm-view-btn harm-view-active" onclick="HarmonicModule.switchView('classic')">Harmonique</button>
+      <button id="btn-harm-view-phase"   class="harm-view-btn" onclick="HarmonicModule.switchView('phase')">Suivi Phase</button>
+      <div class="harm-rpm-indicator">
+        <span id="harm-rpm-dot"></span>
+        <span id="harm-rpm-val">0</span>
+        <span>RPM</span>
+      </div>
+    </div>
+
+    <!-- Visage 1 : Harmonique classique -->
+    <div id="harm-classic-view">
+      <div class="harm-polar-section">
+        <div class="harm-header">
+          <span class="harm-title">Diagramme polaire 1X</span>
+        </div>
+        <div id="harm-polar-wrap">
+          <canvas id="harm-polar-canvas"></canvas>
+        </div>
+        <div id="harm-info">—</div>
+      </div>
+      <div class="harm-speed-section">
+        <div class="harm-header">
+          <span class="harm-title">Amplitudes harmoniques 1X – 4X</span>
+        </div>
+        <div id="harm-speed-wrap">
+          <canvas id="harm-speed-canvas"></canvas>
+        </div>
+      </div>
+    </div>
+
+    <!-- Visage 2 : Suivi de phase -->
+    <div id="harm-phase-view" style="display:none;">
+      <div class="pt-circle-section">
+        <div class="harm-header">
+          <span class="harm-title">Suivi de phase 1X</span>
+          <span id="pt-sat-badge" class="pt-sat-badge" style="display:none;"></span>
+        </div>
+        <div id="pt-canvas-wrap">
+          <canvas id="pt-canvas"></canvas>
+        </div>
+        <div id="pt-amp-line" class="pt-amp-line">—</div>
+      </div>
+      <div class="pt-hist-section">
+        <div id="pt-history" class="pt-history">—</div>
+      </div>
+    </div>
+
+    <div class="ctrl-bar">
+      <button id="btn-harm-toggle" class="btn-primary">&#9654; Start</button>
+    </div>
+  </div>
+
+</div><!-- #main -->
+
+<script src="terminal.js?v=16"></script>
+<script src="fft.js?v=17"></script>
+<script src="demod.js?v=16"></script>
+<script src="analyse.js?v=17"></script>
+<script src="calc.js?v=16"></script>
+<script src="balance.js?v=19"></script>
+<script src="harmonic.js?v=16"></script>
+<script src="menu.js?v=17"></script>
+<script src="app.js?v=23"></script>
+</body>
+</html>
