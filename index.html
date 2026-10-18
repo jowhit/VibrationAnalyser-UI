@@ -20,8 +20,8 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=22">
-<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css?v=24">
+<link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   function showPwaInstallUi() {
     var dismissed = false;
@@ -34,7 +34,7 @@
     if (hint) {
       hint.textContent = window._pwaPrompt
         ? 'Appuie sur Installer, ou menu Chrome ⋮ → Installer l\'application.'
-        : 'Pas de bouton auto : menu Chrome ⋮ → Installer l\'application (ou Ajouter à l\'écran d\'accueil).';
+        : 'Si le menu n\'offre pas Installer : efface les donnees du site, recharge, reessaie. (v24)';
     }
   }
 
