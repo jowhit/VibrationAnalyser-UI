@@ -9,41 +9,65 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Analyseur">
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=20">
-<link rel="manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css?v=21">
+<link rel="manifest" href="./manifest.json">
 <script>
+  (function () {
+    // GitHub Pages: sans "/" final, les chemins relatifs cassent le manifest / SW (surtout Android).
+    var path = location.pathname;
+    if (path && path.charAt(path.length - 1) !== '/' && !/\.html?$/i.test(path)) {
+      location.replace(path + '/' + location.search + location.hash);
+      return;
+    }
+  })();
+
+  function showPwaInstallUi() {
+    var dismissed = false;
+    try { dismissed = localStorage.getItem('pwaInstallDismissed') === '1'; } catch (e) {}
+    var box = document.getElementById('pwa-install');
+    var btn = document.getElementById('pwa-install-btn');
+    if (box && !dismissed) box.style.display = 'block';
+    if (btn && window._pwaPrompt) btn.style.display = 'inline-block';
+  }
+
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('service-worker.js')
+    navigator.serviceWorker.register('./service-worker.js', { scope: './' })
       .then(function (reg) { if (reg && reg.update) reg.update(); })
       .catch(function (err) {
         console.warn('Service worker refusé:', err);
       });
   }
+
   window.addEventListener('beforeinstallprompt', function (e) {
     e.preventDefault();
     window._pwaPrompt = e;
-    var btn = document.getElementById('pwa-install-btn');
-    if (btn) btn.style.display = 'inline-block';
-    var box = document.getElementById('pwa-install');
-    if (box && localStorage.getItem('pwaInstallDismissed') !== '1') box.style.display = 'block';
+    // L'événement peut arriver avant le DOM (fréquent sur Android) :
+    // on mémorise le prompt et on met l'UI à jour dès que possible.
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', showPwaInstallUi);
+    } else {
+      showPwaInstallUi();
+    }
   });
+
   function dismissPwa() {
     try { localStorage.setItem('pwaInstallDismissed', '1'); } catch (e) {}
     var box = document.getElementById('pwa-install');
     if (box) box.style.display = 'none';
   }
+
   function installPwa() {
     var p = window._pwaPrompt;
     if (!p) return;
     p.prompt();
-    p.userChoice.finally(function () { window._pwaPrompt = null; dismissPwa(); });
+    p.userChoice.finally(function () {
+      window._pwaPrompt = null;
+      dismissPwa();
+    });
   }
+
   document.addEventListener('DOMContentLoaded', function () {
-    try {
-      if (localStorage.getItem('pwaInstallDismissed') === '1') return;
-    } catch (e) { return; }
-    var box = document.getElementById('pwa-install');
-    if (box) box.style.display = 'block';
+    showPwaInstallUi();
   });
 </script>
 </head>
@@ -51,8 +75,12 @@
 
 <div id="pwa-install" style="display:none;background:#10243d;color:#d6e8ff;padding:10px 12px;font-size:14px;border-bottom:1px solid #2a4a6a">
   <b>Installer l'application</b>
-  <p style="margin:8px 0">Ouvre cette page en HTTPS (GitHub Pages), puis menu Chrome → Installer l'application. L'interface reste disponible sans ESP32.</p>
-  <div style="display:flex;gap:8px">
+  <p style="margin:8px 0">
+    Ouvre dans <b>Chrome</b> (pas l'app GitHub) :<br>
+    <code style="font-size:12px">https://jowhit.github.io/VibrationAnalyser-UI/</code><br>
+    Android : menu <b>⋮</b> → <b>Installer l'application</b> ou <b>Ajouter à l'écran d'accueil</b>.
+  </p>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
     <button type="button" id="pwa-install-btn" onclick="installPwa()" style="display:none;padding:8px 12px">Installer</button>
     <button type="button" onclick="dismissPwa()" style="padding:8px 12px">Compris</button>
   </div>

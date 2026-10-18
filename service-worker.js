@@ -1,22 +1,23 @@
 // Shell PWA — chemins relatifs au dossier du service worker
 // (fonctionne à la racine ESP32 et sous /VibrationAnalyser-UI/ sur GitHub Pages).
 
-const CACHE_NAME = 'vibanalyser-v17';
+const CACHE_NAME = 'vibanalyser-v21';
 const FILES = [
-  'index.html',
-  'app.js',
-  'analyse.js',
-  'balance.js',
-  'fft.js',
-  'harmonic.js',
-  'demod.js',
-  'calc.js',
-  'menu.js',
-  'terminal.js',
-  'style.css',
-  'manifest.json',
-  'icon-192.png',
-  'icon-512.png'
+  './',
+  './index.html',
+  './app.js',
+  './analyse.js',
+  './balance.js',
+  './fft.js',
+  './harmonic.js',
+  './demod.js',
+  './calc.js',
+  './menu.js',
+  './terminal.js',
+  './style.css',
+  './manifest.json',
+  './icon-192.png',
+  './icon-512.png'
 ];
 
 function _url(name) {
@@ -54,7 +55,7 @@ self.addEventListener('fetch', function (event) {
   if (url.origin !== self.location.origin) return;
 
   var isNav = event.request.mode === 'navigate';
-  var indexUrl = _url('index.html');
+  var indexUrl = _url('./index.html');
 
   event.respondWith(
     caches.open(CACHE_NAME).then(function (cache) {
