@@ -20,7 +20,7 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=24">
+<link rel="stylesheet" href="style.css?v=25">
 <link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   function showPwaInstallUi() {
@@ -29,12 +29,80 @@
     var box = document.getElementById('pwa-install');
     var btn = document.getElementById('pwa-install-btn');
     var hint = document.getElementById('pwa-install-hint');
-    if (box && !dismissed) box.style.display = 'block';
+    // Toujours visible tant qu'on diagnostique l'install (ignore dismiss).
+    if (box) box.style.display = 'block';
     if (btn) btn.style.display = window._pwaPrompt ? 'inline-block' : 'none';
     if (hint) {
       hint.textContent = window._pwaPrompt
-        ? 'Appuie sur Installer, ou menu Chrome ⋮ → Installer l\'application.'
-        : 'Si le menu n\'offre pas Installer : efface les donnees du site, recharge, reessaie. (v24)';
+        ? 'Appuie sur Installer, ou menu Chrome ⋮ → Installer l\'application. (v25)'
+        : 'Pas de prompt auto. Menu Chrome ⋮ : cherche Installer / Ajouter a l\'ecran d\'accueil. Puis appuie Rapport PWA. (v25)';
+    }
+  }
+
+  function runPwaReport() {
+    var pre = document.getElementById('pwa-report');
+    if (!pre) return;
+    pre.style.display = 'block';
+    pre.textContent = 'Analyse en cours...';
+    (async function () {
+      var lines = [];
+      function add(k, v) { lines.push(k + ': ' + v); }
+      add('url', location.href);
+      add('ua', navigator.userAgent);
+      add('standalone', String(window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true));
+      add('beforeinstallprompt', window._pwaPrompt ? 'OUI' : 'NON');
+      add('sw API', 'serviceWorker' in navigator ? 'oui' : 'NON');
+      add('controller', navigator.serviceWorker && navigator.serviceWorker.controller ? 'oui' : 'NON');
+      try {
+        var reg = await navigator.serviceWorker.getRegistration();
+        if (!reg) add('SW reg', 'AUCUNE');
+        else {
+          add('SW scope', reg.scope);
+          add('SW state', reg.active ? reg.active.state : (reg.installing ? 'installing' : (reg.waiting ? 'waiting' : '?')));
+          add('SW script', reg.active ? reg.active.scriptURL : '-');
+        }
+      } catch (e) { add('SW err', String(e)); }
+      try {
+        var link = document.querySelector('link[rel=manifest]');
+        add('manifest href', link ? link.href : 'manquant');
+        var r = await fetch(link.href, { cache: 'no-store' });
+        add('manifest HTTP', r.status + ' ' + (r.headers.get('content-type') || ''));
+        var man = await r.json();
+        add('start_url', man.start_url);
+        add('scope', man.scope);
+        add('display', man.display);
+        add('id field', man.id === undefined ? '(absent OK)' : JSON.stringify(man.id));
+        var base = link.href;
+        for (var i = 0; i < (man.icons || []).length; i++) {
+          var icon = man.icons[i];
+          var iu = new URL(icon.src, base);
+          var ir = await fetch(iu.href, { cache: 'no-store' });
+          var buf = await ir.arrayBuffer();
+          var b = new Uint8Array(buf.slice(0, 8));
+          var magic = Array.prototype.map.call(b, function (x) {
+            return ('0' + x.toString(16)).slice(-2);
+          }).join(' ');
+          var isPng = magic === '89 50 4e 47 0d 0a 1a 0a';
+          add('icon ' + icon.sizes, ir.status + ' ' + (ir.headers.get('content-type') || '') + ' png=' + (isPng ? 'OUI' : 'NON') + ' magic=' + magic);
+        }
+      } catch (e) { add('manifest err', String(e)); }
+      add('---', '---');
+      add('Chrome rapport', 'Tape dans la barre d\'adresse : chrome://web-app-internals');
+      add('Puis', 'Section Manifest / Installability — copie le texte ou photo');
+      pre.textContent = lines.join('\n');
+    })().catch(function (e) {
+      pre.textContent = 'Erreur rapport: ' + e;
+    });
+  }
+
+  function copyPwaReport() {
+    var pre = document.getElementById('pwa-report');
+    if (!pre || !pre.textContent) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(pre.textContent).then(function () {
+        var b = document.getElementById('pwa-report-copy');
+        if (b) { b.textContent = 'Copie !'; setTimeout(function () { b.textContent = 'Copier rapport'; }, 1500); }
+      }).catch(function () {});
     }
   }
 
@@ -106,8 +174,16 @@
   <div style="display:flex;gap:8px;flex-wrap:wrap">
     <button type="button" id="pwa-install-btn" onclick="installPwa()" style="display:none;padding:8px 12px">Installer</button>
     <button type="button" id="pwa-copy-btn" onclick="copyPwaUrl()" style="padding:8px 12px">Copier le lien</button>
-    <button type="button" onclick="dismissPwa()" style="padding:8px 12px">Compris</button>
+    <button type="button" onclick="runPwaReport()" style="padding:8px 12px">Rapport PWA</button>
+    <button type="button" id="pwa-report-copy" onclick="copyPwaReport()" style="padding:8px 12px">Copier rapport</button>
+    <button type="button" onclick="dismissPwa()" style="padding:8px 12px">Masquer</button>
   </div>
+  <pre id="pwa-report" style="display:none;margin:10px 0 0;padding:8px;background:#0a1524;color:#9ecbff;font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto"></pre>
+  <p style="margin:8px 0 0;font-size:12px;opacity:.9">
+    Rapport Chrome (le plus utile) : barre d'adresse → tape
+    <code>chrome://web-app-internals</code> → cherche ce site →
+    <b>Installability</b> / erreurs → envoie-moi une capture.
+  </p>
 </div>
 
 <div id="ip-banner" style="display:none;background:#3d2a00;color:#ffd080;padding:10px 12px;font-size:14px;border-bottom:1px solid #665500">

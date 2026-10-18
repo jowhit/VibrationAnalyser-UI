@@ -1,7 +1,7 @@
 // Shell PWA — chemins relatifs au dossier du service worker
 // (fonctionne a la racine ESP32 et sous /VibrationAnalyser-UI/ sur GitHub Pages).
 
-const CACHE_NAME = 'vibanalyser-v24';
+const CACHE_NAME = 'vibanalyser-v25';
 const FILES = [
   './index.html',
   './app.js',
