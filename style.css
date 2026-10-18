@@ -13,10 +13,11 @@ body { display: flex; flex-direction: column; }
   display: flex; align-items: center; gap: 8px;
   padding: 5px 10px; background: #1a1a2e; flex-shrink: 0;
 }
-#dot { width: 9px; height: 9px; border-radius: 50%; background: #555; flex-shrink: 0; }
-#dot.ok  { background: #00e87a; box-shadow: 0 0 5px #00e87a; }
-#dot.err { background: #ff4444; }
-#ip-label { color: #aaa; font-size: 11px; flex: 1; }
+#dot, #dot-b { width: 9px; height: 9px; border-radius: 50%; background: #555; flex-shrink: 0; }
+#dot.ok, #dot-b.ok  { background: #00e87a; box-shadow: 0 0 5px #00e87a; }
+#dot.err, #dot-b.err { background: #ff4444; }
+#dot-b { outline: 1px solid #666; }
+#ip-label { color: #aaa; font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #topbar button {
   background: #2a2a4a; color: #aaa; border: 1px solid #444;
   border-radius: 3px; padding: 3px 8px; font-size: 11px; cursor: pointer;
@@ -696,6 +697,24 @@ body { display: flex; flex-direction: column; }
   background: #0055aa;
   color: #fff;
   border-color: #0066cc;
+}
+
+/* Visibilité traces A / B */
+.ham-vis-btn.active#btn-an-vis-a {
+  background: #0033cc;
+  color: #fff;
+  border-color: #0022aa;
+}
+.ham-vis-btn.active#btn-an-vis-b {
+  background: #e67e22;
+  color: #fff;
+  border-color: #c96a12;
+}
+.ham-vis-btn.off {
+  background: #2a2a4a !important;
+  color: #666 !important;
+  border-color: #444 !important;
+  text-decoration: line-through;
 }
 
 /* Champs bande manuelle en grid 2 colonnes */

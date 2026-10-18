@@ -167,11 +167,21 @@ const MenuModule = (() => {
           _path = []; _render(L.ROOT);
           if (_navGoto) {
             _navGoto('fft', 'WS_GOTO=ANAL_LIVE', {
-              onAck: () => _send('LIVE_START\n'),
+              onAck: () => {
+                if (typeof _fftStartDualLive === 'function') _fftStartDualLive();
+                else _send('LIVE_START\n');
+                fftRunning = true;
+                const b = document.getElementById('btn-fft-start');
+                if (b) { b.textContent = '■ Stop'; b.classList.add('running'); }
+              },
             });
           } else {
             _send('WS_GOTO=ANAL_LIVE\n');
-            setTimeout(() => _send('LIVE_START\n'), 200);
+            setTimeout(() => {
+              if (typeof _fftStartDualLive === 'function') _fftStartDualLive();
+              else _send('LIVE_START\n');
+              fftRunning = true;
+            }, 200);
             setTimeout(() => _switchTab('fft'), 200);
           }
 
@@ -202,10 +212,14 @@ const MenuModule = (() => {
         if (_navGoto) {
           _navGoto('analyse', 'WS_GOTO=ANAL_TEMP', {
             onAck: () => {
-              // 2. Après NAV_ACK, envoyer les paramètres pour démarrer l'acquisition
-              const startCmd = 'ANAL_START G=' + g + ' FS=' + fs;
-              _send(startCmd + '\n');
-              if (typeof acqStartTemporal === 'function') {
+              if (typeof startAnalTemporal === 'function') {
+                startAnalTemporal(g, fs);
+              } else {
+                _send('ANAL_START G=' + g + ' FS=' + fs + '\n');
+              }
+              // DOUBLE : compteur démarre sur ACQ_PROGRESS (après FIRE), pas pendant ARM
+              const dual = (typeof isDualMode === 'function' && isDualMode());
+              if (!dual && typeof acqStartTemporal === 'function') {
                 acqStartTemporal({ g: g, fs: fs, autoRange: (g === ' ' || g === '') });
               }
               setTimeout(() => _switchTab('analyse'), 300);
@@ -219,7 +233,8 @@ const MenuModule = (() => {
           // Fallback si pas de navGoto
           _send('WS_GOTO=ANAL_TEMP\n');
           setTimeout(() => {
-            _send('ANAL_START G=' + g + ' FS=' + fs + '\n');
+            if (typeof startAnalTemporal === 'function') startAnalTemporal(g, fs);
+            else _send('ANAL_START G=' + g + ' FS=' + fs + '\n');
             if (typeof acqStartTemporal === 'function') {
               acqStartTemporal({ g: g, fs: fs, autoRange: (g === ' ' || g === '') });
             }
@@ -239,11 +254,24 @@ const MenuModule = (() => {
         const cmd = 'WS_GOTO=ANAL_BUMP G=' + g + ' FS=' + fs;
         if (_navGoto) {
           _navGoto('analyse', cmd, {
-            onAck: () => setTimeout(() => _switchTab('analyse'), 150),
+            onAck: () => {
+              // DOUBLE : même config sur B (NAV_ACK déjà reçu de A)
+              if (typeof isDualMode === 'function' && isDualMode() &&
+                  typeof wsSendB === 'function') {
+                if (typeof termAddLine === 'function') {
+                  termAddLine('[DOUBLE] Bump A+B  G=' + g + ' FS=' + fs, 'sys');
+                }
+                wsSendB(cmd);
+              }
+              setTimeout(() => _switchTab('analyse'), 150);
+            },
             onTimeout: () => _switchTab('analyse'),
           });
         } else {
           _send(cmd + '\n');
+          if (typeof isDualMode === 'function' && isDualMode() && typeof wsSendB === 'function') {
+            wsSendB(cmd);
+          }
           setTimeout(() => _switchTab('analyse'), 250);
         }
         _path = [];

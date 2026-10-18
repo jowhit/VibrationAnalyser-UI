@@ -1,11 +1,19 @@
 // fft.js — Live FFT : raies fines, pan 1 doigt, zoom X pinch
+// DOUBLE : spectre A (bleu) + B (orange) superposés
 let fftMag = null;
+let fftMagB = null;
+let fftMagVel = null;
+let fftMagVelB = null;
 let fftP   = { g:2, fs:1000, n:4096 };
 let fftZMin = 60, fftZMax = 3000;   // min = 60 RPM (filtre passe-haut)
 let fftAutoScale = true;
 let fftRunning   = false;
 let fftCursorBin = -1;
 const FPAD = { l:52, r:12, t:14, b:30 };
+const FFT_COLOR_A = '#0033cc';
+const FFT_COLOR_B = '#e67e22';
+const FFT_FILL_A  = 'rgba(0,51,204,0.07)';
+const FFT_FILL_B  = 'rgba(230,126,34,0.07)';
 
 // ── Filtre passe-haut permanent ───────────────────────────────
 // Tous les spectres (g et mm/s) sont filtrés sous HP_RPM_MIN
@@ -13,27 +21,62 @@ const HP_RPM_MIN = 60;   // RPM
 const HP_HZ_MIN  = HP_RPM_MIN / 60.0;  // Hz = 1.0 Hz
 
 // ── Unité FFT ─────────────────────────────────────────────────
-let fftUnit    = 'g';       // 'g' | 'mm/s'
-let fftMagVel  = null;      // spectre vitesse mm/s
+let fftUnit = 'g';       // 'g' | 'mm/s'
+let _fftLastSigA = null; // pour status RMS
 
 function fftMaxRpmG(fs)   { return (fs / 2) * 60; }
 function fftMaxRpmVel(fs) { return Math.min((fs / 2) * 60, 60000); }
 
-// ── Réception bloc ───────────────────────────────────────────
-function fftReceiveBloc(g, fs, n, raw) {
-  fftP = { g, fs, n };
+function _fftFillSig(g, n, raw) {
   const scale = g / 32768.0;
   const sig = new Float64Array(n);
-  for (let i = 0; i < n; i++) sig[i] = raw[i] * scale;
+  const lim = Math.min(n, raw.length);
+  for (let i = 0; i < lim; i++) sig[i] = raw[i] * scale;
+  return sig;
+}
 
-  fftMag    = computeFFT(sig, n, fs);        // MODIF: passer fs
+function _fftUpdateStatus(sig) {
+  if (!fftMag) return;
+  const fs = fftP.fs, n = fftP.n;
+  const mag = fftUnit === 'g' ? fftMag : (fftMagVel || fftMag);
+  const nFFT = nextPow2(n);
+  const rpmPB = (fs / nFFT) * 60;
+  const minBinHP = Math.max(1, Math.ceil(HP_RPM_MIN / rpmPB));
+  const maxBin = Math.min(mag.length - 1,
+    Math.floor((fftUnit === 'mm/s' ? fftMaxRpmVel(fs) : fftMaxRpmG(fs)) / rpmPB));
+  const pk = fftPeakInfo(mag, fs, n, minBinHP);
+  let statusStr;
+  if (fftUnit === 'mm/s' && sig) {
+    const rmsIso = calcRmsIso(sig, fs, n);
+    statusStr = 'Pic A: ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.amp.toFixed(3) + ' mm/s' +
+                '   |   RMS ISO: ' + rmsIso.toFixed(3) + ' mm/s';
+  } else {
+    const rmsG = fftSpecRMS(fftMag, minBinHP, maxBin);
+    statusStr = 'Pic A: ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.amp.toFixed(4) + ' g' +
+                '   |   RMS: ' + rmsG.toFixed(4) + ' g';
+  }
+  if (fftMagB) statusStr += '   |   DOUBLE';
+  const st = document.getElementById('fft-status');
+  if (st) st.textContent = statusStr;
+  const meta = document.getElementById('fft-meta');
+  if (meta) {
+    meta.textContent = 'Fs=' + fs + 'Hz  N=' + n + '  ±' + fftP.g + 'g' +
+      (fftMagB ? '  DOUBLE' : '');
+  }
+}
+
+// ── Réception bloc A ─────────────────────────────────────────
+function fftReceiveBloc(g, fs, n, raw) {
+  fftP = { g, fs, n };
+  const sig = _fftFillSig(g, n, raw);
+  _fftLastSigA = sig;
+  fftMag    = computeFFT(sig, n, fs);
   fftMagVel = computeVelFFT(sig, fs, n);
 
   if (fftAutoScale) {
     const useMag = fftUnit === 'g' ? fftMag : fftMagVel;
     const maxRpm = fftUnit === 'g' ? fftMaxRpmG(fs) : fftMaxRpmVel(fs);
     const rpmPB  = (fs / nextPow2(n)) * 60;
-    // Chercher le pic à partir de HP_RPM_MIN seulement
     const minBinHP = Math.max(1, Math.ceil(HP_RPM_MIN / rpmPB));
     const maxBin   = Math.min(nextPow2(n) / 2 - 1, Math.floor(maxRpm / rpmPB));
     const pk = fftPeakBin(useMag, maxBin, minBinHP);
@@ -43,29 +86,19 @@ function fftReceiveBloc(g, fs, n, raw) {
 
   showTab('fft');
   fftDraw();
-
-  const mag    = fftUnit === 'g' ? fftMag : fftMagVel;
-  const nFFT   = nextPow2(n);
-  const rpmPB  = (fs / nFFT) * 60;
-  const minBinHP = Math.max(1, Math.ceil(HP_RPM_MIN / rpmPB));
-  const maxBin = Math.min(mag.length - 1,
-    Math.floor((fftUnit === 'mm/s' ? fftMaxRpmVel(fs) : fftMaxRpmG(fs)) / rpmPB));
-  const pk = fftPeakInfo(mag, fs, n, minBinHP);
-
-  let statusStr;
-  if (fftUnit === 'mm/s') {
-    const rmsIso = calcRmsIso(sig, fs, n);
-    statusStr = 'Pic: ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.hz.toFixed(2) + ' Hz  ' +
-                pk.amp.toFixed(3) + ' mm/s   |   RMS ISO: ' + rmsIso.toFixed(3) + ' mm/s';
-  } else {
-    const rmsG = fftSpecRMS(fftMag, minBinHP, maxBin);
-    statusStr = 'Pic: ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.hz.toFixed(2) + ' Hz  ' +
-                pk.amp.toFixed(4) + ' g   |   RMS: ' + rmsG.toFixed(4) + ' g';
-  }
-  document.getElementById('fft-status').textContent = statusStr;
-  document.getElementById('fft-meta').textContent =
-    'Fs=' + fs + 'Hz  N=' + n + '  ±' + g + 'g';
+  _fftUpdateStatus(sig);
 }
+
+/** Réception ESP B (mode DOUBLE) */
+function fftReceiveBlocB(g, fs, n, raw) {
+  const sig = _fftFillSig(g, n, raw);
+  fftMagB    = computeFFT(sig, Math.min(n, raw.length), fs || fftP.fs);
+  fftMagVelB = computeVelFFT(sig, fs || fftP.fs, Math.min(n, raw.length));
+  showTab('fft');
+  fftDraw();
+  _fftUpdateStatus(_fftLastSigA);
+}
+window.fftReceiveBlocB = fftReceiveBlocB;
 
 // ── Prochaine puissance de 2 ──────────────────────────────────
 function nextPow2(n) { let p=1; while(p<n) p<<=1; return p; }
@@ -160,7 +193,47 @@ function calcRmsIso(sig_g, fs, n) {
   return Math.sqrt(sumSq / n);
 }
 
-// ── Dessin spectre ───────────────────────────────────────────
+function _fftStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aS, color, fill, maxA) {
+  if (!mag) return;
+  const P = FPAD;
+  ctx.beginPath();
+  let fi = true;
+  const lim = Math.min(maxB, mag.length - 1);
+  for (let i = minB; i <= lim; i++) {
+    const x = P.l + (i * rpmPB - zMin) / span * pW;
+    const y = P.t + pH - mag[i] * aS;
+    if (fi) { ctx.moveTo(x, P.t + pH); ctx.lineTo(x, y); fi = false; }
+    else ctx.lineTo(x, y);
+  }
+  if (!fi) {
+    ctx.lineTo(P.l + (lim * rpmPB - zMin) / span * pW, P.t + pH);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+  }
+  const ppb = pW / (lim - minB + 1);
+  if (ppb >= 1.2) {
+    ctx.lineWidth = Math.min(1.5, ppb * 0.7);
+    ctx.strokeStyle = color;
+    for (let i = minB; i <= lim; i++) {
+      if (mag[i] < maxA * 0.002) continue;
+      const x = P.l + (i * rpmPB - zMin) / span * pW;
+      const y = P.t + pH - mag[i] * aS;
+      ctx.beginPath(); ctx.moveTo(x, P.t + pH); ctx.lineTo(x, y); ctx.stroke();
+    }
+  } else {
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.2;
+    let ff = true;
+    for (let i = minB; i <= lim; i++) {
+      const x = P.l + (i * rpmPB - zMin) / span * pW;
+      const y = P.t + pH - mag[i] * aS;
+      if (ff) { ctx.moveTo(x, y); ff = false; } else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+}
+
+// ── Dessin spectre (A bleu / B orange — g et mm/s) ───────────
 function fftDraw() {
   if (!fftMag) return;
   const canvas = document.getElementById('fft-canvas');
@@ -170,91 +243,68 @@ function fftDraw() {
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
 
-  const isVel     = (fftUnit === 'mm/s');
-  const mag       = isVel ? (fftMagVel || fftMag) : fftMag;
+  const isVel = (fftUnit === 'mm/s');
+  const mag   = isVel ? (fftMagVel || fftMag) : fftMag;
+  const magB  = isVel ? fftMagVelB : fftMagB;
   const fs = fftP.fs, n = fftP.n;
-  const maxRpm    = isVel ? fftMaxRpmVel(fs) : fftMaxRpmG(fs);
-  const yLabel    = isVel ? 'Vitesse (mm/s)' : 'Amplitude (g)';
-  const lineColor = isVel ? '#007744' : '#0033cc';
-  const fillColor = isVel ? 'rgba(0,150,80,0.07)' : 'rgba(0,80,200,0.07)';
-  const decimals  = isVel ? 2 : 3;
+  const maxRpm = isVel ? fftMaxRpmVel(fs) : fftMaxRpmG(fs);
+  const yLabel = isVel ? 'Vitesse (mm/s)' : 'Amplitude (g)';
+  const decimals = isVel ? 2 : 3;
 
-  // Toujours commencer au minimum HP_RPM_MIN
   const zMin  = Math.max(fftZMin, HP_RPM_MIN);
   const zMax  = Math.min(fftZMax, maxRpm);
   const _nFFT = (fftMag ? fftMag.length * 2 : nextPow2(n));
   const P = FPAD, rpmPB = (fs / _nFFT) * 60;
   const minB = Math.max(1, Math.ceil(zMin / rpmPB));
-  const maxB = Math.min(_nFFT/2-1, Math.ceil(zMax / rpmPB));
-  const pW = W-P.l-P.r, pH = H-P.t-P.b, span = zMax - zMin;
+  const maxB = Math.min(_nFFT / 2 - 1, Math.ceil(zMax / rpmPB));
+  const pW = W - P.l - P.r, pH = H - P.t - P.b, span = zMax - zMin;
 
-  ctx.fillStyle = '#fff'; ctx.fillRect(0,0,W,H);
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
   ctx.strokeStyle = '#555'; ctx.lineWidth = 1;
   ctx.strokeRect(P.l, P.t, pW, pH);
 
   let maxA = 0;
   for (let i = minB; i <= maxB; i++) if (mag[i] > maxA) maxA = mag[i];
+  if (magB) {
+    const lim = Math.min(maxB, magB.length - 1);
+    for (let i = minB; i <= lim; i++) if (magB[i] > maxA) maxA = magB[i];
+  }
   if (maxA === 0) maxA = 1;
   const aS = pH / (maxA * 1.1);
 
   for (let g = 0; g <= 5; g++) {
-    const av = maxA*g/5, y = P.t+pH-av*aS;
+    const av = maxA * g / 5, y = P.t + pH - av * aS;
     if (g > 0) {
-      ctx.strokeStyle='#eee'; ctx.lineWidth=0.5;
-      ctx.beginPath(); ctx.moveTo(P.l,y); ctx.lineTo(P.l+pW,y); ctx.stroke();
+      ctx.strokeStyle = '#eee'; ctx.lineWidth = 0.5;
+      ctx.beginPath(); ctx.moveTo(P.l, y); ctx.lineTo(P.l + pW, y); ctx.stroke();
     }
-    ctx.fillStyle='#333'; ctx.font='9px Arial'; ctx.textAlign='right';
-    ctx.fillText(av.toFixed(decimals), P.l-4, y+3);
+    ctx.fillStyle = '#333'; ctx.font = '9px Arial'; ctx.textAlign = 'right';
+    ctx.fillText(av.toFixed(decimals), P.l - 4, y + 3);
   }
-  ctx.save(); ctx.translate(11,P.t+pH/2); ctx.rotate(-Math.PI/2);
-  ctx.textAlign='center'; ctx.font='10px Arial'; ctx.fillStyle='#333';
+  ctx.save(); ctx.translate(11, P.t + pH / 2); ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center'; ctx.font = '10px Arial'; ctx.fillStyle = '#333';
   ctx.fillText(yLabel, 0, 0); ctx.restore();
 
-  const xt = Math.min(8, Math.floor(pW/55));
+  const xt = Math.min(8, Math.floor(pW / 55));
   for (let t = 0; t <= xt; t++) {
-    const rpm = zMin+span*t/xt, x = P.l+(rpm-zMin)/span*pW;
+    const rpm = zMin + span * t / xt, x = P.l + (rpm - zMin) / span * pW;
     if (t > 0 && t < xt) {
-      ctx.strokeStyle='#eee'; ctx.lineWidth=0.5;
-      ctx.beginPath(); ctx.moveTo(x,P.t); ctx.lineTo(x,P.t+pH); ctx.stroke();
+      ctx.strokeStyle = '#eee'; ctx.lineWidth = 0.5;
+      ctx.beginPath(); ctx.moveTo(x, P.t); ctx.lineTo(x, P.t + pH); ctx.stroke();
     }
-    ctx.strokeStyle='#888'; ctx.lineWidth=1;
-    ctx.beginPath(); ctx.moveTo(x,P.t+pH); ctx.lineTo(x,P.t+pH+4); ctx.stroke();
-    ctx.fillStyle='#333'; ctx.font='9px Arial'; ctx.textAlign='center';
-    ctx.fillText(rpm>=1000?(rpm/1000).toFixed(1)+'k':rpm.toFixed(0), x, H-2);
+    ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, P.t + pH); ctx.lineTo(x, P.t + pH + 4); ctx.stroke();
+    ctx.fillStyle = '#333'; ctx.font = '9px Arial'; ctx.textAlign = 'center';
+    ctx.fillText(rpm >= 1000 ? (rpm / 1000).toFixed(1) + 'k' : rpm.toFixed(0), x, H - 2);
   }
-  ctx.fillStyle='#555'; ctx.font='10px Arial'; ctx.textAlign='center';
-  ctx.fillText('Frequence (RPM)', P.l+pW/2, H);
+  ctx.fillStyle = '#555'; ctx.font = '10px Arial'; ctx.textAlign = 'center';
+  ctx.fillText('Frequence (RPM)', P.l + pW / 2, H);
 
-  ctx.save(); ctx.beginPath(); ctx.rect(P.l,P.t,pW,pH); ctx.clip();
-
-  ctx.beginPath(); let fi = true;
-  for (let i = minB; i <= maxB; i++) {
-    const x = P.l+(i*rpmPB-zMin)/span*pW, y = P.t+pH-mag[i]*aS;
-    if (fi) { ctx.moveTo(x,P.t+pH); ctx.lineTo(x,y); fi=false; } else ctx.lineTo(x,y);
+  ctx.save(); ctx.beginPath(); ctx.rect(P.l, P.t, pW, pH); ctx.clip();
+  _fftStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aS, FFT_COLOR_A, FFT_FILL_A, maxA);
+  if (magB) {
+    _fftStrokeMag(ctx, magB, minB, maxB, rpmPB, zMin, span, pW, pH, aS, FFT_COLOR_B, FFT_FILL_B, maxA);
   }
-  if (!fi) {
-    ctx.lineTo(P.l+(maxB*rpmPB-zMin)/span*pW, P.t+pH);
-    ctx.closePath(); ctx.fillStyle=fillColor; ctx.fill();
-  }
-
-  const ppb = pW/(maxB-minB+1);
-  if (ppb >= 1.2) {
-    ctx.lineWidth = Math.min(1.5, ppb*0.7);
-    for (let i = minB; i <= maxB; i++) {
-      if (mag[i] < maxA*0.002) continue;
-      const x = P.l+(i*rpmPB-zMin)/span*pW, y = P.t+pH-mag[i]*aS;
-      ctx.strokeStyle=lineColor;
-      ctx.beginPath(); ctx.moveTo(x,P.t+pH); ctx.lineTo(x,y); ctx.stroke();
-    }
-  } else {
-    ctx.beginPath(); ctx.strokeStyle=lineColor; ctx.lineWidth=1.2; let ff=true;
-    for (let i = minB; i <= maxB; i++) {
-      const x = P.l+(i*rpmPB-zMin)/span*pW, y = P.t+pH-mag[i]*aS;
-      if (ff) { ctx.moveTo(x,y); ff=false; } else ctx.lineTo(x,y);
-    }
-    ctx.stroke();
-  }
-
   ctx.restore();
 
   if (fftCursorBin >= minB && fftCursorBin <= maxB) {
@@ -264,13 +314,17 @@ function fftDraw() {
 
   const pkB = fftPeakBin(mag, maxB, minB);
   if (pkB >= minB) {
-    const xP = P.l+(pkB*rpmPB-zMin)/span*pW;
-    ctx.strokeStyle='#cc6600'; ctx.lineWidth=1; ctx.setLineDash([5,3]);
-    ctx.beginPath(); ctx.moveTo(xP,P.t); ctx.lineTo(xP,P.t+pH); ctx.stroke();
+    const xP = P.l + (pkB * rpmPB - zMin) / span * pW;
+    ctx.strokeStyle = '#666'; ctx.lineWidth = 1; ctx.setLineDash([5, 3]);
+    ctx.beginPath(); ctx.moveTo(xP, P.t); ctx.lineTo(xP, P.t + pH); ctx.stroke();
     ctx.setLineDash([]);
-    ctx.fillStyle='#cc6600'; ctx.font='bold 10px Arial'; ctx.textAlign='left';
-    ctx.fillText((pkB*rpmPB).toFixed(0)+' RPM', Math.min(xP+3,W-70), P.t+12);
+    ctx.fillStyle = '#666'; ctx.font = 'bold 10px Arial'; ctx.textAlign = 'left';
+    ctx.fillText((pkB * rpmPB).toFixed(0) + ' RPM', Math.min(xP + 3, W - 70), P.t + 12);
   }
+
+  ctx.font = 'bold 10px Arial'; ctx.textAlign = 'left';
+  ctx.fillStyle = FFT_COLOR_A; ctx.fillText('A', P.l + 6, P.t + 12);
+  if (magB) { ctx.fillStyle = FFT_COLOR_B; ctx.fillText('B', P.l + 28, P.t + 12); }
 }
 
 // ── Touch FFT ────────────────────────────────────────────────
@@ -514,11 +568,25 @@ function fftSpecRMS(mag, minBin, maxBin) {
 }
 
 // ── Contrôles boutons ─────────────────────────────────────────
+function _fftStartDualLive() {
+  fftMagB = null; fftMagVelB = null;
+  wsSend('LIVE_START\n');
+  const dual = (typeof isDualMode === 'function' && isDualMode());
+  if (dual && typeof wsSendB === 'function') {
+    if (typeof termAddLine === 'function') {
+      termAddLine('[DOUBLE] Live FFT A+B', 'sys');
+    }
+    wsSendB('WS_GOTO=ANAL_LIVE');
+    setTimeout(function () { wsSendB('LIVE_START'); }, 350);
+  }
+}
+window._fftStartDualLive = _fftStartDualLive;
+
 function fftToggle() {
   const btn = document.getElementById('btn-fft-start');
   if (!fftRunning) {
     const startLive = () => {
-      wsSend('LIVE_START\n');
+      _fftStartDualLive();
       fftRunning = true;
       btn.textContent = '■ Stop';
       btn.classList.add('running');
@@ -538,7 +606,11 @@ function fftToggle() {
     }
   } else {
     wsSend('r');
+    if (typeof isDualMode === 'function' && isDualMode() && typeof wsSendB === 'function') {
+      wsSendB('r');
+    }
     fftRunning = false;
+    fftMagB = null; fftMagVelB = null;
     btn.textContent = '▶ Live FFT';
     btn.classList.remove('running');
   }

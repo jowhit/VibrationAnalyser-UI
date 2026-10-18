@@ -154,14 +154,57 @@ async function discoverEspHost() {
 
 let ESP32_HOST = resolveEspHost();
 let ESP32_IP = resolveEspIp() || '';
+// ESP B (optionnel) — même firmware, 2e boîtier
+let ESP32_HOST_B = (localStorage.getItem('esp32ip_b') || '').trim();
+if (ESP32_HOST_B && !_isEspIpv4(ESP32_HOST_B) && !_isMdnsHost(ESP32_HOST_B)) ESP32_HOST_B = '';
+
 let ws = null;
+let wsB = null;
 let _wsFailCount = 0;
+let _wsFailCountB = 0;
 let _wsConnecting = false;
+let _wsConnectingB = false;
 let _wsReconnectTimer = null;
+let _wsReconnectTimerB = null;
 let _wsBackoffMs = 3000;
+let _wsBackoffMsB = 3000;
 const WS_RECONNECT_BASE_MS = 3000;
 const WS_RECONNECT_MAX_MS = 30000;
 const WS_FAIL_BEFORE_IP_PROMPT = 5;
+
+/** true si A et B ont un WebSocket ouvert. */
+function isDualMode() {
+  return !!(ws && ws.readyState === WebSocket.OPEN &&
+            wsB && wsB.readyState === WebSocket.OPEN);
+}
+window.isDualMode = isDualMode;
+
+function updateConnStatus() {
+  const aOk = !!(ws && ws.readyState === WebSocket.OPEN);
+  const bOk = !!(wsB && wsB.readyState === WebSocket.OPEN);
+  const dotA = document.getElementById('dot');
+  const dotB = document.getElementById('dot-b');
+  const lbl = document.getElementById('ip-label');
+  if (dotA) dotA.className = aOk ? 'ok' : (ESP32_HOST ? 'err' : '');
+  if (dotB) {
+    if (!ESP32_HOST_B) {
+      dotB.className = '';
+      dotB.style.opacity = '0.35';
+    } else {
+      dotB.style.opacity = '1';
+      dotB.className = bOk ? 'ok' : 'err';
+    }
+  }
+  if (!lbl) return;
+  const aTxt = aOk ? ('A ' + (ESP32_HOST || '?')) : (ESP32_HOST ? ('A …' + ESP32_HOST) : 'A —');
+  const bTxt = ESP32_HOST_B
+    ? (bOk ? ('B ' + ESP32_HOST_B) : ('B …' + ESP32_HOST_B))
+    : 'B —';
+  let mode = '';
+  if (aOk && bOk) mode = ' · DOUBLE';
+  else if (aOk) mode = ' · simple';
+  lbl.textContent = aTxt + '  |  ' + bTxt + mode;
+}
 
 function _isSetupPortalPage() {
   const h = (window.location.hostname || '').trim();
@@ -178,6 +221,17 @@ function _scheduleWsReconnect() {
   _wsBackoffMs = Math.min(Math.round(_wsBackoffMs * 1.6), WS_RECONNECT_MAX_MS);
 }
 
+function _scheduleWsReconnectB() {
+  if (_isSetupPortalPage()) return;
+  if (!ESP32_HOST_B) return;
+  if (_wsReconnectTimerB) clearTimeout(_wsReconnectTimerB);
+  _wsReconnectTimerB = setTimeout(() => {
+    _wsReconnectTimerB = null;
+    wsConnectB();
+  }, _wsBackoffMsB);
+  _wsBackoffMsB = Math.min(Math.round(_wsBackoffMsB * 1.6), WS_RECONNECT_MAX_MS);
+}
+
 // État réception binaire
 // Modes : 'text' | 'fft_hdr' | 'fft_bin' | 'an_hdr' | 'an_bin'
 //          'bal_hdr' | 'bal_bin' | 'harm_hdr' | 'harm_bin'
@@ -188,29 +242,100 @@ let rxHeaders = {};
 let _eqParsing   = false;
 
 let _heartbeatTimer = null;
+let _heartbeatTimerB = null;
 let _lastAliveMs = 0;
-const WS_HEARTBEAT_MS = 5000;
-const WS_ALIVE_TIMEOUT_MS = 12000;
+let _lastAliveMsB = 0;
+const WS_HEARTBEAT_MS = 4000;
+const WS_ALIVE_TIMEOUT_MS = 10000;
 
 function _markWsAlive() {
   _lastAliveMs = Date.now();
+}
+function _markWsAliveB() {
+  _lastAliveMsB = Date.now();
+}
+
+function _cancelNavPending(silent) {
+  if (_navTimeoutId) { clearTimeout(_navTimeoutId); _navTimeoutId = null; }
+  if (_navPending && !silent) {
+    termAddLine('[A] navigation annulée (ESP déconnecté)', 'sys');
+  }
+  _navPending = false;
+  _navOpts = null;
+}
+
+/** Ferme A tout de suite et met le voyant rouge (TCP peut rester zombie après unplug). */
+function forceCloseA(reason) {
+  _stopHeartbeat();
+  _cancelNavPending(true);
+  rxState = 'text'; rxHeaders = {}; _eqParsing = false;
+  const old = ws;
+  ws = null;
+  updateConnStatus();
+  if (reason) termAddLine('[A] ' + reason, 'sys');
+  try { if (old && old.readyState === WebSocket.OPEN) old.close(); } catch (e) {}
+}
+
+function forceCloseB(reason) {
+  _stopHeartbeatB();
+  rxStateB = 'text'; rxHeadersB = {};
+  const old = wsB;
+  wsB = null;
+  updateConnStatus();
+  if (reason) termAddLine('[B] ' + reason, 'sys');
+  try { if (old && old.readyState === WebSocket.OPEN) old.close(); } catch (e) {}
 }
 
 function _startHeartbeat() {
   _stopHeartbeat();
   _markWsAlive();
   _heartbeatTimer = setInterval(() => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (Date.now() - _lastAliveMs > WS_ALIVE_TIMEOUT_MS) {
-      termAddLine('-- ESP injoignable (timeout) --', 'sys');
-      ws.close();
+    if (!ws) return;
+    if (ws.readyState !== WebSocket.OPEN) {
+      forceCloseA('lien mort (readyState)');
+      if (ESP32_HOST) _scheduleWsReconnect();
       return;
     }
-    ws.send('WS_PING\n');
+    if (Date.now() - _lastAliveMs > WS_ALIVE_TIMEOUT_MS) {
+      forceCloseA('injoignable (timeout heartbeat)');
+      if (ESP32_HOST) _scheduleWsReconnect();
+      return;
+    }
+    try { ws.send('WS_PING\n'); }
+    catch (e) {
+      forceCloseA('envoi ping échoué');
+      if (ESP32_HOST) _scheduleWsReconnect();
+    }
   }, WS_HEARTBEAT_MS);
 }
 function _stopHeartbeat() {
   if (_heartbeatTimer) { clearInterval(_heartbeatTimer); _heartbeatTimer = null; }
+}
+
+function _startHeartbeatB() {
+  _stopHeartbeatB();
+  _markWsAliveB();
+  _heartbeatTimerB = setInterval(() => {
+    if (!wsB) return;
+    if (wsB.readyState !== WebSocket.OPEN) {
+      forceCloseB('lien mort (readyState)');
+      if (ESP32_HOST_B) _scheduleWsReconnectB();
+      return;
+    }
+    if (Date.now() - _lastAliveMsB > WS_ALIVE_TIMEOUT_MS) {
+      forceCloseB('injoignable (timeout heartbeat)');
+      if (ESP32_HOST_B) _scheduleWsReconnectB();
+      return;
+    }
+    try { wsB.send('WS_PING\n'); }
+    catch (e) {
+      forceCloseB('envoi ping échoué');
+      if (ESP32_HOST_B) _scheduleWsReconnectB();
+    }
+  }, WS_HEARTBEAT_MS);
+}
+function _stopHeartbeatB() {
+  if (_heartbeatTimerB) { clearInterval(_heartbeatTimerB); _heartbeatTimerB = null; }
 }
 let _activeTab = localStorage.getItem('lastTab') || 'term';
 
@@ -331,11 +456,12 @@ function _wsConnectTo(host) {
   if (_isEspIpv4(host)) {
     ESP32_IP = host;
     localStorage.setItem('esp32ip', host);
+    localStorage.setItem('esp32ip_a', host);
   }
-  _updateHostLabel();
+  updateConnStatus();
   hideIpBanner();
   const url = 'ws://' + host + ':81';
-  termAddLine('Connexion: ' + url, 'sys');
+  termAddLine('[A] Connexion: ' + url, 'sys');
   ws = new WebSocket(url);
   ws.binaryType = 'arraybuffer';
 
@@ -344,30 +470,44 @@ function _wsConnectTo(host) {
     _wsBackoffMs = WS_RECONNECT_BASE_MS;
     hideIpBanner();
     _markWsAlive();
-    setDot('ok', ESP32_HOST);
-    termAddLine('-- connecte --', 'sys');
+    updateConnStatus();
+    termAddLine('[A] -- connecte --' + (isDualMode() ? ' (mode DOUBLE)' : ' (mode simple)'), 'sys');
     _startHeartbeat();
     if (_activeTab === 'calc' || _activeTab === 'demod') showTab(_activeTab);
     if (typeof BalanceModule !== 'undefined') BalanceModule.init(wsSend);
     setTimeout(() => { if (ws && ws.readyState === WebSocket.OPEN) ws.send('WS_GOTO=SYNC\n'); }, 300);
+    if (ESP32_HOST_B && (!wsB || wsB.readyState !== WebSocket.OPEN)) {
+      setTimeout(wsConnectB, 600);
+    }
   };
 
   ws.onclose = (e) => {
-    setDot('off', 'Deconnecte');
+    // Si forceCloseA a déjà mis ws=null, éviter double message
+    if (ws === null) {
+      _wsFailCount++;
+      if (ESP32_HOST) _scheduleWsReconnect();
+      return;
+    }
     _stopHeartbeat();
+    _cancelNavPending(true);
     rxState = 'text'; rxHeaders = {}; _eqParsing = false;
+    ws = null;
     _wsFailCount++;
+    updateConnStatus();
     if (!ESP32_HOST || _wsFailCount >= WS_FAIL_BEFORE_IP_PROMPT) {
-      termAddLine('-- ESP déconnecté — entre l\'IP si besoin --', 'sys');
+      termAddLine('[A] -- deconnecte — entre l\'IP si besoin --', 'sys');
       showIpReconnectBanner();
       if (window.location.protocol === 'https:') return;
     } else {
-      termAddLine('-- deconnecte code=' + e.code + ' retry ' + Math.round(_wsBackoffMs / 1000) + 's --', 'sys');
+      termAddLine('[A] deconnecte code=' + e.code + ' retry ' + Math.round(_wsBackoffMs / 1000) + 's', 'sys');
     }
     if (ESP32_HOST) _scheduleWsReconnect();
   };
 
-  ws.onerror = () => setDot('err', 'Erreur');
+  ws.onerror = () => {
+    // Ne pas attendre : unplug → souvent error avant close
+    updateConnStatus();
+  };
 
   ws.onmessage = (e) => {
     _markWsAlive();
@@ -375,6 +515,274 @@ function _wsConnectTo(host) {
     else if (e.data instanceof ArrayBuffer) handleBinary(e.data);
   };
 }
+
+function _wsConnectBTo(host) {
+  if (wsB && (wsB.readyState === WebSocket.CONNECTING || wsB.readyState === WebSocket.OPEN)) return;
+  if (!host) return;
+  if (ESP32_HOST && host === ESP32_HOST) {
+    termAddLine('[B] !! même IP que A — choisis une autre adresse', 'sys');
+    return;
+  }
+  ESP32_HOST_B = host;
+  localStorage.setItem('esp32ip_b', host);
+  updateConnStatus();
+  const url = 'ws://' + host + ':81';
+  termAddLine('[B] Connexion: ' + url, 'sys');
+  wsB = new WebSocket(url);
+  wsB.binaryType = 'arraybuffer';
+
+  wsB.onopen = () => {
+    _wsFailCountB = 0;
+    _wsBackoffMsB = WS_RECONNECT_BASE_MS;
+    updateConnStatus();
+    termAddLine('[B] -- connecte --' + (isDualMode() ? ' (mode DOUBLE)' : ''), 'sys');
+    _startHeartbeatB();
+  };
+
+  wsB.onclose = (e) => {
+    if (wsB === null) {
+      _wsFailCountB++;
+      if (ESP32_HOST_B) _scheduleWsReconnectB();
+      return;
+    }
+    _stopHeartbeatB();
+    wsB = null;
+    _wsFailCountB++;
+    updateConnStatus();
+    termAddLine('[B] deconnecte code=' + e.code, 'sys');
+    if (ESP32_HOST_B) _scheduleWsReconnectB();
+  };
+
+  wsB.onerror = () => updateConnStatus();
+
+  wsB.onmessage = (e) => {
+    _markWsAliveB();
+    if (typeof e.data === 'string') handleTextB(e.data);
+    else if (e.data instanceof ArrayBuffer) handleBinaryB(e.data);
+  };
+}
+
+// Réception B (analyse temporelle duale) — état RX séparé
+let rxStateB = 'text';
+let rxHeadersB = {};
+
+function handleTextB(raw) {
+  raw.split('\n').forEach(function (line) {
+    line = (line || '').trim();
+    if (!line) return;
+    if (line === 'WS_PONG' || line === 'PONG') return;
+    if (line === 'NAV_ACK=analyse' || line.startsWith('NAV_ACK=')) return;
+    if (line.startsWith('ANAL_ARM_OK')) {
+      _onAnalArmOk(true);
+      return;
+    }
+    if (line.startsWith('ANAL_CAP_OK')) {
+      _onAnalCapOk(true);
+      return;
+    }
+    if (line.startsWith('ANAL_FIRE_ERR') || line.startsWith('ANAL_ARM_ERR') ||
+        line.startsWith('ANAL_SEND_ERR')) {
+      termAddLine('[B] ' + line, 'sys');
+      return;
+    }
+    if (line.startsWith('ACQ_PROGRESS=')) {
+      // A pilote déjà la barre de progression
+      return;
+    }
+    if (line.startsWith('BUMP_STATUS=')) {
+      if (typeof bumpSetStatus === 'function') {
+        bumpSetStatus('[B] ' + line.slice(12).trim());
+      }
+      return;
+    }
+    if (line.startsWith('BUMP_LIVE=')) {
+      const v = parseInt(line.slice(10), 10);
+      if (typeof bumpReceiveLiveB === 'function') bumpReceiveLiveB(v);
+      return;
+    }
+    if (line.startsWith('BUMP_CFG=')) {
+      // A a déjà appliqué la config (même G/Fs)
+      return;
+    }
+    if (line === 'LIVE_FFT_BLOC') {
+      rxStateB = 'fft_hdr';
+      rxHeadersB = {};
+      return;
+    }
+    if (line === 'BINARY_MODE') {
+      rxStateB = 'an_hdr';
+      rxHeadersB = {};
+      return;
+    }
+    if (line.startsWith('CRC=') && rxStateB !== 'text') {
+      rxHeadersB.crc = parseInt(line.slice(4), 10);
+      return;
+    }
+    if (rxStateB === 'an_hdr' || rxStateB === 'fft_hdr') {
+      if (line.startsWith('G=')) { rxHeadersB.g = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('F=')) { rxHeadersB.fs = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('T=')) { rxHeadersB.t = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('N=')) {
+        rxHeadersB.n = parseInt(line.slice(2), 10);
+        rxStateB = (rxStateB === 'fft_hdr') ? 'fft_bin' : 'an_bin';
+        return;
+      }
+      return;
+    }
+    if (line.startsWith('WIFI_READY=') || line.startsWith('WIFI_IP=')) return;
+    termAddLine('[B] ' + line, 'sys');
+  });
+}
+
+function handleBinaryB(buf) {
+  const st = rxStateB;
+  if (st !== 'an_bin' && st !== 'fft_bin') {
+    rxStateB = 'text';
+    return;
+  }
+  const h = rxHeadersB;
+  rxStateB = 'text';
+  if (!_crcCheck(buf, h.crc)) return;
+  if (st === 'fft_bin') {
+    if (typeof fftReceiveBlocB === 'function') {
+      fftReceiveBlocB(h.g, h.fs, h.n, new Int16Array(buf));
+    }
+    return;
+  }
+  if (typeof analyseReceiveBlocB === 'function') {
+    analyseReceiveBlocB(h.g, h.fs, h.t || (h.n / h.fs), h.n, new Int16Array(buf));
+  }
+  if (typeof _dualOnBinaryB === 'function') _dualOnBinaryB();
+}
+
+function wsSendB(cmd) {
+  if (!wsB || wsB.readyState !== WebSocket.OPEN) return false;
+  const clean = (cmd || '').replace(/\n+$/, '');
+  try {
+    wsB.send(clean + '\n');
+    return true;
+  } catch (e) {
+    forceCloseB('envoi échoué');
+    return false;
+  }
+}
+window.wsSendB = wsSendB;
+
+// DOUBLE sync : ARM → FIRE (capture sync) → SEND A puis SEND B (transfert)
+// phase: 'arm' | 'fire' | 'sendA' | 'sendB' | 'done'
+let _dualSync = null;
+
+function _dualClearTimer() {
+  if (_dualSync && _dualSync.timer) {
+    clearTimeout(_dualSync.timer);
+    _dualSync.timer = null;
+  }
+}
+
+function _dualAbort(msg) {
+  if (!_dualSync) return;
+  _dualClearTimer();
+  termAddLine('[DOUBLE] !! ' + msg, 'sys');
+  if (typeof acqHideProgress === 'function') acqHideProgress();
+  _dualSync = null;
+}
+
+function _dualFireNow() {
+  if (!_dualSync || _dualSync.phase !== 'arm') return;
+  _dualClearTimer();
+  _dualSync.phase = 'fire';
+  _dualSync.capA = false;
+  _dualSync.capB = false;
+  termAddLine('[DOUBLE] FIRE A+B (capture sync)', 'sys');
+  wsSend('ANAL_FIRE');
+  wsSendB('ANAL_FIRE');
+  _dualSync.timer = setTimeout(function () {
+    _dualAbort('timeout capture (pas de CAP_OK) — firmware à jour sur A et B ?');
+  }, 60000);
+}
+
+function _dualSendA() {
+  if (!_dualSync || _dualSync.phase !== 'fire') return;
+  if (!_dualSync.capA || !_dualSync.capB) return;
+  _dualClearTimer();
+  _dualSync.phase = 'sendA';
+  termAddLine('[DOUBLE] SEND A (transfert)', 'sys');
+  if (typeof acqSetTransferPhase === 'function') acqSetTransferPhase();
+  wsSend('ANAL_SEND');
+  _dualSync.timer = setTimeout(function () {
+    _dualAbort('timeout transfert A');
+  }, 45000);
+}
+
+function _dualOnBinaryA() {
+  if (!_dualSync || _dualSync.phase !== 'sendA') return;
+  _dualClearTimer();
+  _dualSync.phase = 'sendB';
+  termAddLine('[DOUBLE] SEND B (transfert)', 'sys');
+  wsSendB('ANAL_SEND');
+  _dualSync.timer = setTimeout(function () {
+    _dualAbort('timeout transfert B');
+  }, 45000);
+}
+
+function _dualOnBinaryB() {
+  if (!_dualSync || _dualSync.phase !== 'sendB') return;
+  _dualClearTimer();
+  _dualSync.phase = 'done';
+  termAddLine('[DOUBLE] OK — A+B reçus', 'sys');
+  _dualSync = null;
+}
+
+function _onAnalArmOk(fromB) {
+  if (!_dualSync || _dualSync.phase !== 'arm') return;
+  if (fromB) _dualSync.armB = true;
+  else _dualSync.armA = true;
+  termAddLine('[' + (fromB ? 'B' : 'A') + '] ARM_OK', 'sys');
+  if (_dualSync.armA && _dualSync.armB) _dualFireNow();
+}
+
+function _onAnalCapOk(fromB) {
+  if (!_dualSync || _dualSync.phase !== 'fire') return;
+  if (fromB) _dualSync.capB = true;
+  else _dualSync.capA = true;
+  termAddLine('[' + (fromB ? 'B' : 'A') + '] CAP_OK', 'sys');
+  _dualSendA();
+}
+
+/** Démarre acquis. temporelle. Simple = ANAL_START. DOUBLE = ARM→FIRE→SEND. */
+function startAnalTemporal(g, fs) {
+  if (typeof analyseArmDual === 'function') analyseArmDual();
+  const params = 'G=' + g + ' FS=' + fs;
+
+  if (!isDualMode()) {
+    wsSend('ANAL_START ' + params);
+    return;
+  }
+
+  _dualClearTimer();
+  _dualSync = {
+    phase: 'arm',
+    armA: false, armB: false,
+    capA: false, capB: false,
+    timer: null,
+  };
+  termAddLine('[DOUBLE] ARM A+B — ' + params, 'sys');
+  const armCmd = 'ANAL_ARM ' + params;
+  wsSend(armCmd);
+  wsSendB(armCmd);
+  _dualSync.timer = setTimeout(function () {
+    if (!_dualSync || _dualSync.phase !== 'arm') return;
+    if (_dualSync.armA || _dualSync.armB) {
+      termAddLine('[DOUBLE] !! un seul ARM_OK — FIRE quand même', 'sys');
+      _dualFireNow();
+    } else {
+      _dualAbort('timeout ARM — flashe le firmware (pas seulement LittleFS) sur A et B');
+    }
+  }, 25000);
+}
+window.startAnalTemporal = startAnalTemporal;
+window._dualOnBinaryA = _dualOnBinaryA;
+window._dualOnBinaryB = _dualOnBinaryB;
 
 async function wsConnect() {
   if (_isSetupPortalPage()) return;
@@ -389,10 +797,10 @@ async function wsConnect() {
 
   syncHostFromPage();
   if (!ESP32_HOST) {
-    setDot('off', 'ESP déconnecté');
+    updateConnStatus();
     showIpReconnectBanner();
     if (typeof termAddLine === 'function') {
-      termAddLine('-- pas d\'IP ESP32 — interface locale seulement --', 'sys');
+      termAddLine('[A] pas d\'IP — interface locale seulement --', 'sys');
     }
     return;
   }
@@ -402,17 +810,35 @@ async function wsConnect() {
     _wsConnecting = true;
     try { host = await discoverEspHost(); } catch (e) {}
     _wsConnecting = false;
-  } else if (window.location.protocol === 'https:') {
-    termAddLine('-- page HTTPS, WebSocket ws://' + host + ':81 --', 'sys');
   }
 
   if (!host) {
-    setDot('off', 'ESP déconnecté');
+    updateConnStatus();
     showIpReconnectBanner();
     return;
   }
   _wsConnectTo(host);
 }
+
+async function wsConnectB() {
+  if (_isSetupPortalPage()) return;
+  if (_wsConnectingB) return;
+  if (!ESP32_HOST_B) {
+    updateConnStatus();
+    return;
+  }
+  if (_wsReconnectTimerB) {
+    clearTimeout(_wsReconnectTimerB);
+    _wsReconnectTimerB = null;
+  }
+  if (wsB && (wsB.readyState === WebSocket.CONNECTING || wsB.readyState === WebSocket.OPEN)) {
+    return;
+  }
+  _wsConnectingB = true;
+  _wsConnectBTo(ESP32_HOST_B);
+  _wsConnectingB = false;
+}
+window.wsConnectB = wsConnectB;
 
 function handleText(raw) {
   raw.split('\n').forEach(line => {
@@ -557,6 +983,21 @@ function handleText(raw) {
       return;
     }
 
+    // ── DOUBLE ARM / CAP ──────────────────────────────────────
+    if (line.startsWith('ANAL_ARM_OK')) {
+      _onAnalArmOk(false);
+      return;
+    }
+    if (line.startsWith('ANAL_CAP_OK')) {
+      _onAnalCapOk(false);
+      return;
+    }
+    if (line.startsWith('ANAL_FIRE_ERR') || line.startsWith('ANAL_ARM_ERR') ||
+        line.startsWith('ANAL_SEND_ERR')) {
+      _dualAbort(line);
+      return;
+    }
+
     // ── ACQ_PROGRESS → compte à rebours acquisition ───────────
     if (line.startsWith('ACQ_PROGRESS=')) {
       if (typeof acqShowProgress === 'function') acqShowProgress(line.slice(13));
@@ -632,6 +1073,7 @@ function handleBinary(buf) {
   } else if (rxState === 'an_bin') {
     rxState = 'text';
     analyseReceiveBloc(h.g, h.fs, h.t || (h.n / h.fs), h.n, new Int16Array(buf));
+    if (typeof _dualOnBinaryA === 'function') _dualOnBinaryA();
 
   } else if (rxState === 'bal_bin') {
     rxState = 'text';
@@ -649,10 +1091,17 @@ function handleBinary(buf) {
 
 function wsSend(cmd) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    termAddLine('!! non connecte', 'sys'); return;
+    termAddLine('!! ESP A non connecte', 'sys');
+    updateConnStatus();
+    return;
   }
   const clean = cmd.replace(/\n+$/, '');
-  ws.send(clean + '\n');
+  try {
+    ws.send(clean + '\n');
+  } catch (e) {
+    forceCloseA('envoi échoué');
+    return;
+  }
   if (clean.trim() && clean !== 'WS_PING') termAddLine('>> ' + clean, 'sent');
 }
 
@@ -694,7 +1143,8 @@ function wsGoto(tab, cmdLine, opts) {
     return;
   }
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    termAddLine('!! non connecte', 'sys');
+    termAddLine('!! ESP A non connecte', 'sys');
+    updateConnStatus();
     return;
   }
   const clean = cmdLine.replace(/\n+$/, '');
@@ -702,15 +1152,32 @@ function wsGoto(tab, cmdLine, opts) {
     termAddLine('!! format invalide: WS_GOTO sans parametres', 'sys');
     return;
   }
+  // Changement de module (temporel, live, bump, harm, balance, term…)
+  // → jamais garder une trace B / RX binaire B d'une session précédente
+  if (typeof analyseResetDualSession === 'function') analyseResetDualSession();
+  rxStateB = 'text';
+  rxHeadersB = {};
+
   _navPending = true;
   _navOpts = opts || null;
-  ws.send(clean + '\n');
+  try {
+    ws.send(clean + '\n');
+  } catch (e) {
+    _cancelNavPending(true);
+    forceCloseA('envoi navigation échoué');
+    return;
+  }
   if (clean.trim() && clean !== 'WS_PING') termAddLine('>> ' + clean, 'sent');
   _navTimeoutId = setTimeout(() => {
     _navTimeoutId = null;
     _navPending = false;
     const o = _navOpts;
     _navOpts = null;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      termAddLine('[A] NAV annulé (déconnecté)', 'sys');
+      updateConnStatus();
+      return;
+    }
     termAddLine('!! NAV timeout (pas de NAV_ACK)', 'sys');
     if (o && typeof o.onTimeout === 'function') o.onTimeout();
   }, NAV_ACK_TIMEOUT_MS);
@@ -718,13 +1185,16 @@ function wsGoto(tab, cmdLine, opts) {
 window.wsGoto = wsGoto;
 
 function setDot(state, label) {
-  document.getElementById('dot').className =
-    state === 'ok' ? 'ok' : state === 'err' ? 'err' : '';
-  document.getElementById('ip-label').textContent = label;
+  // Compat : met à jour l'affichage global A/B
+  if (label) {
+    const lbl = document.getElementById('ip-label');
+    if (lbl) lbl.textContent = label;
+  }
+  updateConnStatus();
 }
 
-function changeIP() {
-  const h = prompt('IP de l\'ESP32 (ws://IP:81) :', ESP32_IP || ESP32_HOST || '');
+function changeIpA() {
+  const h = prompt('IP ESP A (ws://IP:81) :', ESP32_IP || ESP32_HOST || '');
   if (h === null) return;
   const v = h.trim();
   _wsFailCount = 0;
@@ -732,9 +1202,50 @@ function changeIP() {
     showIpReconnectBanner();
     return;
   }
-  if (_isEspIpv4(_normalizeHostInput(v))) applyEspIp(v, true);
+  const norm = _normalizeHostInput(v);
+  if (ESP32_HOST_B && norm === ESP32_HOST_B) {
+    termAddLine('[A] !! IP déjà utilisée par B', 'sys');
+    return;
+  }
+  if (_isEspIpv4(norm)) applyEspIp(v, true);
   else applyEspHost(v, true);
 }
+
+function changeIpB() {
+  const h = prompt('IP ESP B (optionnel, ws://IP:81) — vide = déconnecter B :', ESP32_HOST_B || '');
+  if (h === null) return;
+  const v = h.trim();
+  _wsFailCountB = 0;
+  if (!v) {
+    ESP32_HOST_B = '';
+    localStorage.removeItem('esp32ip_b');
+    if (wsB) { try { wsB.close(); } catch (e) {} }
+    wsB = null;
+    updateConnStatus();
+    termAddLine('[B] déconnecté / IP effacée — mode simple', 'sys');
+    return;
+  }
+  const norm = _normalizeHostInput(v);
+  if (!_isEspIpv4(norm) && !_isMdnsHost(norm)) {
+    termAddLine('[B] !! adresse invalide', 'sys');
+    return;
+  }
+  if (ESP32_HOST && norm === ESP32_HOST) {
+    termAddLine('[B] !! même IP que A', 'sys');
+    return;
+  }
+  ESP32_HOST_B = _isMdnsHost(norm) ? ESP_MDNS_HOST : norm;
+  localStorage.setItem('esp32ip_b', ESP32_HOST_B);
+  if (wsB) { try { wsB.close(); } catch (e) {} }
+  wsB = null;
+  updateConnStatus();
+  setTimeout(wsConnectB, 200);
+}
+
+function changeIP() { changeIpA(); }
+window.changeIpA = changeIpA;
+window.changeIpB = changeIpB;
+window.changeIP = changeIP;
 window.ipBannerReconnect = ipBannerReconnect;
 window.usePageHostIp = usePageHostIp;
 
@@ -765,6 +1276,7 @@ window.addEventListener('resize', () => { fftDraw(); analyseDraw(); });
 
 document.addEventListener('DOMContentLoaded', () => {
   syncHostFromPage();
+  updateConnStatus();
   var lastTab = localStorage.getItem('lastTab') || 'term';
   if (typeof _anPersistRestore === 'function' && _anPersistRestore()) {
     anUpdateStats();
@@ -780,9 +1292,11 @@ document.addEventListener('DOMContentLoaded', () => {
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
 
-  // Reconnexion WS si nécessaire
   if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
     wsConnect();
+  }
+  if (ESP32_HOST_B && (!wsB || wsB.readyState === WebSocket.CLOSED || wsB.readyState === WebSocket.CLOSING)) {
+    wsConnectB();
   }
 
   // Android vide les canvas quand la page est en arrière-plan → redessiner
@@ -805,4 +1319,8 @@ document.addEventListener('visibilitychange', () => {
   }, 80);
 });
 
-if (!_isSetupPortalPage()) wsConnect();
+if (!_isSetupPortalPage()) {
+  wsConnect();
+  // B après A (connexion l'une après l'autre)
+  if (ESP32_HOST_B) setTimeout(wsConnectB, 800);
+}

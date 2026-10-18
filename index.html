@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Analyseur">
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=19">
+<link rel="stylesheet" href="style.css?v=20">
 <link rel="manifest" href="manifest.json">
 <script>
   if ('serviceWorker' in navigator) {
@@ -69,10 +69,12 @@
 </div>
 
 <div id="topbar">
-  <span id="dot"></span>
+  <span id="dot" title="ESP A"></span>
+  <span id="dot-b" title="ESP B"></span>
   <span id="ip-label">Deconnecte</span>
   <button type="button" onclick="clearVaSession()" title="Effacer la mémoire de session (navigateur + reset équilibrage)">Reset session</button>
-  <button onclick="changeIP()">Adr.</button>
+  <button type="button" onclick="changeIpA()" title="IP du premier ESP32">ESP A</button>
+  <button type="button" onclick="changeIpB()" title="IP du second ESP32 (optionnel)">ESP B</button>
 </div>
 
 <div id="tabs">
@@ -136,7 +138,7 @@
       </div>
     </div>
     <div id="an-bump-panel" style="display:none;">
-      <div class="an-bump-title">MODE BUMP TEST</div>
+      <div class="an-bump-title" id="an-bump-title">MODE BUMP TEST</div>
       <pre id="an-bump-monitor">Mode pret - appuyez DEMARRER</pre>
       <div class="an-bump-actions">
         <button id="btn-bump-start" class="btn-primary" onclick="bumpSendStart()">DEMARRER</button>
@@ -152,7 +154,9 @@
           <button onclick="analyseExportWAV()">💾 WAV</button>
           <button onclick="analyseExportCSV()">CSV</button>
         </div>
-        <div class="ham-row">
+        <div class="ham-row" id="an-ham-vis-row">
+          <button id="btn-an-vis-a" class="ham-vis-btn active" onclick="analyseToggleVis('A')">👁 A</button>
+          <button id="btn-an-vis-b" class="ham-vis-btn active" onclick="analyseToggleVis('B')">👁 B</button>
           <button onclick="analyseFilter()">🎸 Filtre</button>
           <button id="btn-an-reset" onclick="analyseFilterReset()" style="display:none">✗ Reset</button>
           <button id="btn-an-fft-sel" onclick="analyseFFTSel()" style="display:none">FFT Sél</button>
@@ -654,13 +658,13 @@
 </div><!-- #main -->
 
 <script src="terminal.js?v=16"></script>
-<script src="fft.js?v=17"></script>
+<script src="fft.js?v=18"></script>
 <script src="demod.js?v=16"></script>
-<script src="analyse.js?v=17"></script>
+<script src="analyse.js?v=23"></script>
 <script src="calc.js?v=16"></script>
 <script src="balance.js?v=19"></script>
 <script src="harmonic.js?v=16"></script>
-<script src="menu.js?v=17"></script>
-<script src="app.js?v=23"></script>
+<script src="menu.js?v=21"></script>
+<script src="app.js?v=31"></script>
 </body>
 </html>
