@@ -1,9 +1,8 @@
 // Shell PWA — chemins relatifs au dossier du service worker
-// (fonctionne à la racine ESP32 et sous /VibrationAnalyser-UI/ sur GitHub Pages).
+// (fonctionne a la racine ESP32 et sous /VibrationAnalyser-UI/ sur GitHub Pages).
 
-const CACHE_NAME = 'vibanalyser-v21';
+const CACHE_NAME = 'vibanalyser-v22';
 const FILES = [
-  './',
   './index.html',
   './app.js',
   './analyse.js',
@@ -28,13 +27,14 @@ self.addEventListener('install', function (event) {
   event.waitUntil(
     caches.open(CACHE_NAME).then(function (cache) {
       return Promise.all(FILES.map(function (name) {
-        return fetch(_url(name)).then(function (response) {
+        return fetch(_url(name), { cache: 'no-cache' }).then(function (response) {
           if (response && response.ok) return cache.put(_url(name), response);
         }).catch(function () {});
       }));
+    }).then(function () {
+      return self.skipWaiting();
     })
   );
-  self.skipWaiting();
 });
 
 self.addEventListener('activate', function (event) {

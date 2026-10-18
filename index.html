@@ -5,49 +5,62 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>ESP32 Analyseur</title>
 <meta name="theme-color" content="#1a1a2e">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Analyseur">
-<link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=21">
-<link rel="manifest" href="./manifest.json">
 <script>
+  // DOIT être le premier script : sans "/" final, les href relatifs cassent
+  // manifest / SW sur GitHub Pages (très fréquent depuis Android / partage de lien).
   (function () {
-    // GitHub Pages: sans "/" final, les chemins relatifs cassent le manifest / SW (surtout Android).
     var path = location.pathname;
     if (path && path.charAt(path.length - 1) !== '/' && !/\.html?$/i.test(path)) {
       location.replace(path + '/' + location.search + location.hash);
-      return;
     }
   })();
-
+</script>
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css?v=22">
+<link rel="manifest" href="manifest.json">
+<script>
   function showPwaInstallUi() {
     var dismissed = false;
     try { dismissed = localStorage.getItem('pwaInstallDismissed') === '1'; } catch (e) {}
     var box = document.getElementById('pwa-install');
     var btn = document.getElementById('pwa-install-btn');
+    var hint = document.getElementById('pwa-install-hint');
     if (box && !dismissed) box.style.display = 'block';
-    if (btn && window._pwaPrompt) btn.style.display = 'inline-block';
+    if (btn) btn.style.display = window._pwaPrompt ? 'inline-block' : 'none';
+    if (hint) {
+      hint.textContent = window._pwaPrompt
+        ? 'Appuie sur Installer, ou menu Chrome ⋮ → Installer l\'application.'
+        : 'Pas de bouton auto : menu Chrome ⋮ → Installer l\'application (ou Ajouter à l\'écran d\'accueil).';
+    }
   }
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('./service-worker.js', { scope: './' })
+    navigator.serviceWorker.register('service-worker.js', { scope: './' })
       .then(function (reg) { if (reg && reg.update) reg.update(); })
       .catch(function (err) {
-        console.warn('Service worker refusé:', err);
+        console.warn('Service worker refuse:', err);
       });
   }
 
   window.addEventListener('beforeinstallprompt', function (e) {
     e.preventDefault();
     window._pwaPrompt = e;
-    // L'événement peut arriver avant le DOM (fréquent sur Android) :
-    // on mémorise le prompt et on met l'UI à jour dès que possible.
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', showPwaInstallUi);
     } else {
       showPwaInstallUi();
     }
+  });
+
+  window.addEventListener('appinstalled', function () {
+    window._pwaPrompt = null;
+    try { localStorage.setItem('pwaInstallDismissed', '1'); } catch (e) {}
+    var box = document.getElementById('pwa-install');
+    if (box) box.style.display = 'none';
   });
 
   function dismissPwa() {
@@ -66,6 +79,16 @@
     });
   }
 
+  function copyPwaUrl() {
+    var url = 'https://jowhit.github.io/VibrationAnalyser-UI/';
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(function () {
+        var b = document.getElementById('pwa-copy-btn');
+        if (b) { b.textContent = 'Copie !'; setTimeout(function () { b.textContent = 'Copier le lien'; }, 1500); }
+      }).catch(function () {});
+    }
+  }
+
   document.addEventListener('DOMContentLoaded', function () {
     showPwaInstallUi();
   });
@@ -74,14 +97,15 @@
 <body>
 
 <div id="pwa-install" style="display:none;background:#10243d;color:#d6e8ff;padding:10px 12px;font-size:14px;border-bottom:1px solid #2a4a6a">
-  <b>Installer l'application</b>
+  <b>Installer l'application (Android)</b>
   <p style="margin:8px 0">
-    Ouvre dans <b>Chrome</b> (pas l'app GitHub) :<br>
-    <code style="font-size:12px">https://jowhit.github.io/VibrationAnalyser-UI/</code><br>
-    Android : menu <b>⋮</b> → <b>Installer l'application</b> ou <b>Ajouter à l'écran d'accueil</b>.
+    Ouvre <b>uniquement dans Chrome</b> (pas l'app GitHub, pas Facebook, pas un WebView) :<br>
+    <code style="font-size:12px;word-break:break-all">https://jowhit.github.io/VibrationAnalyser-UI/</code>
   </p>
+  <p id="pwa-install-hint" style="margin:8px 0;font-size:13px;opacity:.95"></p>
   <div style="display:flex;gap:8px;flex-wrap:wrap">
     <button type="button" id="pwa-install-btn" onclick="installPwa()" style="display:none;padding:8px 12px">Installer</button>
+    <button type="button" id="pwa-copy-btn" onclick="copyPwaUrl()" style="padding:8px 12px">Copier le lien</button>
     <button type="button" onclick="dismissPwa()" style="padding:8px 12px">Compris</button>
   </div>
 </div>
