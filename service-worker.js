@@ -1,7 +1,7 @@
 // Shell PWA — chemins relatifs au dossier du service worker
 // (fonctionne a la racine ESP32 et sous /VibrationAnalyser-UI/ sur GitHub Pages).
 
-const CACHE_NAME = 'vibanalyser-v26';
+const CACHE_NAME = 'vibanalyser-v27';
 const FILES = [
   './index.html',
   './app.js',
@@ -55,23 +55,41 @@ self.addEventListener('fetch', function (event) {
   if (url.origin !== self.location.origin) return;
 
   var isNav = event.request.mode === 'navigate';
+  var isManifest = /\/manifest\.json$/i.test(url.pathname);
   var indexUrl = _url('./index.html');
+
+  // Navigation + manifest : reseau d'abord (sinon Android reste bloque sur ancienne UI)
+  if (isNav || isManifest) {
+    event.respondWith(
+      fetch(event.request).then(function (response) {
+        if (response && response.ok) {
+          var copy = response.clone();
+          caches.open(CACHE_NAME).then(function (cache) {
+            if (isNav) cache.put(indexUrl, copy);
+            else cache.put(event.request, copy);
+          });
+        }
+        return response;
+      }).catch(function () {
+        return caches.open(CACHE_NAME).then(function (cache) {
+          return cache.match(isNav ? indexUrl : event.request, { ignoreSearch: true })
+            .then(function (cached) { return cached || cache.match(indexUrl); });
+        });
+      })
+    );
+    return;
+  }
 
   event.respondWith(
     caches.open(CACHE_NAME).then(function (cache) {
-      var lookup = isNav ? indexUrl : event.request;
-      return cache.match(lookup, { ignoreSearch: true }).then(function (cached) {
+      return cache.match(event.request, { ignoreSearch: true }).then(function (cached) {
         var network = fetch(event.request).then(function (response) {
-          if (response && response.ok && url.pathname.indexOf('.') >= 0) {
-            cache.put(event.request, response.clone());
-          }
-          if (response && response.ok && isNav) cache.put(indexUrl, response.clone());
+          if (response && response.ok) cache.put(event.request, response.clone());
           return response;
         }).catch(function () { return null; });
         if (cached) return cached;
         return network.then(function (response) {
-          if (response) return response;
-          return cache.match(indexUrl);
+          return response || cache.match(indexUrl);
         });
       });
     })
