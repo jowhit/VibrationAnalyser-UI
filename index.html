@@ -20,22 +20,19 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=25">
+<link rel="stylesheet" href="style.css?v=26">
 <link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   function showPwaInstallUi() {
-    var dismissed = false;
-    try { dismissed = localStorage.getItem('pwaInstallDismissed') === '1'; } catch (e) {}
     var box = document.getElementById('pwa-install');
     var btn = document.getElementById('pwa-install-btn');
     var hint = document.getElementById('pwa-install-hint');
-    // Toujours visible tant qu'on diagnostique l'install (ignore dismiss).
     if (box) box.style.display = 'block';
     if (btn) btn.style.display = window._pwaPrompt ? 'inline-block' : 'none';
     if (hint) {
       hint.textContent = window._pwaPrompt
-        ? 'Appuie sur Installer, ou menu Chrome ⋮ → Installer l\'application. (v25)'
-        : 'Pas de prompt auto. Menu Chrome ⋮ : cherche Installer / Ajouter a l\'ecran d\'accueil. Puis appuie Rapport PWA. (v25)';
+        ? 'Appuie sur Installer. (v26)'
+        : 'beforeinstallprompt=NON : Chrome croit souvent que l\'app est DEJA installee. Verifie le tiroir d\'apps (Analyseur), desinstalle, recharge. Ou ⋮ → Ajouter a l\'ecran d\'accueil. (v26)';
     }
   }
 
@@ -71,7 +68,7 @@
         add('start_url', man.start_url);
         add('scope', man.scope);
         add('display', man.display);
-        add('id field', man.id === undefined ? '(absent OK)' : JSON.stringify(man.id));
+        add('id field', man.id === undefined ? '(absent)' : JSON.stringify(man.id));
         var base = link.href;
         for (var i = 0; i < (man.icons || []).length; i++) {
           var icon = man.icons[i];
@@ -86,9 +83,17 @@
           add('icon ' + icon.sizes, ir.status + ' ' + (ir.headers.get('content-type') || '') + ' png=' + (isPng ? 'OUI' : 'NON') + ' magic=' + magic);
         }
       } catch (e) { add('manifest err', String(e)); }
+      try {
+        if (navigator.getInstalledRelatedApps) {
+          var apps = await navigator.getInstalledRelatedApps();
+          add('relatedApps', apps && apps.length ? JSON.stringify(apps) : '(aucune)');
+        } else {
+          add('relatedApps', 'API absente');
+        }
+      } catch (e) { add('relatedApps err', String(e)); }
       add('---', '---');
-      add('Chrome rapport', 'Tape dans la barre d\'adresse : chrome://web-app-internals');
-      add('Puis', 'Section Manifest / Installability — copie le texte ou photo');
+      add('si prompt NON', 'Cherche icone Analyseur / ESP32 dans le tiroir Android et desinstalle');
+      add('sinon', 'Chrome ⋮ → Ajouter a l\'ecran d\'accueil (toujours dispo meme sans prompt)');
       pre.textContent = lines.join('\n');
     })().catch(function (e) {
       pre.textContent = 'Erreur rapport: ' + e;
@@ -180,9 +185,9 @@
   </div>
   <pre id="pwa-report" style="display:none;margin:10px 0 0;padding:8px;background:#0a1524;color:#9ecbff;font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto"></pre>
   <p style="margin:8px 0 0;font-size:12px;opacity:.9">
-    Rapport Chrome (le plus utile) : barre d'adresse → tape
-    <code>chrome://web-app-internals</code> → cherche ce site →
-    <b>Installability</b> / erreurs → envoie-moi une capture.
+    Si pas d'install : Parametres Android → Applications → cherche
+    <b>Analyseur</b> / <b>ESP32</b> / <b>Chrome</b> (raccourcis) et desinstalle, puis reessaie.
+    Sinon menu Chrome <b>⋮ → Ajouter a l'ecran d'accueil</b>.
   </p>
 </div>
 
