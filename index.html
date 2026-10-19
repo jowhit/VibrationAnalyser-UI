@@ -10,8 +10,13 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Analyseur">
 <script>
-  // DOIT être le premier script : sans "/" final, les href relatifs cassent
-  // manifest / SW sur GitHub Pages (très fréquent depuis Android / partage de lien).
+  // 1) Capturer le prompt AVANT tout (sinon Android le rate)
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    window._pwaPrompt = e;
+    if (typeof showPwaInstallUi === 'function') showPwaInstallUi();
+  });
+  // 2) Slash final obligatoire sur GitHub Pages
   (function () {
     var path = location.pathname;
     if (path && path.charAt(path.length - 1) !== '/' && !/\.html?$/i.test(path)) {
@@ -20,8 +25,8 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=27">
-<link rel="manifest" id="app-manifest" href="manifest.json">
+<link rel="stylesheet" href="style.css?v=28">
+<link rel="manifest" id="app-manifest" href="manifest.webmanifest">
 <script>
   function showPwaInstallUi() {
     var box = document.getElementById('pwa-install');
@@ -31,8 +36,8 @@
     if (btn) btn.style.display = window._pwaPrompt ? 'inline-block' : 'none';
     if (hint) {
       hint.textContent = window._pwaPrompt
-        ? 'Appuie sur Installer. (v27)'
-        : 'beforeinstallprompt=NON : Chrome croit souvent que l\'app est DEJA installee. Verifie le tiroir d\'apps (Analyseur), desinstalle, recharge. Ou ⋮ → Ajouter a l\'ecran d\'accueil. (v27)';
+        ? 'Appuie sur Installer. (v28)'
+        : 'Sur ton Chrome, le prompt auto est souvent absent. Utilise ⋮ → « Installer l\'application » OU « Ajouter a l\'ecran d\'accueil ». C\'est l\'install officielle. (v28)';
     }
   }
 
@@ -112,22 +117,12 @@
   }
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('service-worker.js', { scope: './' })
+    navigator.serviceWorker.register('service-worker.js', { scope: './', updateViaCache: 'none' })
       .then(function (reg) { if (reg && reg.update) reg.update(); })
       .catch(function (err) {
         console.warn('Service worker refuse:', err);
       });
   }
-
-  window.addEventListener('beforeinstallprompt', function (e) {
-    e.preventDefault();
-    window._pwaPrompt = e;
-    if (document.readyState === 'loading') {
-      document.addEventListener('DOMContentLoaded', showPwaInstallUi);
-    } else {
-      showPwaInstallUi();
-    }
-  });
 
   window.addEventListener('appinstalled', function () {
     window._pwaPrompt = null;
@@ -185,9 +180,9 @@
   </div>
   <pre id="pwa-report" style="display:none;margin:10px 0 0;padding:8px;background:#0a1524;color:#9ecbff;font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto"></pre>
   <p style="margin:8px 0 0;font-size:12px;opacity:.9">
-    Si pas d'install : Parametres Android → Applications → cherche
-    <b>Analyseur</b> / <b>ESP32</b> / <b>Chrome</b> (raccourcis) et desinstalle, puis reessaie.
-    Sinon menu Chrome <b>⋮ → Ajouter a l'ecran d'accueil</b>.
+    <b>Install recommandee :</b> menu Chrome <b>⋮</b> →
+    <b>Installer l'application</b> ou <b>Ajouter a l'ecran d'accueil</b>.
+    Dis-moi le texte exact que tu vois dans ce menu ⋮.
   </p>
 </div>
 

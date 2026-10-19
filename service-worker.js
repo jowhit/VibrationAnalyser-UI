@@ -1,7 +1,7 @@
 // Shell PWA — chemins relatifs au dossier du service worker
 // (fonctionne a la racine ESP32 et sous /VibrationAnalyser-UI/ sur GitHub Pages).
 
-const CACHE_NAME = 'vibanalyser-v27';
+const CACHE_NAME = 'vibanalyser-v28';
 const FILES = [
   './index.html',
   './app.js',
@@ -15,6 +15,7 @@ const FILES = [
   './terminal.js',
   './style.css',
   './manifest.json',
+  './manifest.webmanifest',
   './icon-192.png',
   './icon-512.png'
 ];
@@ -55,7 +56,7 @@ self.addEventListener('fetch', function (event) {
   if (url.origin !== self.location.origin) return;
 
   var isNav = event.request.mode === 'navigate';
-  var isManifest = /\/manifest\.json$/i.test(url.pathname);
+  var isManifest = /\/manifest\.(json|webmanifest)$/i.test(url.pathname);
   var indexUrl = _url('./index.html');
 
   // Navigation + manifest : reseau d'abord (sinon Android reste bloque sur ancienne UI)

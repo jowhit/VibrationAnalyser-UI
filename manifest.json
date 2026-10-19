@@ -1,14 +1,13 @@
 {
-  "id": "/VibrationAnalyser-UI/?app=analyseur-v27",
+  "id": "/VibrationAnalyser-UI/",
   "name": "ESP32 Analyseur",
   "short_name": "Analyseur",
   "description": "Analyse vibrations et equilibrage ESP32",
-  "start_url": "/VibrationAnalyser-UI/?app=analyseur-v27",
+  "start_url": "/VibrationAnalyser-UI/",
   "scope": "/VibrationAnalyser-UI/",
   "display": "standalone",
   "background_color": "#1a1a2e",
   "theme_color": "#1a1a2e",
-  "orientation": "any",
   "icons": [
     {
       "src": "/VibrationAnalyser-UI/icon-192.png",
