@@ -10,13 +10,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Analyseur">
 <script>
-  // 1) Capturer le prompt AVANT tout (sinon Android le rate)
-  window.addEventListener('beforeinstallprompt', function (e) {
-    e.preventDefault();
-    window._pwaPrompt = e;
-    if (typeof showPwaInstallUi === 'function') showPwaInstallUi();
-  });
-  // 2) Slash final obligatoire sur GitHub Pages
+  // DOIT être le premier script : sans "/" final, les href relatifs cassent
+  // manifest / SW sur GitHub Pages (très fréquent depuis Android / partage de lien).
   (function () {
     var path = location.pathname;
     if (path && path.charAt(path.length - 1) !== '/' && !/\.html?$/i.test(path)) {
@@ -25,104 +20,41 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=28">
-<link rel="manifest" id="app-manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="style.css?v=27">
+<link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   function showPwaInstallUi() {
+    var dismissed = false;
+    try { dismissed = localStorage.getItem('pwaInstallDismissed') === '1'; } catch (e) {}
     var box = document.getElementById('pwa-install');
     var btn = document.getElementById('pwa-install-btn');
     var hint = document.getElementById('pwa-install-hint');
-    if (box) box.style.display = 'block';
+    if (box && !dismissed) box.style.display = 'block';
     if (btn) btn.style.display = window._pwaPrompt ? 'inline-block' : 'none';
     if (hint) {
       hint.textContent = window._pwaPrompt
-        ? 'Appuie sur Installer. (v28)'
-        : 'Sur ton Chrome, le prompt auto est souvent absent. Utilise ⋮ → « Installer l\'application » OU « Ajouter a l\'ecran d\'accueil ». C\'est l\'install officielle. (v28)';
-    }
-  }
-
-  function runPwaReport() {
-    var pre = document.getElementById('pwa-report');
-    if (!pre) return;
-    pre.style.display = 'block';
-    pre.textContent = 'Analyse en cours...';
-    (async function () {
-      var lines = [];
-      function add(k, v) { lines.push(k + ': ' + v); }
-      add('url', location.href);
-      add('ua', navigator.userAgent);
-      add('standalone', String(window.matchMedia('(display-mode: standalone)').matches || navigator.standalone === true));
-      add('beforeinstallprompt', window._pwaPrompt ? 'OUI' : 'NON');
-      add('sw API', 'serviceWorker' in navigator ? 'oui' : 'NON');
-      add('controller', navigator.serviceWorker && navigator.serviceWorker.controller ? 'oui' : 'NON');
-      try {
-        var reg = await navigator.serviceWorker.getRegistration();
-        if (!reg) add('SW reg', 'AUCUNE');
-        else {
-          add('SW scope', reg.scope);
-          add('SW state', reg.active ? reg.active.state : (reg.installing ? 'installing' : (reg.waiting ? 'waiting' : '?')));
-          add('SW script', reg.active ? reg.active.scriptURL : '-');
-        }
-      } catch (e) { add('SW err', String(e)); }
-      try {
-        var link = document.querySelector('link[rel=manifest]');
-        add('manifest href', link ? link.href : 'manquant');
-        var r = await fetch(link.href, { cache: 'no-store' });
-        add('manifest HTTP', r.status + ' ' + (r.headers.get('content-type') || ''));
-        var man = await r.json();
-        add('start_url', man.start_url);
-        add('scope', man.scope);
-        add('display', man.display);
-        add('id field', man.id === undefined ? '(absent)' : JSON.stringify(man.id));
-        var base = link.href;
-        for (var i = 0; i < (man.icons || []).length; i++) {
-          var icon = man.icons[i];
-          var iu = new URL(icon.src, base);
-          var ir = await fetch(iu.href, { cache: 'no-store' });
-          var buf = await ir.arrayBuffer();
-          var b = new Uint8Array(buf.slice(0, 8));
-          var magic = Array.prototype.map.call(b, function (x) {
-            return ('0' + x.toString(16)).slice(-2);
-          }).join(' ');
-          var isPng = magic === '89 50 4e 47 0d 0a 1a 0a';
-          add('icon ' + icon.sizes, ir.status + ' ' + (ir.headers.get('content-type') || '') + ' png=' + (isPng ? 'OUI' : 'NON') + ' magic=' + magic);
-        }
-      } catch (e) { add('manifest err', String(e)); }
-      try {
-        if (navigator.getInstalledRelatedApps) {
-          var apps = await navigator.getInstalledRelatedApps();
-          add('relatedApps', apps && apps.length ? JSON.stringify(apps) : '(aucune)');
-        } else {
-          add('relatedApps', 'API absente');
-        }
-      } catch (e) { add('relatedApps err', String(e)); }
-      add('---', '---');
-      add('si prompt NON', 'Cherche icone Analyseur / ESP32 dans le tiroir Android et desinstalle');
-      add('sinon', 'Chrome ⋮ → Ajouter a l\'ecran d\'accueil (toujours dispo meme sans prompt)');
-      pre.textContent = lines.join('\n');
-    })().catch(function (e) {
-      pre.textContent = 'Erreur rapport: ' + e;
-    });
-  }
-
-  function copyPwaReport() {
-    var pre = document.getElementById('pwa-report');
-    if (!pre || !pre.textContent) return;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(pre.textContent).then(function () {
-        var b = document.getElementById('pwa-report-copy');
-        if (b) { b.textContent = 'Copie !'; setTimeout(function () { b.textContent = 'Copier rapport'; }, 1500); }
-      }).catch(function () {});
+        ? 'Appuie sur Installer, ou menu Chrome ⋮ → Installer l\'application.'
+        : 'Si le menu n'offre pas Installer : efface les donnees du site, recharge, reessaie. (v24)';
     }
   }
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('service-worker.js', { scope: './', updateViaCache: 'none' })
+    navigator.serviceWorker.register('service-worker.js', { scope: './' })
       .then(function (reg) { if (reg && reg.update) reg.update(); })
       .catch(function (err) {
         console.warn('Service worker refuse:', err);
       });
   }
+
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    window._pwaPrompt = e;
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', showPwaInstallUi);
+    } else {
+      showPwaInstallUi();
+    }
+  });
 
   window.addEventListener('appinstalled', function () {
     window._pwaPrompt = null;
@@ -174,16 +106,8 @@
   <div style="display:flex;gap:8px;flex-wrap:wrap">
     <button type="button" id="pwa-install-btn" onclick="installPwa()" style="display:none;padding:8px 12px">Installer</button>
     <button type="button" id="pwa-copy-btn" onclick="copyPwaUrl()" style="padding:8px 12px">Copier le lien</button>
-    <button type="button" onclick="runPwaReport()" style="padding:8px 12px">Rapport PWA</button>
-    <button type="button" id="pwa-report-copy" onclick="copyPwaReport()" style="padding:8px 12px">Copier rapport</button>
-    <button type="button" onclick="dismissPwa()" style="padding:8px 12px">Masquer</button>
+    <button type="button" onclick="dismissPwa()" style="padding:8px 12px">Compris</button>
   </div>
-  <pre id="pwa-report" style="display:none;margin:10px 0 0;padding:8px;background:#0a1524;color:#9ecbff;font-size:11px;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto"></pre>
-  <p style="margin:8px 0 0;font-size:12px;opacity:.9">
-    <b>Install recommandee :</b> menu Chrome <b>⋮</b> →
-    <b>Installer l'application</b> ou <b>Ajouter a l'ecran d'accueil</b>.
-    Dis-moi le texte exact que tu vois dans ce menu ⋮.
-  </p>
 </div>
 
 <div id="ip-banner" style="display:none;background:#3d2a00;color:#ffd080;padding:10px 12px;font-size:14px;border-bottom:1px solid #665500">
@@ -199,7 +123,9 @@
 <div id="topbar">
   <span id="dot" title="ESP A"></span>
   <span id="dot-b" title="ESP B"></span>
+  <span id="probe-mode-label" class="probe-badge probe-badge--none">Sonde ?</span>
   <span id="ip-label">Deconnecte</span>
+  <button type="button" onclick="ProbeMode.change()" title="Changer sonde A / B / A+B">Sonde</button>
   <button type="button" onclick="clearVaSession()" title="Effacer la mémoire de session (navigateur + reset équilibrage)">Reset session</button>
   <button type="button" onclick="changeIpA()" title="IP du premier ESP32">ESP A</button>
   <button type="button" onclick="changeIpB()" title="IP du second ESP32 (optionnel)">ESP B</button>
@@ -238,6 +164,10 @@
     <div id="fft-cursor-info" class="cursor-bar">Toucher le spectre pour lire une valeur</div>
     <div id="fft-canvas-wrap" class="canvas-wrap">
       <canvas id="fft-canvas"></canvas>
+      <div id="fft-wait-overlay" class="an-acq-overlay" style="display:none" aria-hidden="true">
+        <canvas id="fft-wait-ring" width="120" height="120"></canvas>
+        <span id="fft-wait-label">Live FFT…</span>
+      </div>
     </div>
     <div class="ctrl-bar">
       <button id="btn-fft-start" class="btn-primary" onclick="fftToggle()">&#9654; Live FFT</button>
@@ -785,14 +715,14 @@
 
 </div><!-- #main -->
 
-<script src="terminal.js?v=16"></script>
-<script src="fft.js?v=18"></script>
+<script src="terminal.js?v=17"></script>
+<script src="fft.js?v=24"></script>
 <script src="demod.js?v=16"></script>
-<script src="analyse.js?v=23"></script>
+<script src="analyse.js?v=29"></script>
 <script src="calc.js?v=16"></script>
-<script src="balance.js?v=19"></script>
-<script src="harmonic.js?v=16"></script>
-<script src="menu.js?v=21"></script>
-<script src="app.js?v=31"></script>
+<script src="balance.js?v=21"></script>
+<script src="harmonic.js?v=20"></script>
+<script src="menu.js?v=28"></script>
+<script src="app.js?v=40"></script>
 </body>
 </html>

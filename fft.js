@@ -8,12 +8,25 @@ let fftP   = { g:2, fs:1000, n:4096 };
 let fftZMin = 60, fftZMax = 3000;   // min = 60 RPM (filtre passe-haut)
 let fftAutoScale = true;
 let fftRunning   = false;
+let _fftDualSession = false; // session DOUBLE (UI A+B dès le Start)
 let fftCursorBin = -1;
 const FPAD = { l:52, r:12, t:14, b:30 };
 const FFT_COLOR_A = '#0033cc';
 const FFT_COLOR_B = '#e67e22';
 const FFT_FILL_A  = 'rgba(0,51,204,0.07)';
 const FFT_FILL_B  = 'rgba(230,126,34,0.07)';
+
+/** Sonde affichée dans le slot primaire (fftMag) — mono B = données B routées ici. */
+function _fftPrimaryTag() {
+  if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB()) return 'B';
+  return 'A';
+}
+function _fftPrimaryColor() {
+  return _fftPrimaryTag() === 'B' ? FFT_COLOR_B : FFT_COLOR_A;
+}
+function _fftPrimaryFill() {
+  return _fftPrimaryTag() === 'B' ? FFT_FILL_B : FFT_FILL_A;
+}
 
 // ── Filtre passe-haut permanent ───────────────────────────────
 // Tous les spectres (g et mm/s) sont filtrés sous HP_RPM_MIN
@@ -46,22 +59,23 @@ function _fftUpdateStatus(sig) {
     Math.floor((fftUnit === 'mm/s' ? fftMaxRpmVel(fs) : fftMaxRpmG(fs)) / rpmPB));
   const pk = fftPeakInfo(mag, fs, n, minBinHP);
   let statusStr;
+  const tag = _fftPrimaryTag();
   if (fftUnit === 'mm/s' && sig) {
     const rmsIso = calcRmsIso(sig, fs, n);
-    statusStr = 'Pic A: ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.amp.toFixed(3) + ' mm/s' +
+    statusStr = 'Pic ' + tag + ': ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.amp.toFixed(3) + ' mm/s' +
                 '   |   RMS ISO: ' + rmsIso.toFixed(3) + ' mm/s';
   } else {
     const rmsG = fftSpecRMS(fftMag, minBinHP, maxBin);
-    statusStr = 'Pic A: ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.amp.toFixed(4) + ' g' +
+    statusStr = 'Pic ' + tag + ': ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.amp.toFixed(4) + ' g' +
                 '   |   RMS: ' + rmsG.toFixed(4) + ' g';
   }
-  if (fftMagB) statusStr += '   |   DOUBLE';
+  if (_fftDualSession || fftMagB) statusStr += '   |   A+B';
   const st = document.getElementById('fft-status');
   if (st) st.textContent = statusStr;
   const meta = document.getElementById('fft-meta');
   if (meta) {
     meta.textContent = 'Fs=' + fs + 'Hz  N=' + n + '  ±' + fftP.g + 'g' +
-      (fftMagB ? '  DOUBLE' : '');
+      ((_fftDualSession || fftMagB) ? '  A+B' : ('  sonde ' + tag));
   }
 }
 
@@ -85,16 +99,33 @@ function fftReceiveBloc(g, fs, n, raw) {
   }
 
   showTab('fft');
+  _fftWaitHide();
   fftDraw();
   _fftUpdateStatus(sig);
 }
 
-/** Réception ESP B (mode DOUBLE) */
+/** Réception ESP B (mode DOUBLE) — jamais via le slot primaire. */
 function fftReceiveBlocB(g, fs, n, raw) {
-  const sig = _fftFillSig(g, n, raw);
-  fftMagB    = computeFFT(sig, Math.min(n, raw.length), fs || fftP.fs);
-  fftMagVelB = computeVelFFT(sig, fs || fftP.fs, Math.min(n, raw.length));
+  // Accepte B si session dual / ProbeMode AB / live déjà lancé
+  if (!_fftDualSession) {
+    if (typeof ProbeMode !== 'undefined' && ProbeMode.isDual()) {
+      _fftDualSession = true;
+    } else if (typeof DualSession !== 'undefined' && DualSession.is()) {
+      _fftDualSession = true;
+    } else if (fftRunning) {
+      _fftDualSession = true;
+    } else {
+      return;
+    }
+  }
+  // Même N que A si déjà reçu → axes RPM alignés
+  const nUse = (fftP && fftP.n) ? Math.min(fftP.n, n, raw.length) : Math.min(n, raw.length);
+  const fsUse = fs || (fftP && fftP.fs) || 1000;
+  const sig = _fftFillSig(g, nUse, raw);
+  fftMagB    = computeFFT(sig, nUse, fsUse);
+  fftMagVelB = computeVelFFT(sig, fsUse, nUse);
   showTab('fft');
+  if (fftMag) _fftWaitHide();
   fftDraw();
   _fftUpdateStatus(_fftLastSigA);
 }
@@ -193,30 +224,37 @@ function calcRmsIso(sig_g, fs, n) {
   return Math.sqrt(sumSq / n);
 }
 
-function _fftStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aS, color, fill, maxA) {
-  if (!mag) return;
+/** Trace un spectre avec SON propre axe RPM (évite B fantôme si N≠A). */
+function _fftStrokeMag(ctx, mag, fs, zMin, zMax, span, pW, pH, aS, color, fill, maxA) {
+  if (!mag || !mag.length) return;
   const P = FPAD;
+  const nFFT = mag.length * 2;
+  const rpmPB = (fs / nFFT) * 60;
+  const minBin = Math.max(1, Math.ceil(zMin / rpmPB));
+  const maxBin = Math.min(mag.length - 1, Math.ceil(zMax / rpmPB));
+  if (maxBin < minBin) return;
+
   ctx.beginPath();
   let fi = true;
-  const lim = Math.min(maxB, mag.length - 1);
-  for (let i = minB; i <= lim; i++) {
+  for (let i = minBin; i <= maxBin; i++) {
     const x = P.l + (i * rpmPB - zMin) / span * pW;
     const y = P.t + pH - mag[i] * aS;
     if (fi) { ctx.moveTo(x, P.t + pH); ctx.lineTo(x, y); fi = false; }
     else ctx.lineTo(x, y);
   }
   if (!fi) {
-    ctx.lineTo(P.l + (lim * rpmPB - zMin) / span * pW, P.t + pH);
+    ctx.lineTo(P.l + (maxBin * rpmPB - zMin) / span * pW, P.t + pH);
     ctx.closePath();
     ctx.fillStyle = fill;
     ctx.fill();
   }
-  const ppb = pW / (lim - minB + 1);
+  const ppb = pW / (maxBin - minBin + 1);
   if (ppb >= 1.2) {
     ctx.lineWidth = Math.min(1.5, ppb * 0.7);
     ctx.strokeStyle = color;
-    for (let i = minB; i <= lim; i++) {
-      if (mag[i] < maxA * 0.002) continue;
+    const thr = maxA * 0.0005;
+    for (let i = minBin; i <= maxBin; i++) {
+      if (mag[i] < thr) continue;
       const x = P.l + (i * rpmPB - zMin) / span * pW;
       const y = P.t + pH - mag[i] * aS;
       ctx.beginPath(); ctx.moveTo(x, P.t + pH); ctx.lineTo(x, y); ctx.stroke();
@@ -224,13 +262,24 @@ function _fftStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aS, colo
   } else {
     ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.2;
     let ff = true;
-    for (let i = minB; i <= lim; i++) {
+    for (let i = minBin; i <= maxBin; i++) {
       const x = P.l + (i * rpmPB - zMin) / span * pW;
       const y = P.t + pH - mag[i] * aS;
       if (ff) { ctx.moveTo(x, y); ff = false; } else ctx.lineTo(x, y);
     }
     ctx.stroke();
   }
+}
+
+function _fftMaxInView(mag, fs, zMin, zMax) {
+  if (!mag || !mag.length) return 0;
+  const nFFT = mag.length * 2;
+  const rpmPB = (fs / nFFT) * 60;
+  const minBin = Math.max(1, Math.ceil(zMin / rpmPB));
+  const maxBin = Math.min(mag.length - 1, Math.ceil(zMax / rpmPB));
+  let m = 0;
+  for (let i = minBin; i <= maxBin; i++) if (mag[i] > m) m = mag[i];
+  return m;
 }
 
 // ── Dessin spectre (A bleu / B orange — g et mm/s) ───────────
@@ -258,17 +307,15 @@ function fftDraw() {
   const minB = Math.max(1, Math.ceil(zMin / rpmPB));
   const maxB = Math.min(_nFFT / 2 - 1, Math.ceil(zMax / rpmPB));
   const pW = W - P.l - P.r, pH = H - P.t - P.b, span = zMax - zMin;
+  // magB suffit : après Stop on garde la dernière trame B même si session close
+  const dual = !!magB;
 
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
   ctx.strokeStyle = '#555'; ctx.lineWidth = 1;
   ctx.strokeRect(P.l, P.t, pW, pH);
 
-  let maxA = 0;
-  for (let i = minB; i <= maxB; i++) if (mag[i] > maxA) maxA = mag[i];
-  if (magB) {
-    const lim = Math.min(maxB, magB.length - 1);
-    for (let i = minB; i <= lim; i++) if (magB[i] > maxA) maxA = magB[i];
-  }
+  let maxA = _fftMaxInView(mag, fs, zMin, zMax);
+  if (magB) maxA = Math.max(maxA, _fftMaxInView(magB, fs, zMin, zMax));
   if (maxA === 0) maxA = 1;
   const aS = pH / (maxA * 1.1);
 
@@ -301,10 +348,13 @@ function fftDraw() {
   ctx.fillText('Frequence (RPM)', P.l + pW / 2, H);
 
   ctx.save(); ctx.beginPath(); ctx.rect(P.l, P.t, pW, pH); ctx.clip();
-  _fftStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aS, FFT_COLOR_A, FFT_FILL_A, maxA);
+  // Duo : B sous A. Mono B : slot primaire en orange « B ».
   if (magB) {
-    _fftStrokeMag(ctx, magB, minB, maxB, rpmPB, zMin, span, pW, pH, aS, FFT_COLOR_B, FFT_FILL_B, maxA);
+    _fftStrokeMag(ctx, magB, fs, zMin, zMax, span, pW, pH, aS, FFT_COLOR_B, FFT_FILL_B, maxA);
   }
+  _fftStrokeMag(ctx, mag, fs, zMin, zMax, span, pW, pH, aS,
+    dual ? FFT_COLOR_A : _fftPrimaryColor(),
+    dual ? FFT_FILL_A : _fftPrimaryFill(), maxA);
   ctx.restore();
 
   if (fftCursorBin >= minB && fftCursorBin <= maxB) {
@@ -323,8 +373,14 @@ function fftDraw() {
   }
 
   ctx.font = 'bold 10px Arial'; ctx.textAlign = 'left';
-  ctx.fillStyle = FFT_COLOR_A; ctx.fillText('A', P.l + 6, P.t + 12);
-  if (magB) { ctx.fillStyle = FFT_COLOR_B; ctx.fillText('B', P.l + 28, P.t + 12); }
+  if (dual) {
+    ctx.fillStyle = FFT_COLOR_A; ctx.fillText('A', P.l + 6, P.t + 12);
+    ctx.fillStyle = FFT_COLOR_B; ctx.fillText('B', P.l + 28, P.t + 12);
+  } else {
+    const tag = _fftPrimaryTag();
+    ctx.fillStyle = _fftPrimaryColor();
+    ctx.fillText(tag, P.l + 6, P.t + 12);
+  }
 }
 
 // ── Touch FFT ────────────────────────────────────────────────
@@ -567,52 +623,135 @@ function fftSpecRMS(mag, minBin, maxBin) {
   return Math.sqrt(s * 2);
 }
 
-// ── Contrôles boutons ─────────────────────────────────────────
-function _fftStartDualLive() {
-  fftMagB = null; fftMagVelB = null;
-  wsSend('LIVE_START\n');
-  const dual = (typeof isDualMode === 'function' && isDualMode());
-  if (dual && typeof wsSendB === 'function') {
-    if (typeof termAddLine === 'function') {
-      termAddLine('[DOUBLE] Live FFT A+B', 'sys');
-    }
-    wsSendB('WS_GOTO=ANAL_LIVE');
-    setTimeout(function () { wsSendB('LIVE_START'); }, 350);
+// ── Attente 1ère trame (rond bleu = même style temporel) ──────
+let _fftWaitRaf = null;
+let _fftWaitActive = false;
+
+function _fftWaitShow(msg) {
+  _fftWaitActive = true;
+  const ov = document.getElementById('fft-wait-overlay');
+  const lbl = document.getElementById('fft-wait-label');
+  if (lbl) lbl.textContent = msg || 'Live FFT…';
+  if (ov) { ov.style.display = 'flex'; ov.setAttribute('aria-hidden', 'false'); }
+  const st = document.getElementById('fft-status');
+  if (st) st.textContent = msg || 'En attente 1ère trame…';
+  if (_fftWaitRaf) cancelAnimationFrame(_fftWaitRaf);
+  _fftWaitRaf = requestAnimationFrame(_fftWaitAnim);
+}
+
+function _fftWaitHide() {
+  _fftWaitActive = false;
+  if (_fftWaitRaf) { cancelAnimationFrame(_fftWaitRaf); _fftWaitRaf = null; }
+  const ov = document.getElementById('fft-wait-overlay');
+  if (ov) { ov.style.display = 'none'; ov.setAttribute('aria-hidden', 'true'); }
+  const ring = document.getElementById('fft-wait-ring');
+  if (ring) {
+    const ctx = ring.getContext('2d');
+    if (ctx) ctx.clearRect(0, 0, ring.width, ring.height);
   }
 }
-window._fftStartDualLive = _fftStartDualLive;
+
+function _fftWaitAnim() {
+  if (!_fftWaitActive) return;
+  const canvas = document.getElementById('fft-wait-ring');
+  if (canvas) {
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    const cx = w / 2, cy = h / 2, R = 46;
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#ddd';
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, 2 * Math.PI);
+    ctx.stroke();
+    // Arc tournant (même rendu que phase « transfert » temporelle)
+    const spin = (Date.now() % 1200) / 1200 * 2 * Math.PI;
+    ctx.strokeStyle = '#0066cc';
+    ctx.lineWidth = 7;
+    ctx.lineCap = 'round';
+    ctx.setLineDash([10, 14]);
+    ctx.lineDashOffset = -spin * 8;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, spin, spin + Math.PI * 1.35);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+  _fftWaitRaf = requestAnimationFrame(_fftWaitAnim);
+}
+
+// ── Contrôles boutons ─────────────────────────────────────────
+/**
+ * LIVE_START sur A (+ B si dual).
+ * @param {boolean} [dualFlag] — passé par DualSession.onReady (fiable après wsGoto reset)
+ */
+function _fftFireLiveStart(dualFlag) {
+  fftMag = null; fftMagVel = null;
+  fftMagB = null; fftMagVelB = null;
+  if (typeof dualFlag === 'boolean') {
+    _fftDualSession = dualFlag;
+    if (dualFlag && typeof DualSession !== 'undefined') DualSession.begin();
+  } else {
+    _fftDualSession = (typeof DualSession !== 'undefined') ? DualSession.is() : false;
+  }
+  _fftWaitShow(_fftDualSession ? 'Live FFT A+B…' : 'Live FFT…');
+  // A+B ensemble — B a déjà reçu WS_GOTO=ANAL_LIVE avant le NAV_ACK de A
+  if (_fftDualSession && typeof DualSession !== 'undefined') {
+    DualSession.sendBoth('LIVE_START');
+  } else {
+    wsSend('LIVE_START');
+  }
+}
+window._fftStartDualLive = _fftFireLiveStart;
 
 function fftToggle() {
   const btn = document.getElementById('btn-fft-start');
   if (!fftRunning) {
-    const startLive = () => {
-      _fftStartDualLive();
+    const ready = function (dual) {
+      _fftFireLiveStart(dual);
       fftRunning = true;
-      btn.textContent = '■ Stop';
-      btn.classList.add('running');
+      if (btn) {
+        btn.textContent = '■ Stop';
+        btn.classList.add('running');
+      }
     };
-    if (typeof window.wsGoto === 'function') {
-      window.wsGoto('fft', 'WS_GOTO=ANAL_LIVE', {
-        onAck: startLive,
-        onTimeout: () => {
+    _fftWaitShow('Connexion Live FFT…');
+    if (typeof DualSession !== 'undefined') {
+      DualSession.startModule('fft', 'WS_GOTO=ANAL_LIVE', {
+        label: 'Live FFT',
+        onReady: ready,
+        onFail: function () {
+          _fftWaitHide();
           if (typeof termAddLine === 'function') {
             termAddLine('!! Live FFT: NAV timeout', 'sys');
           }
-        }
+        },
+      });
+    } else if (typeof window.wsGoto === 'function') {
+      window.wsGoto('fft', 'WS_GOTO=ANAL_LIVE', {
+        onAck: function () { ready(false); },
+        onTimeout: function () {
+          _fftWaitHide();
+          if (typeof termAddLine === 'function') {
+            termAddLine('!! Live FFT: NAV timeout', 'sys');
+          }
+        },
       });
     } else {
-      wsSend('WS_GOTO=ANAL_LIVE\n');
-      setTimeout(startLive, 400);
+      wsSend('WS_GOTO=ANAL_LIVE');
+      setTimeout(function () { ready(false); }, 400);
     }
   } else {
-    wsSend('r');
-    if (typeof isDualMode === 'function' && isDualMode() && typeof wsSendB === 'function') {
-      wsSendB('r');
-    }
+    if (typeof DualSession !== 'undefined') DualSession.stopBoth('r');
+    else wsSend('r');
     fftRunning = false;
-    fftMagB = null; fftMagVelB = null;
-    btn.textContent = '▶ Live FFT';
-    btn.classList.remove('running');
+    _fftWaitHide();
+    // Garder fftMag / fftMagB : gel de la dernière trame pour zoom / pan après Stop
+    // (effacés au prochain Start dans _fftFireLiveStart)
+    if (btn) {
+      btn.textContent = '▶ Live FFT';
+      btn.classList.remove('running');
+    }
+    fftDraw();
   }
 }
 function fftManualZoom(f) {

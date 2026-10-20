@@ -20,6 +20,125 @@ function _isMdnsHost(host) {
   return h === ESP_MDNS_HOST || h === 'vibanalyseur.local';
 }
 
+// ── Inversion d'axe par IP (dev : boîtier monté à l'envers) ──
+// Lié à l'IP, pas à A/B — le .84 reste inversé quel que soit le slot.
+const INVERT_LS_KEY = 'esp_invert_ips';
+
+function _invertLoad() {
+  try {
+    const raw = localStorage.getItem(INVERT_LS_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.map(String) : [];
+  } catch (e) { return []; }
+}
+
+function _invertSave(list) {
+  try { localStorage.setItem(INVERT_LS_KEY, JSON.stringify(list)); } catch (e) {}
+}
+
+/** "84" → ".84" ; ".84" / "10.42.0.84" inchangés. */
+function _invertNormToken(s) {
+  s = String(s || '').trim().toLowerCase();
+  if (!s) return '';
+  if (/^\d{1,3}$/.test(s)) return '.' + s;
+  return s;
+}
+
+function _hostMatchesInvertToken(host, token) {
+  if (!host || !token) return false;
+  const h = String(host).trim().toLowerCase();
+  const t = _invertNormToken(token);
+  if (!t) return false;
+  if (t.charAt(0) === '.') {
+    const oct = t.slice(1);
+    return h.endsWith(t) || h.split('.').pop() === oct;
+  }
+  return h === t;
+}
+
+function _probeHost(which) {
+  if (which === 'B') return (ESP32_HOST_B || '').trim();
+  return (ESP32_IP || ESP32_HOST || '').trim();
+}
+
+/** true si le boîtier A ou B doit être inversé (selon son IP). */
+function probeAxisInvert(which) {
+  const host = _probeHost(which);
+  if (!host) return false;
+  return _invertLoad().some(function (t) { return _hostMatchesInvertToken(host, t); });
+}
+
+function applyAxisInvertIfNeeded(which, int16) {
+  if (!int16 || !probeAxisInvert(which)) return int16;
+  const out = new Int16Array(int16.length);
+  for (let i = 0; i < int16.length; i++) out[i] = (-int16[i]) | 0;
+  return out;
+}
+
+function applyAxisInvertScalar(which, v) {
+  return probeAxisInvert(which) ? -v : v;
+}
+
+/**
+ * Commande moniteur : invert | invert 84 | invert .84 | invert off
+ * @returns {boolean} true si commande locale (ne pas envoyer à l'ESP)
+ */
+function handleInvertCommand(raw) {
+  const parts = String(raw || '').trim().split(/\s+/);
+  const cmd = (parts[0] || '').toLowerCase();
+  if (cmd !== 'invert' && cmd !== 'invertA' && cmd !== 'invertB') return false;
+
+  const list = _invertLoad();
+  const arg = (parts[1] || '').trim().toLowerCase();
+
+  // invert seul (ou ?) → statut
+  if (cmd === 'invert' && (!arg || arg === '?' || arg === 'status')) {
+    const a = _probeHost('A') || '(A non défini)';
+    const b = _probeHost('B') || '(B non défini)';
+    termAddLine('invert IPs: ' + (list.length ? list.join(', ') : '(aucun)'), 'sys');
+    termAddLine('  A ' + a + ' → ' + (probeAxisInvert('A') ? 'INVERSE' : 'normal'), 'sys');
+    termAddLine('  B ' + b + ' → ' + (probeAxisInvert('B') ? 'INVERSE' : 'normal'), 'sys');
+    termAddLine('Usage: invert 84  |  invertA  |  invertB  |  invert off', 'sys');
+    return true;
+  }
+
+  if (arg === 'off' || arg === 'clear' || arg === 'none' || arg === '0') {
+    _invertSave([]);
+    termAddLine('invert: toutes les IP désactivées', 'sys');
+    return true;
+  }
+
+  // invert 84  → IP ; invertA / invertB → IP du slot actuel
+  let token = arg;
+  if (cmd === 'inverta' && !arg) token = _probeHost('A');
+  if (cmd === 'invertb' && !arg) token = _probeHost('B');
+  token = _invertNormToken(token);
+  if (!token) {
+    termAddLine('invert: IP manquante (ex. invert 84)', 'sys');
+    return true;
+  }
+
+  const idx = list.findIndex(function (t) {
+    return _invertNormToken(t) === token ||
+      _hostMatchesInvertToken(token, t) ||
+      _hostMatchesInvertToken(t, token);
+  });
+  if (idx >= 0) {
+    list.splice(idx, 1);
+    _invertSave(list);
+    termAddLine('invert OFF: ' + token, 'sys');
+  } else {
+    list.push(token);
+    _invertSave(list);
+    termAddLine('invert ON: ' + token +
+      ' (A=' + (probeAxisInvert('A') ? 'oui' : 'non') +
+      ' B=' + (probeAxisInvert('B') ? 'oui' : 'non') + ')', 'sys');
+  }
+  return true;
+}
+window.handleInvertCommand = handleInvertCommand;
+window.probeAxisInvert = probeAxisInvert;
+
 /** La page est servie par l'ESP32 lui-même (pas par GitHub Pages). */
 function _pageServedByEsp() {
   const h = (window.location.hostname || '').trim().toLowerCase();
@@ -172,12 +291,191 @@ const WS_RECONNECT_BASE_MS = 3000;
 const WS_RECONNECT_MAX_MS = 30000;
 const WS_FAIL_BEFORE_IP_PROMPT = 5;
 
-/** true si A et B ont un WebSocket ouvert. */
+/** true si A et B ont un WebSocket ouvert (physique). */
 function isDualMode() {
   return !!(ws && ws.readyState === WebSocket.OPEN &&
             wsB && wsB.readyState === WebSocket.OPEN);
 }
 window.isDualMode = isDualMode;
+
+/**
+ * Couche SONDE — avant Équilibrage / Analyse.
+ * null = pas encore choisi ; 'A' | 'B' | 'AB'
+ */
+const ProbeMode = (() => {
+  let _mode = null; // null | 'A' | 'B' | 'AB'
+
+  function aOk() { return !!(ws && ws.readyState === WebSocket.OPEN); }
+  function bOk() { return !!(wsB && wsB.readyState === WebSocket.OPEN); }
+
+  function get() { return _mode; }
+  function isSet() { return _mode === 'A' || _mode === 'B' || _mode === 'AB'; }
+  function isDual() { return _mode === 'AB'; }
+  function isMonoA() { return _mode === 'A'; }
+  function isMonoB() { return _mode === 'B'; }
+
+  function canSelect(mode) {
+    if (mode === 'A') return aOk();
+    if (mode === 'B') return bOk();
+    if (mode === 'AB') return aOk() && bOk();
+    return false;
+  }
+
+  function _updateBadge() {
+    const el = document.getElementById('probe-mode-label');
+    if (!el) return;
+    if (!_mode) {
+      el.textContent = 'Sonde ?';
+      el.className = 'probe-badge probe-badge--none';
+    } else if (_mode === 'AB') {
+      el.textContent = 'A+B';
+      el.className = 'probe-badge probe-badge--ab';
+    } else {
+      el.textContent = 'Sonde ' + _mode;
+      el.className = 'probe-badge probe-badge--' + _mode.toLowerCase();
+    }
+  }
+
+  function set(mode) {
+    if (mode !== 'A' && mode !== 'B' && mode !== 'AB') return false;
+    if (!canSelect(mode)) {
+      if (typeof termAddLine === 'function') {
+        termAddLine('!! Mode ' + mode + ' impossible — ESP manquant', 'sys');
+      }
+      return false;
+    }
+    _mode = mode;
+    try { localStorage.setItem('probe_mode', mode); } catch (e) {}
+    _updateBadge();
+    if (typeof DualSession !== 'undefined') {
+      if (mode === 'AB') DualSession.begin();
+      else DualSession.end();
+    }
+    if (typeof termAddLine === 'function') {
+      const label = mode === 'AB' ? 'A + B (duo)' : ('Sonde ' + mode + ' (mono)');
+      termAddLine('[MODE] ' + label, 'sys');
+    }
+    return true;
+  }
+
+  function clear(reason) {
+    const was = _mode;
+    _mode = null;
+    try { localStorage.removeItem('probe_mode'); } catch (e) {}
+    if (typeof DualSession !== 'undefined') DualSession.end();
+    if (typeof analyseResetDualSession === 'function') analyseResetDualSession();
+    _updateBadge();
+    if (typeof showTab === 'function') showTab('term');
+    if (typeof MenuModule !== 'undefined' && typeof MenuModule.showProbeSelect === 'function') {
+      MenuModule.showProbeSelect();
+    }
+    if (reason && typeof termAddLine === 'function') {
+      termAddLine('[MODE] ' + reason + ' → choisir sonde', 'sys');
+    }
+    return was;
+  }
+
+  /** Si un ESP requis par le mode tombe → retour écran sonde. */
+  function checkLinkHealth() {
+    if (!_mode) {
+      _updateBadge();
+      return;
+    }
+    if (_mode === 'A' && !aOk()) clear('perte ESP A');
+    else if (_mode === 'B' && !bOk()) clear('perte ESP B');
+    else if (_mode === 'AB' && !aOk()) clear('perte ESP A (duo)');
+    else if (_mode === 'AB' && !bOk()) clear('perte ESP B (duo)');
+    else _updateBadge();
+  }
+
+  function change() {
+    clear('changement de sonde');
+  }
+
+  _updateBadge();
+  return {
+    get: get, isSet: isSet, isDual: isDual, isMonoA: isMonoA, isMonoB: isMonoB,
+    canSelect: canSelect, set: set, clear: clear, change: change,
+    checkLinkHealth: checkLinkHealth, aOk: aOk, bOk: bOk, updateBadge: _updateBadge,
+  };
+})();
+window.ProbeMode = ProbeMode;
+
+/**
+ * Session DOUBLE — uniquement si ProbeMode === AB.
+ * ESP32 : toujours mono (même FW). Duo = 2 sessions parallèles pilotées ici.
+ */
+const DualSession = (() => {
+  let _active = false;
+
+  function available() {
+    if (typeof ProbeMode !== 'undefined' && ProbeMode.isSet()) {
+      return ProbeMode.isDual() && typeof wsSendB === 'function';
+    }
+    return isDualMode() && typeof wsSendB === 'function';
+  }
+  function begin() {
+    _active = available();
+    return _active;
+  }
+  function end() { _active = false; }
+  function is() { return _active; }
+
+  function sendBoth(cmd) {
+    // Mode mono B : wsSend route déjà vers B — ne pas doubler via wsSendB
+    if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB()) {
+      if (typeof wsSend === 'function') wsSend(cmd);
+      return;
+    }
+    if (typeof wsSend === 'function') wsSend(cmd);
+    if (_active && typeof wsSendB === 'function') wsSendB(cmd);
+  }
+
+  function startModule(tab, gotoCmd, opts) {
+    opts = opts || {};
+    // available() avant wsGoto : wsGoto → analyseResetDualSession → DualSession.end()
+    const wantDual = available();
+    if (wantDual) {
+      if (typeof termAddLine === 'function') {
+        termAddLine('[DOUBLE] ' + (opts.label || tab) + ' A+B', 'sys');
+      }
+      wsSendB(gotoCmd);
+    }
+    const go = typeof window.wsGoto === 'function' ? window.wsGoto : null;
+    if (go) {
+      go(tab, gotoCmd, {
+        onAck: function () {
+          // Re-begin après le reset de wsGoto
+          if (wantDual) begin();
+          else end();
+          if (opts.onReady) opts.onReady(wantDual);
+        },
+        onTimeout: function () {
+          end();
+          if (opts.onFail) opts.onFail();
+        },
+      });
+    } else if (typeof wsSend === 'function') {
+      wsSend(gotoCmd);
+      setTimeout(function () {
+        if (wantDual) begin();
+        if (opts.onReady) opts.onReady(wantDual);
+      }, 200);
+    }
+    return wantDual;
+  }
+
+  function stopBoth(cmd) {
+    const c = cmd || 'r';
+    if (typeof wsSend === 'function') wsSend(c);
+    if (_active && typeof wsSendB === 'function') wsSendB(c);
+    end();
+  }
+
+  return { available: available, begin: begin, end: end, is: is,
+           sendBoth: sendBoth, startModule: startModule, stopBoth: stopBoth };
+})();
+window.DualSession = DualSession;
 
 function updateConnStatus() {
   const aOk = !!(ws && ws.readyState === WebSocket.OPEN);
@@ -201,9 +499,17 @@ function updateConnStatus() {
     ? (bOk ? ('B ' + ESP32_HOST_B) : ('B …' + ESP32_HOST_B))
     : 'B —';
   let mode = '';
-  if (aOk && bOk) mode = ' · DOUBLE';
-  else if (aOk) mode = ' · simple';
+  if (typeof ProbeMode !== 'undefined' && ProbeMode.isSet()) {
+    const pm = ProbeMode.get();
+    mode = pm === 'AB' ? ' · A+B' : (' · sonde ' + pm);
+  } else if (aOk && bOk) mode = ' · sonde ?';
+  else if (aOk || bOk) mode = ' · sonde ?';
   lbl.textContent = aTxt + '  |  ' + bTxt + mode;
+  if (typeof ProbeMode !== 'undefined') ProbeMode.updateBadge();
+  if (typeof MenuModule !== 'undefined' &&
+      typeof MenuModule.refreshProbeIfShown === 'function') {
+    MenuModule.refreshProbeIfShown();
+  }
 }
 
 function _isSetupPortalPage() {
@@ -247,6 +553,8 @@ let _lastAliveMs = 0;
 let _lastAliveMsB = 0;
 const WS_HEARTBEAT_MS = 4000;
 const WS_ALIVE_TIMEOUT_MS = 10000;
+/** >0 pendant calcul JS lourd (filtre FFT…) — évite faux timeout heartbeat. */
+let _wsHeavyWork = 0;
 
 function _markWsAlive() {
   _lastAliveMs = Date.now();
@@ -254,6 +562,18 @@ function _markWsAlive() {
 function _markWsAliveB() {
   _lastAliveMsB = Date.now();
 }
+function wsBeginHeavy() {
+  _wsHeavyWork++;
+  _markWsAlive();
+  _markWsAliveB();
+}
+function wsEndHeavy() {
+  _wsHeavyWork = Math.max(0, _wsHeavyWork - 1);
+  _markWsAlive();
+  _markWsAliveB();
+}
+window.wsBeginHeavy = wsBeginHeavy;
+window.wsEndHeavy = wsEndHeavy;
 
 function _cancelNavPending(silent) {
   if (_navTimeoutId) { clearTimeout(_navTimeoutId); _navTimeoutId = null; }
@@ -274,6 +594,7 @@ function forceCloseA(reason) {
   updateConnStatus();
   if (reason) termAddLine('[A] ' + reason, 'sys');
   try { if (old && old.readyState === WebSocket.OPEN) old.close(); } catch (e) {}
+  if (typeof ProbeMode !== 'undefined') ProbeMode.checkLinkHealth();
 }
 
 function forceCloseB(reason) {
@@ -284,6 +605,7 @@ function forceCloseB(reason) {
   updateConnStatus();
   if (reason) termAddLine('[B] ' + reason, 'sys');
   try { if (old && old.readyState === WebSocket.OPEN) old.close(); } catch (e) {}
+  if (typeof ProbeMode !== 'undefined') ProbeMode.checkLinkHealth();
 }
 
 function _startHeartbeat() {
@@ -294,6 +616,11 @@ function _startHeartbeat() {
     if (ws.readyState !== WebSocket.OPEN) {
       forceCloseA('lien mort (readyState)');
       if (ESP32_HOST) _scheduleWsReconnect();
+      return;
+    }
+    if (_wsHeavyWork > 0) {
+      _markWsAlive();
+      try { ws.send('WS_PING\n'); } catch (e) {}
       return;
     }
     if (Date.now() - _lastAliveMs > WS_ALIVE_TIMEOUT_MS) {
@@ -320,6 +647,11 @@ function _startHeartbeatB() {
     if (wsB.readyState !== WebSocket.OPEN) {
       forceCloseB('lien mort (readyState)');
       if (ESP32_HOST_B) _scheduleWsReconnectB();
+      return;
+    }
+    if (_wsHeavyWork > 0) {
+      _markWsAliveB();
+      try { wsB.send('WS_PING\n'); } catch (e) {}
       return;
     }
     if (Date.now() - _lastAliveMsB > WS_ALIVE_TIMEOUT_MS) {
@@ -471,7 +803,10 @@ function _wsConnectTo(host) {
     hideIpBanner();
     _markWsAlive();
     updateConnStatus();
-    termAddLine('[A] -- connecte --' + (isDualMode() ? ' (mode DOUBLE)' : ' (mode simple)'), 'sys');
+    termAddLine('[A] -- connecte --' +
+      (typeof ProbeMode !== 'undefined' && ProbeMode.isSet()
+        ? (' [sonde ' + ProbeMode.get() + ']')
+        : ' → choisir sonde'), 'sys');
     _startHeartbeat();
     if (_activeTab === 'calc' || _activeTab === 'demod') showTab(_activeTab);
     if (typeof BalanceModule !== 'undefined') BalanceModule.init(wsSend);
@@ -535,7 +870,10 @@ function _wsConnectBTo(host) {
     _wsFailCountB = 0;
     _wsBackoffMsB = WS_RECONNECT_BASE_MS;
     updateConnStatus();
-    termAddLine('[B] -- connecte --' + (isDualMode() ? ' (mode DOUBLE)' : ''), 'sys');
+    termAddLine('[B] -- connecte --' +
+      (typeof ProbeMode !== 'undefined' && ProbeMode.isSet()
+        ? (' [sonde ' + ProbeMode.get() + ']')
+        : ' → choisir sonde'), 'sys');
     _startHeartbeatB();
   };
 
@@ -571,6 +909,40 @@ function handleTextB(raw) {
     line = (line || '').trim();
     if (!line) return;
     if (line === 'WS_PONG' || line === 'PONG') return;
+
+    // Mode mono B : NAV_ACK / SYS_STATE comme sur A
+    if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB()) {
+      if (line.startsWith('NAV_ACK=')) {
+        const mod = line.slice(8).trim();
+        if (_navPending) {
+          if (_navTimeoutId) { clearTimeout(_navTimeoutId); _navTimeoutId = null; }
+          _navPending = false;
+          const o = _navOpts;
+          _navOpts = null;
+          if (mod === 'bumptest') {
+            showTab('analyse');
+            if (typeof bumpStart === 'function') bumpStart();
+          } else if (mod) {
+            showTab(mod);
+            if (mod === 'balance' && typeof BalanceModule !== 'undefined' &&
+                typeof BalanceModule.enterBalance === 'function') {
+              BalanceModule.enterBalance();
+            }
+          }
+          if (o && typeof o.onAck === 'function') o.onAck();
+        }
+        return;
+      }
+      if (line.startsWith('SYS_STATE=')) {
+        const mod = line.slice(10).trim();
+        if (mod === 'bumptest') {
+          showTab('analyse');
+          if (typeof bumpStart === 'function') bumpStart();
+        } else if (mod) showTab(mod);
+        return;
+      }
+    }
+
     if (line === 'NAV_ACK=analyse' || line.startsWith('NAV_ACK=')) return;
     if (line.startsWith('ANAL_ARM_OK')) {
       _onAnalArmOk(true);
@@ -596,12 +968,62 @@ function handleTextB(raw) {
       return;
     }
     if (line.startsWith('BUMP_LIVE=')) {
-      const v = parseInt(line.slice(10), 10);
-      if (typeof bumpReceiveLiveB === 'function') bumpReceiveLiveB(v);
+      let v = parseInt(line.slice(10), 10);
+      v = applyAxisInvertScalar('B', v);
+      if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB()) {
+        if (typeof bumpReceiveLive === 'function') bumpReceiveLive(v);
+      } else if (typeof bumpReceiveLiveB === 'function') {
+        bumpReceiveLiveB(v);
+      }
       return;
     }
     if (line.startsWith('BUMP_CFG=')) {
       // A a déjà appliqué la config (même G/Fs)
+      return;
+    }
+    if (line === 'BAL_TOUR') {
+      rxStateB = 'bal_hdr';
+      rxHeadersB = {};
+      return;
+    }
+    if (rxStateB === 'bal_hdr') {
+      if (line.startsWith('RPM=')) { rxHeadersB.rpm = parseFloat(line.slice(4)); return; }
+      if (line.startsWith('N=')) { rxHeadersB.n = parseInt(line.slice(2), 10); return; }
+      if (line.startsWith('RANGE=')) {
+        rxHeadersB.range = parseInt(line.slice(6), 10);
+        rxStateB = 'bal_bin';
+        return;
+      }
+      return;
+    }
+    // Balance B : mono B → tout vers BalanceModule ; duo → RPM seulement (A pilote STATE)
+    if (line.startsWith('BAL_') || line.startsWith('EQ_')) {
+      if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB()) {
+        if (typeof BalanceModule !== 'undefined') BalanceModule.onData(line);
+        return;
+      }
+      if (line.startsWith('BAL_RPM=')) {
+        if (typeof BalanceModule !== 'undefined' && BalanceModule.onRpmB) {
+          BalanceModule.onRpmB(parseFloat(line.slice(8)) || 0);
+        }
+        return;
+      }
+      return;
+    }
+    if (line === 'HARM_BIN') {
+      rxStateB = 'harm_hdr';
+      rxHeadersB = {};
+      return;
+    }
+    if (rxStateB === 'harm_hdr') {
+      if (line.startsWith('G=')) { rxHeadersB.g = parseInt(line.slice(2), 10); return; }
+      if (line.startsWith('F=')) { rxHeadersB.fs = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('RPM=')) { rxHeadersB.rpm = parseFloat(line.slice(4)); return; }
+      if (line.startsWith('N=')) {
+        rxHeadersB.n = parseInt(line.slice(2), 10);
+        rxStateB = 'harm_bin';
+        return;
+      }
       return;
     }
     if (line === 'LIVE_FFT_BLOC') {
@@ -636,23 +1058,46 @@ function handleTextB(raw) {
 
 function handleBinaryB(buf) {
   const st = rxStateB;
-  if (st !== 'an_bin' && st !== 'fft_bin') {
+  if (st !== 'an_bin' && st !== 'fft_bin' && st !== 'harm_bin' && st !== 'bal_bin') {
     rxStateB = 'text';
     return;
   }
   const h = rxHeadersB;
   rxStateB = 'text';
   if (!_crcCheck(buf, h.crc)) return;
-  if (st === 'fft_bin') {
-    if (typeof fftReceiveBlocB === 'function') {
-      fftReceiveBlocB(h.g, h.fs, h.n, new Int16Array(buf));
+  const samples = applyAxisInvertIfNeeded('B', new Int16Array(buf));
+  // Mode mono B : B alimente les handlers « A » (UI mono classique)
+  const monoB = (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB());
+  if (st === 'bal_bin') {
+    if (monoB && typeof BalanceModule !== 'undefined' && BalanceModule.onTourBinary) {
+      BalanceModule.onTourBinary(h.rpm, h.range, h.n, samples);
+    } else if (typeof BalanceModule !== 'undefined' && BalanceModule.onTourBinaryB) {
+      BalanceModule.onTourBinaryB(h.rpm, h.range, h.n, samples);
     }
     return;
   }
-  if (typeof analyseReceiveBlocB === 'function') {
-    analyseReceiveBlocB(h.g, h.fs, h.t || (h.n / h.fs), h.n, new Int16Array(buf));
+  if (st === 'fft_bin') {
+    if (monoB && typeof fftReceiveBloc === 'function') {
+      fftReceiveBloc(h.g, h.fs, h.n, samples);
+    } else if (typeof fftReceiveBlocB === 'function') {
+      fftReceiveBlocB(h.g, h.fs, h.n, samples);
+    }
+    return;
   }
-  if (typeof _dualOnBinaryB === 'function') _dualOnBinaryB();
+  if (st === 'harm_bin') {
+    if (monoB && typeof HarmonicModule !== 'undefined' && HarmonicModule.onHarmBinary) {
+      HarmonicModule.onHarmBinary(h.g, h.fs, h.rpm, h.n, samples);
+    } else if (typeof HarmonicModule !== 'undefined' && HarmonicModule.onHarmBinaryB) {
+      HarmonicModule.onHarmBinaryB(h.g, h.fs, h.rpm, h.n, samples);
+    }
+    return;
+  }
+  if (monoB && typeof analyseReceiveBloc === 'function') {
+    analyseReceiveBloc(h.g, h.fs, h.t || (h.n / h.fs), h.n, samples);
+  } else if (typeof analyseReceiveBlocB === 'function') {
+    analyseReceiveBlocB(h.g, h.fs, h.t || (h.n / h.fs), h.n, samples);
+  }
+  if (!monoB && typeof _dualOnBinaryB === 'function') _dualOnBinaryB();
 }
 
 function wsSendB(cmd) {
@@ -668,8 +1113,8 @@ function wsSendB(cmd) {
 }
 window.wsSendB = wsSendB;
 
-// DOUBLE sync : ARM → FIRE (capture sync) → SEND A puis SEND B (transfert)
-// phase: 'arm' | 'fire' | 'sendA' | 'sendB' | 'done'
+// DOUBLE sync : ARM → FIRE (capture sync) → SEND A+B en parallèle (2 WS)
+// phase: 'arm' | 'fire' | 'send' | 'done'
 let _dualSync = null;
 
 function _dualClearTimer() {
@@ -701,36 +1146,45 @@ function _dualFireNow() {
   }, 60000);
 }
 
-function _dualSendA() {
+/** Transfert parallèle A+B — 2 WebSockets distincts (évite le retard B séquentiel). */
+function _dualSendBoth() {
   if (!_dualSync || _dualSync.phase !== 'fire') return;
   if (!_dualSync.capA || !_dualSync.capB) return;
   _dualClearTimer();
-  _dualSync.phase = 'sendA';
-  termAddLine('[DOUBLE] SEND A (transfert)', 'sys');
+  _dualSync.phase = 'send';
+  _dualSync.binA = false;
+  _dualSync.binB = false;
+  termAddLine('[DOUBLE] SEND A+B (parallèle)', 'sys');
   if (typeof acqSetTransferPhase === 'function') acqSetTransferPhase();
   wsSend('ANAL_SEND');
+  wsSendB('ANAL_SEND');
   _dualSync.timer = setTimeout(function () {
-    _dualAbort('timeout transfert A');
-  }, 45000);
+    _dualAbort('timeout transfert A+B');
+  }, 60000);
 }
 
 function _dualOnBinaryA() {
-  if (!_dualSync || _dualSync.phase !== 'sendA') return;
-  _dualClearTimer();
-  _dualSync.phase = 'sendB';
-  termAddLine('[DOUBLE] SEND B (transfert)', 'sys');
-  wsSendB('ANAL_SEND');
-  _dualSync.timer = setTimeout(function () {
-    _dualAbort('timeout transfert B');
-  }, 45000);
+  if (!_dualSync || _dualSync.phase !== 'send') return;
+  _dualSync.binA = true;
+  termAddLine('[DOUBLE] A reçu' + (_dualSync.binB ? ' — OK' : ' — attente B…'), 'sys');
+  if (_dualSync.binA && _dualSync.binB) {
+    _dualClearTimer();
+    _dualSync.phase = 'done';
+    termAddLine('[DOUBLE] OK — A+B reçus', 'sys');
+    _dualSync = null;
+  }
 }
 
 function _dualOnBinaryB() {
-  if (!_dualSync || _dualSync.phase !== 'sendB') return;
-  _dualClearTimer();
-  _dualSync.phase = 'done';
-  termAddLine('[DOUBLE] OK — A+B reçus', 'sys');
-  _dualSync = null;
+  if (!_dualSync || _dualSync.phase !== 'send') return;
+  _dualSync.binB = true;
+  termAddLine('[DOUBLE] B reçu' + (_dualSync.binA ? ' — OK' : ' — attente A…'), 'sys');
+  if (_dualSync.binA && _dualSync.binB) {
+    _dualClearTimer();
+    _dualSync.phase = 'done';
+    termAddLine('[DOUBLE] OK — A+B reçus', 'sys');
+    _dualSync = null;
+  }
 }
 
 function _onAnalArmOk(fromB) {
@@ -746,15 +1200,18 @@ function _onAnalCapOk(fromB) {
   if (fromB) _dualSync.capB = true;
   else _dualSync.capA = true;
   termAddLine('[' + (fromB ? 'B' : 'A') + '] CAP_OK', 'sys');
-  _dualSendA();
+  _dualSendBoth();
 }
 
 /** Démarre acquis. temporelle. Simple = ANAL_START. DOUBLE = ARM→FIRE→SEND. */
 function startAnalTemporal(g, fs) {
   if (typeof analyseArmDual === 'function') analyseArmDual();
   const params = 'G=' + g + ' FS=' + fs;
+  const dual = (typeof DualSession !== 'undefined')
+    ? DualSession.available()
+    : isDualMode();
 
-  if (!isDualMode()) {
+  if (!dual) {
     wsSend('ANAL_START ' + params);
     return;
   }
@@ -911,7 +1368,8 @@ function handleText(raw) {
       return;
     }
     if (line.startsWith('BUMP_LIVE=')) {
-      const v = parseInt(line.slice(10), 10);
+      let v = parseInt(line.slice(10), 10);
+      v = applyAxisInvertScalar('A', v);
       if (typeof bumpReceiveLive === 'function') bumpReceiveLive(v);
       return;
     }
@@ -1066,30 +1524,45 @@ function handleBinary(buf) {
     return;
   }
 
+  const samplesA = applyAxisInvertIfNeeded('A', new Int16Array(buf));
+
   if (rxState === 'fft_bin') {
     rxState = 'text';
-    fftReceiveBloc(h.g, h.fs, h.n, new Int16Array(buf));
+    fftReceiveBloc(h.g, h.fs, h.n, samplesA);
 
   } else if (rxState === 'an_bin') {
     rxState = 'text';
-    analyseReceiveBloc(h.g, h.fs, h.t || (h.n / h.fs), h.n, new Int16Array(buf));
+    analyseReceiveBloc(h.g, h.fs, h.t || (h.n / h.fs), h.n, samplesA);
     if (typeof _dualOnBinaryA === 'function') _dualOnBinaryA();
 
   } else if (rxState === 'bal_bin') {
     rxState = 'text';
     if (typeof BalanceModule !== 'undefined') {
-      BalanceModule.onTourBinary(h.rpm, h.range, h.n, new Int16Array(buf));
+      BalanceModule.onTourBinary(h.rpm, h.range, h.n, samplesA);
     }
 
   } else if (rxState === 'harm_bin') {
     rxState = 'text';
     if (typeof HarmonicModule !== 'undefined') {
-      HarmonicModule.onHarmBinary(h.g, h.fs, h.rpm, h.n, new Int16Array(buf));
+      HarmonicModule.onHarmBinary(h.g, h.fs, h.rpm, h.n, samplesA);
     }
   }
 }
 
 function wsSend(cmd) {
+  // Mode mono B : tout part sur ESP B
+  if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB()) {
+    if (!wsB || wsB.readyState !== WebSocket.OPEN) {
+      termAddLine('!! ESP B non connecte', 'sys');
+      updateConnStatus();
+      return;
+    }
+    const cleanB = cmd.replace(/\n+$/, '');
+    try { wsB.send(cleanB + '\n'); }
+    catch (e) { forceCloseB('envoi échoué'); return; }
+    if (cleanB.trim() && cleanB !== 'WS_PING') termAddLine('>>[B] ' + cleanB, 'sent');
+    return;
+  }
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     termAddLine('!! ESP A non connecte', 'sys');
     updateConnStatus();
@@ -1142,8 +1615,10 @@ function wsGoto(tab, cmdLine, opts) {
     termAddLine('!! navigation en cours', 'sys');
     return;
   }
-  if (!ws || ws.readyState !== WebSocket.OPEN) {
-    termAddLine('!! ESP A non connecte', 'sys');
+  const monoB = (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB());
+  const sock = monoB ? wsB : ws;
+  if (!sock || sock.readyState !== WebSocket.OPEN) {
+    termAddLine('!! ESP ' + (monoB ? 'B' : 'A') + ' non connecte', 'sys');
     updateConnStatus();
     return;
   }
@@ -1152,29 +1627,34 @@ function wsGoto(tab, cmdLine, opts) {
     termAddLine('!! format invalide: WS_GOTO sans parametres', 'sys');
     return;
   }
-  // Changement de module (temporel, live, bump, harm, balance, term…)
-  // → jamais garder une trace B / RX binaire B d'une session précédente
+  // Changement de module → flush traces dual
   if (typeof analyseResetDualSession === 'function') analyseResetDualSession();
+  // Re-assert dual session si mode AB (analyseReset DualSession.end)
+  if (typeof ProbeMode !== 'undefined' && ProbeMode.isDual() &&
+      typeof DualSession !== 'undefined') DualSession.begin();
   rxStateB = 'text';
   rxHeadersB = {};
 
   _navPending = true;
   _navOpts = opts || null;
   try {
-    ws.send(clean + '\n');
+    sock.send(clean + '\n');
   } catch (e) {
     _cancelNavPending(true);
-    forceCloseA('envoi navigation échoué');
+    if (monoB) forceCloseB('envoi navigation échoué');
+    else forceCloseA('envoi navigation échoué');
     return;
   }
-  if (clean.trim() && clean !== 'WS_PING') termAddLine('>> ' + clean, 'sent');
+  if (clean.trim() && clean !== 'WS_PING') {
+    termAddLine('>>' + (monoB ? '[B] ' : ' ') + clean, 'sent');
+  }
   _navTimeoutId = setTimeout(() => {
     _navTimeoutId = null;
     _navPending = false;
     const o = _navOpts;
     _navOpts = null;
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      termAddLine('[A] NAV annulé (déconnecté)', 'sys');
+    if (!sock || sock.readyState !== WebSocket.OPEN) {
+      termAddLine('[' + (monoB ? 'B' : 'A') + '] NAV annulé (déconnecté)', 'sys');
       updateConnStatus();
       return;
     }
@@ -1257,18 +1737,23 @@ function clearVaSession() {
   if (!confirm('Effacer la session mémorisée et revenir au terminal ?')) return;
   try {
     localStorage.removeItem('va_balance_v1');
+    localStorage.removeItem('probe_mode');
     localStorage.setItem('lastTab', 'term');
     if (typeof anPersistClear === 'function') anPersistClear();
   } catch (e) {}
   if (typeof BalanceModule !== 'undefined' && typeof BalanceModule.clearSession === 'function') {
     BalanceModule.clearSession();
   }
+  // Remise au repos des ESP encore connectés (avant clear mode)
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    try { ws.send('BAL_RESET\n'); ws.send('WS_GOTO=term\n'); } catch (e) {}
+  }
+  if (wsB && wsB.readyState === WebSocket.OPEN) {
+    try { wsB.send('BAL_RESET\n'); wsB.send('WS_GOTO=term\n'); } catch (e) {}
+  }
+  if (typeof ProbeMode !== 'undefined') ProbeMode.clear('reset session');
   _activeTab = 'term';
   showTab('term');
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    wsSend('BAL_RESET');
-    wsGoto('term', 'WS_GOTO=term');
-  }
 }
 window.clearVaSession = clearVaSession;
 

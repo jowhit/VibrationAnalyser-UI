@@ -5,15 +5,26 @@
 //
 // Start/Stop :
 //   Start → WS_GOTO=ANAL_HARM → ESP commence, envoie en boucle
-//   Stop  → WS_GOTO=HARM_STOP → ESP s'arrête, bouton revient en Start
+//   Stop  → WS_GOTO=HARM_STOP → ESP s'arrête, dernière trame gelée (pause)
 // ═══════════════════════════════════════════════════════════════
 
 const HarmonicModule = (() => {
 
+  // Canaux A/B : même structure (pas de chemin « mono + patch B »).
+  // _dualSession = true dès le Start en mode DOUBLE → UI A+B immédiate.
+  const HARM_TACH_STALE_MS = 1500;
+  const HARM_COL_A = '#0033cc';
+  const HARM_COL_B = '#e67e22';
+
   let _harmonics  = [];
+  let _harmonicsB = [];
   let _rpm        = 0;
+  let _rpmB       = 0;
   let _fs         = 0;
   let _running    = false;
+  let _dualSession = false;
+  let _lastFrameMs = 0;
+  let _staleTimer  = null;
 
   let _polarCanvas, _polarCtx;
   let _speedCanvas, _speedCtx;
@@ -34,6 +45,10 @@ const HarmonicModule = (() => {
   let _ptAmpG = 0;
   let _ptSatPct = 0;
   let _ptIsSaturated = false;
+  let _ptHasDataB = false;
+  let _ptPhaseB = 0;
+  let _ptAmpGB = 0;
+  let _ptIsSaturatedB = false;
 
   function _applyCanvasVisibility() {
     if (_polarCanvas) _polarCanvas.style.display = _phaseTrackingMode ? 'none' : '';
@@ -98,29 +113,152 @@ const HarmonicModule = (() => {
   }
 
   // ============================================================
-  // harmToggle — bouton Start / Stop
+  // Session dual / tach stale / start-stop symétrique
   // ============================================================
+  function _harmDualAvailable() {
+    if (typeof DualSession !== 'undefined') return DualSession.available();
+    return (typeof isDualMode === 'function' && isDualMode() && typeof wsSendB === 'function');
+  }
+
+  /** UI dual = session lancée en DOUBLE (pas « B a déjà envoyé une trame »). */
+  function _isDualUi() {
+    return _dualSession || (typeof DualSession !== 'undefined' && DualSession.is());
+  }
+
+  function _clearLiveData() {
+    _harmonics = [];
+    _harmonicsB = [];
+    _rpm = 0;
+    _rpmB = 0;
+    _ptHasData = false;
+    _ptHasDataB = false;
+    _ptPhase = 0;
+    _ptPhaseB = 0;
+    _ptAmpG = 0;
+    _ptAmpGB = 0;
+    _ptIsSaturated = false;
+    _ptIsSaturatedB = false;
+    _ptHistory = [];
+  }
+
+  function _noteFrame() {
+    _lastFrameMs = Date.now();
+  }
+
+  function _stopStaleWatch() {
+    if (_staleTimer) {
+      clearInterval(_staleTimer);
+      _staleTimer = null;
+    }
+  }
+
+  function _startStaleWatch() {
+    _stopStaleWatch();
+    _lastFrameMs = Date.now();
+    _staleTimer = setInterval(function () {
+      if (!_running) return;
+      if (!_lastFrameMs) return;
+      if (Date.now() - _lastFrameMs < HARM_TACH_STALE_MS) return;
+      // Perte tach / plus de trames : RPM=0 + graphiques tombent (spec 1.5 s)
+      _rpm = 0;
+      _rpmB = 0;
+      _harmonics = [];
+      _harmonicsB = [];
+      _ptHasData = false;
+      _ptHasDataB = false;
+      _harmUpdateRpmBar();
+      if (_phaseTrackingMode) {
+        _drawPhaseCircle();
+        _updatePhaseUI();
+      } else {
+        _updateInfo();
+        _drawPolar();
+        _drawSpeed();
+      }
+    }, 250);
+  }
+
+  function _startBothEsp() {
+    _dualSession = (typeof DualSession !== 'undefined')
+      ? DualSession.begin()
+      : _harmDualAvailable();
+    // Nouveau Start : efface le gel précédent
+    _clearLiveData();
+    _harmUpdateRpmBar();
+    _drawPolar();
+    _drawSpeed();
+    if (_dualSession) {
+      if (typeof termAddLine === 'function') termAddLine('[DOUBLE] Harmonic A+B (tach)', 'sys');
+      wsSendB('WS_GOTO=ANAL_HARM');
+    }
+  }
+
+  function _stopBothEsp() {
+    if (_dualSession && typeof wsSendB === 'function') {
+      wsSendB('WS_GOTO=HARM_STOP');
+    }
+  }
+
+  /** Stop = pause : garde polaire / phase / RPM affichés. */
+  function _pauseSession() {
+    _stopStaleWatch();
+    // Ne pas _clearLiveData — gel de la dernière trame (mono et duo)
+    if (typeof DualSession !== 'undefined') DualSession.end();
+    setRunning(false);
+    _harmUpdateRpmBar();
+    _updateInfo();
+    _drawPolar();
+    _drawSpeed();
+    if (_phaseTrackingMode) {
+      _drawPhaseCircle();
+      _updatePhaseUI();
+    }
+  }
+
+  /** Abandon (timeout Start) : tout effacer. */
+  function _abortSession() {
+    _stopStaleWatch();
+    _clearLiveData();
+    _dualSession = false;
+    if (typeof DualSession !== 'undefined') DualSession.end();
+    setRunning(false);
+    _harmUpdateRpmBar();
+    _updateInfo();
+    _drawPolar();
+    _drawSpeed();
+    if (_phaseTrackingMode) {
+      _drawPhaseCircle();
+      _updatePhaseUI();
+    }
+  }
+
   function harmToggle() {
     const go = typeof window.wsGoto === 'function' ? window.wsGoto : null;
     if (_running) {
+      // Stop immédiat côté UI (ne pas attendre NAV_ACK pour geler)
+      _stopStaleWatch();
+      _stopBothEsp();
       if (go) {
         go('harmonic', 'WS_GOTO=HARM_STOP', {
-          onAck: () => setRunning(false),
-          onTimeout: () => setRunning(false),
+          onAck: () => _pauseSession(),
+          onTimeout: () => _pauseSession(),
         });
       } else {
         wsSend('WS_GOTO=HARM_STOP');
-        setRunning(false);
+        _pauseSession();
       }
     } else {
+      // A et B démarrés ensemble (B n'attend plus le NAV_ACK de A)
+      _startBothEsp();
       if (go) {
         go('harmonic', 'WS_GOTO=ANAL_HARM', {
-          onAck: () => setRunning(true),
-          onTimeout: () => setRunning(false),
+          onAck: () => { setRunning(true); _startStaleWatch(); },
+          onTimeout: () => _abortSession(),
         });
       } else {
         wsSend('WS_GOTO=ANAL_HARM');
         setRunning(true);
+        _startStaleWatch();
       }
     }
   }
@@ -130,7 +268,15 @@ const HarmonicModule = (() => {
   // ============================================================
   function setRunning(on) {
     _running = on;
+    if (on) _startStaleWatch();
+    else _stopStaleWatch();
     _updateBtn();
+  }
+
+  /** Entrée menu : même contrat start (A+B en parallèle). */
+  function beginFromMenu() {
+    _startBothEsp();
+    setRunning(true);
   }
 
   function _updateBtn() {
@@ -150,46 +296,74 @@ const HarmonicModule = (() => {
   // ============================================================
   // onHarmBinary — réception blob binaire depuis app.js
   // ============================================================
-  function onHarmBinary(gRange, fs, rpm, n, samples) {
-    if (!_running) setRunning(true);
-    _rpm = rpm;
-    _fs  = fs;
-
-    // RPM dans la barre
+  function _harmUpdateRpmBar() {
     var rpmEl = document.getElementById('harm-rpm-val');
     var dotEl = document.getElementById('harm-rpm-dot');
-    if (rpmEl) rpmEl.textContent = Math.round(rpm);
-    if (dotEl) dotEl.className = rpm > 0 ? 'ok' : '';
-
-    if (_phaseTrackingMode) {
-      var pt = _phaseTracking(samples, gRange, fs, rpm, n);
-      _updatePhaseTrackingDisplay(pt);
-    } else {
-      var result = _multiHarmonicDFT(samples, gRange, fs, rpm, n);
-      _updateHarmonicDisplay(result);
+    // Tach commun : une seule valeur ; 0 si perdu
+    var rpmShow = Math.max(_rpm || 0, _rpmB || 0);
+    if (rpmEl) rpmEl.textContent = String(Math.round(rpmShow || 0));
+    if (dotEl) {
+      dotEl.className = (rpmShow > 0) ? 'ok' : '';
     }
   }
 
-  function _updateHarmonicDisplay(result) {
-    _harmonics = result;
-    _updateInfo();
-    _drawPolar();
-    _drawSpeed();
+  function onHarmBinary(gRange, fs, rpm, n, samples) {
+    if (!_running) setRunning(true);
+    _noteFrame();
+    _rpm = rpm;
+    _fs  = fs;
+    _harmUpdateRpmBar();
+
+    if (_phaseTrackingMode) {
+      var pt = _phaseTracking(samples, gRange, fs, rpm, n);
+      _updatePhaseTrackingDisplay(pt, false);
+    } else {
+      _harmonics = _multiHarmonicDFT(samples, gRange, fs, rpm, n);
+      _updateInfo();
+      _drawPolar();
+      _drawSpeed();
+    }
   }
 
-  function _updatePhaseTrackingDisplay(pt) {
-    _ptHasData = true;
-    _ptPhase = pt.phase;
-    _ptAmpG = pt.amp_g;
-    _ptSatPct = pt.satPct;
-    _ptIsSaturated = pt.isSaturated;
-    _ptHistory.push({
-      phase: _ptPhase,
-      amp_g: _ptAmpG,
-      satPct: _ptSatPct,
-      isSaturated: _ptIsSaturated
-    });
-    if (_ptHistory.length > PT_HISTORY_SIZE) _ptHistory.shift();
+  function onHarmBinaryB(gRange, fs, rpm, n, samples) {
+    if (!_dualSession) return; // ignore B hors session DOUBLE
+    if (!_running) setRunning(true);
+    _noteFrame();
+    _rpmB = rpm;
+    if (!_fs) _fs = fs;
+    _harmUpdateRpmBar();
+
+    if (_phaseTrackingMode) {
+      var pt = _phaseTracking(samples, gRange, fs, rpm, n);
+      _updatePhaseTrackingDisplay(pt, true);
+    } else {
+      _harmonicsB = _multiHarmonicDFT(samples, gRange, fs, rpm, n);
+      _updateInfo();
+      _drawPolar();
+      _drawSpeed();
+    }
+  }
+
+  function _updatePhaseTrackingDisplay(pt, isB) {
+    if (isB) {
+      _ptHasDataB = true;
+      _ptPhaseB = pt.phase;
+      _ptAmpGB = pt.amp_g;
+      _ptIsSaturatedB = pt.isSaturated;
+    } else {
+      _ptHasData = true;
+      _ptPhase = pt.phase;
+      _ptAmpG = pt.amp_g;
+      _ptSatPct = pt.satPct;
+      _ptIsSaturated = pt.isSaturated;
+      _ptHistory.push({
+        phase: _ptPhase,
+        amp_g: _ptAmpG,
+        satPct: _ptSatPct,
+        isSaturated: _ptIsSaturated
+      });
+      if (_ptHistory.length > PT_HISTORY_SIZE) _ptHistory.shift();
+    }
     _drawPhaseCircle();
     _updatePhaseUI();
   }
@@ -245,24 +419,56 @@ const HarmonicModule = (() => {
   function _updateInfo() {
     const el = document.getElementById('harm-info');
     if (!el) return;
-    if (_harmonics.length === 0) { el.textContent = '—'; return; }
-    const disp = _harmonics.slice(0, 4);
-    let html = '<b>RPM:</b> ' + Math.round(_rpm) +
-               '  <b>Fs:</b> ' + Math.round(_fs) + ' Hz<br>';
+    if (_harmonics.length === 0 && _harmonicsB.length === 0) {
+      el.textContent = '—'; return;
+    }
+    let html = '<b>RPM:</b> ' + Math.round(_rpm || _rpmB || 0) +
+               '  <b>Fs:</b> ' + Math.round(_fs) + ' Hz';
+    if (_isDualUi()) html += '  <b style="color:' + HARM_COL_B + '">DOUBLE</b>';
+    html += '<br>';
+    function _line(tag, col, h) {
+      if (!h) return '';
+      return '<span style="color:' + col + ';font-weight:bold">' + tag + '</span> ' +
+        h.order + 'X  ' + h.amp_g.toFixed(3) + ' g  ' + h.vel.toFixed(1) + ' mm/s  ' +
+        '<span style="color:#666">@ ' + h.phase.toFixed(0) + '°</span><br>';
+    }
+    if (_harmonics[0]) html += _line('A', HARM_COL_A, _harmonics[0]);
+    else if (_isDualUi()) html += '<span style="color:' + HARM_COL_A + '">A …</span><br>';
+    if (_harmonicsB[0]) html += _line('B', HARM_COL_B, _harmonicsB[0]);
+    else if (_isDualUi()) html += '<span style="color:' + HARM_COL_B + '">B …</span><br>';
+    if (_harmonics[0] && _harmonicsB[0]) {
+      let dph = _harmonicsB[0].phase - _harmonics[0].phase;
+      while (dph > 180) dph -= 360;
+      while (dph < -180) dph += 360;
+      html += '<span style="color:#555">Δφ B−A: ' + dph.toFixed(0) + '°</span><br>';
+    }
+    const disp = _harmonics.slice(1, 4);
     disp.forEach(h => {
-      html += '<span class="hm-order-label" data-o="' + h.order + '">' +
-              h.order + 'X</span> ' +
-              h.amp_g.toFixed(3) + ' g  ' +
-              h.vel.toFixed(1)   + ' mm/s  ' +
-              '<span style="color:#666">@ ' + h.phase.toFixed(0) + '°</span>';
-      if (h.order > 1) html += '  <span style="color:#888">(' + h.amp_pct.toFixed(0) + '%)</span>';
-      html += '<br>';
+      html += h.order + 'X A  ' + h.amp_g.toFixed(3) + ' g  (' + h.amp_pct.toFixed(0) + '%)<br>';
     });
     el.innerHTML = html;
   }
 
-  // ── GRAPHIQUE POLAIRE (1X) ───────────────────────────────────
+  // ── GRAPHIQUE POLAIRE (1X A + B) ─────────────────────────────
   const HARM_COLORS = ['#1a6fc4', '#2a8a3e', '#c45a00', '#8e24aa'];
+
+  function _drawPolarPhasor(c, cx, cy, R, maxAmp, h, col, label) {
+    if (!h || !(h.amp_g > 0)) return;
+    const ratio = Math.min(h.amp_g / maxAmp, 1.0);
+    const rr = ratio * R;
+    const angRad = (h.phase - 90) * Math.PI / 180;
+    const px = cx + rr * Math.cos(angRad);
+    const py = cy + rr * Math.sin(angRad);
+    c.strokeStyle = col; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(cx, cy); c.lineTo(px, py); c.stroke();
+    c.beginPath(); c.arc(px, py, 7, 0, 2 * Math.PI);
+    c.fillStyle = col; c.fill();
+    c.fillStyle = col; c.font = 'bold 11px "Courier New", monospace';
+    c.textAlign = 'left';
+    c.fillText(label, px + 10, py - 2);
+    c.font = '9px "Courier New", monospace';
+    c.fillText(h.phase.toFixed(0) + '°', px + 10, py + 9);
+  }
 
   function _drawPolar() {
     if (!_polarCtx || !_polarCanvas) return;
@@ -277,8 +483,10 @@ const HarmonicModule = (() => {
     c.fillStyle = '#ffffff';
     c.fillRect(0, 0, W, H);
 
-    const maxAmp = (_harmonics.length > 0 && _harmonics[0].amp_g > 0)
-      ? _harmonics[0].amp_g * 1.25 : 0.1;
+    let maxAmp = 0.1;
+    if (_harmonics[0] && _harmonics[0].amp_g > maxAmp) maxAmp = _harmonics[0].amp_g;
+    if (_harmonicsB[0] && _harmonicsB[0].amp_g > maxAmp) maxAmp = _harmonicsB[0].amp_g;
+    maxAmp *= 1.25;
 
     [0.25, 0.5, 0.75, 1.0].forEach(f => {
       c.strokeStyle = f === 1.0 ? '#999' : '#ddd';
@@ -306,43 +514,35 @@ const HarmonicModule = (() => {
     c.beginPath(); c.arc(cx, cy, 3, 0, 2 * Math.PI);
     c.fillStyle = '#bbb'; c.fill();
 
-    if (_harmonics.length === 0) {
+    if (_harmonics.length === 0 && _harmonicsB.length === 0) {
       c.fillStyle = '#aaa'; c.font = '13px "Courier New", monospace';
       c.textAlign = 'center';
       c.fillText('En attente de données', cx, cy + 4);
       return;
     }
 
-    const h1  = _harmonics[0];
-    const col = HARM_COLORS[0];
-    const ratio  = Math.min(h1.amp_g / maxAmp, 1.0);
-    const rr     = ratio * R;
-    const angRad = (h1.phase - 90) * Math.PI / 180;
-    const px = cx + rr * Math.cos(angRad);
-    const py = cy + rr * Math.sin(angRad);
+    _drawPolarPhasor(c, cx, cy, R, maxAmp, _harmonics[0], HARM_COL_A, 'A');
+    _drawPolarPhasor(c, cx, cy, R, maxAmp, _harmonicsB[0], HARM_COL_B, 'B');
 
-    c.strokeStyle = col + '55'; c.lineWidth = 1;
-    c.beginPath(); c.moveTo(cx, cy); c.lineTo(px, py); c.stroke();
-
-    c.beginPath(); c.arc(px, py, 11, 0, 2 * Math.PI);
-    c.strokeStyle = col + '44'; c.lineWidth = 1; c.stroke();
-
-    c.beginPath(); c.arc(px, py, 7, 0, 2 * Math.PI);
-    c.fillStyle = col; c.fill();
-
-    c.fillStyle = col; c.font = 'bold 11px "Courier New", monospace';
-    c.textAlign = 'left';
-    c.fillText('1X', px + 10, py - 2);
     c.font = '9px "Courier New", monospace';
-    c.fillStyle = col + 'bb';
-    c.fillText(h1.phase.toFixed(0) + '°', px + 10, py + 9);
-
-    c.fillStyle = col; c.font = '9px "Courier New", monospace';
     c.textAlign = 'left';
-    c.fillText('1X: ' + h1.amp_g.toFixed(3) + 'g', W - 90, H - 20);
+    if (_harmonics[0]) {
+      c.fillStyle = HARM_COL_A;
+      c.fillText('A 1X: ' + _harmonics[0].amp_g.toFixed(3) + 'g', 8, H - 20);
+    } else if (_isDualUi()) {
+      c.fillStyle = HARM_COL_A;
+      c.fillText('A …', 8, H - 20);
+    }
+    if (_harmonicsB[0]) {
+      c.fillStyle = HARM_COL_B;
+      c.fillText('B 1X: ' + _harmonicsB[0].amp_g.toFixed(3) + 'g', 8, H - 8);
+    } else if (_isDualUi()) {
+      c.fillStyle = HARM_COL_B;
+      c.fillText('B …', 8, H - 8);
+    }
   }
 
-  // ── SPEEDOMÈTRE — barres 1X–4X ──────────────────────────────
+  // ── SPEEDOMÈTRE — barres 1X–4X (A plein / B orange à côté) ──
   function _drawSpeed() {
     if (!_speedCtx || !_speedCanvas) return;
     const c = _speedCtx;
@@ -353,73 +553,53 @@ const HarmonicModule = (() => {
     c.fillStyle = '#f8f8f8';
     c.fillRect(0, 0, W, H);
 
+    const dual = _isDualUi();
     const N = 4, padL = 10, padR = 10, padT = 22, padB = 30;
     const gW = W - padL - padR;
     const gH = H - padT - padB;
-    const barW   = Math.floor(gW / N) - 4;
-    const barGap = Math.floor(gW / N);
+    const slot = Math.floor(gW / N);
+    const barW = dual ? Math.floor(slot / 2) - 3 : Math.floor(slot) - 4;
 
     c.fillStyle = '#444'; c.font = 'bold 11px Arial, sans-serif';
     c.textAlign = 'center';
-    c.fillText('Amplitudes harmoniques', W / 2, 14);
+    c.fillText(dual ? 'Amplitudes A / B' : 'Amplitudes harmoniques', W / 2, 14);
 
-    const disp = _harmonics.slice(0, 4);
-
-    if (disp.length === 0) {
+    const dispA = _harmonics.slice(0, 4);
+    const dispB = _harmonicsB.slice(0, 4);
+    if (dispA.length === 0 && dispB.length === 0) {
       c.fillStyle = '#aaa'; c.font = '12px Arial, sans-serif';
       c.textAlign = 'center'; c.fillText('—', W / 2, H / 2 + 10); return;
     }
 
-    const maxAmp = Math.max(...disp.map(h => h.amp_g), 0.001);
+    let maxAmp = 0.001;
+    dispA.forEach(h => { if (h && h.amp_g > maxAmp) maxAmp = h.amp_g; });
+    dispB.forEach(h => { if (h && h.amp_g > maxAmp) maxAmp = h.amp_g; });
 
     c.strokeStyle = '#ccc'; c.lineWidth = 1;
     c.beginPath(); c.moveTo(padL, padT + gH); c.lineTo(W - padR, padT + gH); c.stroke();
 
-    for (let i = 0; i < N; i++) {
-      const h   = disp[i];
-      const col = HARM_COLORS[i] || '#bbb';
-      const bx  = padL + i * barGap + Math.floor((barGap - barW) / 2);
-
+    function _bar(h, bx, col) {
       if (!h) {
         c.strokeStyle = '#ddd'; c.lineWidth = 1;
         c.strokeRect(bx, padT, barW, gH);
-        c.fillStyle = '#ccc'; c.font = '10px Arial'; c.textAlign = 'center';
-        c.fillText((i+1) + 'X', bx + barW / 2, padT + gH + 14);
-        continue;
+        return;
       }
-
       const ratio = Math.min(h.amp_g / maxAmp, 1.0);
-      const bh    = Math.max(ratio * gH, 2);
-      const by    = padT + gH - bh;
-
-      const grad = c.createLinearGradient(0, by, 0, by + bh);
-      grad.addColorStop(0, col); grad.addColorStop(1, col + '55');
-      c.fillStyle = grad; c.fillRect(bx, by, barW, bh);
-      c.strokeStyle = col + 'aa'; c.lineWidth = 1;
-      c.strokeRect(bx, by, barW, bh);
-
-      c.fillStyle = '#222'; c.font = 'bold 10px "Courier New", monospace';
+      const bh = Math.max(ratio * gH, 2);
+      const by = padT + gH - bh;
+      c.fillStyle = col; c.fillRect(bx, by, barW, bh);
+      c.strokeStyle = col; c.lineWidth = 1; c.strokeRect(bx, by, barW, bh);
+      c.fillStyle = '#222'; c.font = 'bold 9px "Courier New", monospace';
       c.textAlign = 'center';
-      const vy = by - 13;
-      if (vy > padT) {
-        c.fillText(h.amp_g.toFixed(3), bx + barW / 2, vy);
-      } else {
-        c.fillStyle = '#fff';
-        c.fillText(h.amp_g.toFixed(3), bx + barW / 2, by + 12);
-      }
+      if (by - 11 > padT) c.fillText(h.amp_g.toFixed(2), bx + barW / 2, by - 3);
+    }
 
-      c.fillStyle = col; c.font = '9px "Courier New", monospace';
-      c.textAlign = 'center';
-      c.fillText(h.vel.toFixed(1) + ' mm/s', bx + barW / 2, padT + gH + 12);
-
+    for (let i = 0; i < N; i++) {
+      const base = padL + i * slot + Math.floor((slot - (dual ? barW * 2 + 2 : barW)) / 2);
+      _bar(dispA[i], base, HARM_COL_A);
+      if (dual) _bar(dispB[i], base + barW + 2, HARM_COL_B);
       c.fillStyle = '#444'; c.font = 'bold 11px Arial'; c.textAlign = 'center';
-      c.fillText((i+1) + 'X', bx + barW / 2, padT + gH + 24);
-
-      if (bh > 18 && h.freq > 0) {
-        c.fillStyle = '#ffffff99'; c.font = '8px "Courier New", monospace';
-        c.textAlign = 'center';
-        c.fillText(h.freq.toFixed(1) + 'Hz', bx + barW / 2, padT + gH - 4);
-      }
+      c.fillText((i + 1) + 'X', padL + i * slot + slot / 2, padT + gH + 20);
     }
   }
 
@@ -511,38 +691,48 @@ const HarmonicModule = (() => {
     c.beginPath(); c.arc(cx, cy, 3, 0, 2 * Math.PI);
     c.fillStyle = '#ccc'; c.fill();
 
-    if (!_ptHasData) {
+    if (!_ptHasData && !_ptHasDataB) {
       c.fillStyle = '#aaa'; c.font = '13px "Courier New", monospace';
       c.textAlign = 'center'; c.fillText('En attente...', cx, cy + 4);
       return;
     }
 
-    var col = _ptIsSaturated ? '#c45a00' : '#1a6fc4';
-    var angRad = (_ptPhase - 90) * Math.PI / 180;
-    var tipX = cx + R * 0.85 * Math.cos(angRad);
-    var tipY = cy + R * 0.85 * Math.sin(angRad);
+    function _arrow(phase, col, sat) {
+      var useCol = sat ? '#c45a00' : col;
+      var angRad = (phase - 90) * Math.PI / 180;
+      var tipX = cx + R * 0.85 * Math.cos(angRad);
+      var tipY = cy + R * 0.85 * Math.sin(angRad);
+      c.strokeStyle = useCol; c.lineWidth = 2.5;
+      c.beginPath(); c.moveTo(cx, cy); c.lineTo(tipX, tipY); c.stroke();
+      var headLen = 10, headAng = 0.4;
+      c.fillStyle = useCol; c.beginPath();
+      c.moveTo(tipX, tipY);
+      c.lineTo(tipX - headLen * Math.cos(angRad - headAng),
+               tipY - headLen * Math.sin(angRad - headAng));
+      c.lineTo(tipX - headLen * Math.cos(angRad + headAng),
+               tipY - headLen * Math.sin(angRad + headAng));
+      c.closePath(); c.fill();
+    }
 
-    // Flèche
-    c.strokeStyle = col; c.lineWidth = 2.5;
-    c.beginPath(); c.moveTo(cx, cy); c.lineTo(tipX, tipY); c.stroke();
+    if (_ptHasData) _arrow(_ptPhase, HARM_COL_A, _ptIsSaturated);
+    if (_ptHasDataB) _arrow(_ptPhaseB, HARM_COL_B, _ptIsSaturatedB);
 
-    // Pointe
-    var headLen = 10, headAng = 0.4;
-    c.fillStyle = col; c.beginPath();
-    c.moveTo(tipX, tipY);
-    c.lineTo(tipX - headLen * Math.cos(angRad - headAng),
-             tipY - headLen * Math.sin(angRad - headAng));
-    c.lineTo(tipX - headLen * Math.cos(angRad + headAng),
-             tipY - headLen * Math.sin(angRad + headAng));
-    c.closePath(); c.fill();
-
-    // Angle en grand au centre
-    c.fillStyle = col; c.font = 'bold 32px "Courier New", monospace';
+    // Angle A (et B si dual) au centre
     c.textAlign = 'center'; c.textBaseline = 'middle';
-    c.fillText(Math.round(_ptPhase) + '°', cx, cy);
+    if (_ptHasData && _ptHasDataB) {
+      c.fillStyle = HARM_COL_A; c.font = 'bold 18px "Courier New", monospace';
+      c.fillText('A ' + Math.round(_ptPhase) + '°', cx, cy - 12);
+      c.fillStyle = HARM_COL_B; c.font = 'bold 18px "Courier New", monospace';
+      c.fillText('B ' + Math.round(_ptPhaseB) + '°', cx, cy + 14);
+    } else if (_ptHasData) {
+      c.fillStyle = HARM_COL_A; c.font = 'bold 32px "Courier New", monospace';
+      c.fillText(Math.round(_ptPhase) + '°', cx, cy);
+    } else {
+      c.fillStyle = HARM_COL_B; c.font = 'bold 32px "Courier New", monospace';
+      c.fillText(Math.round(_ptPhaseB) + '°', cx, cy);
+    }
     c.textBaseline = 'alphabetic';
 
-    // Historique : traces légères des mesures précédentes
     for (var i = 0; i < _ptHistory.length - 1; i++) {
       var hp = _ptHistory[i];
       var hRad = (hp.phase - 90) * Math.PI / 180;
@@ -550,7 +740,7 @@ const HarmonicModule = (() => {
       var hy = cy + R * 0.7 * Math.sin(hRad);
       var alpha = 0.15 + 0.1 * (i / PT_HISTORY_SIZE);
       c.beginPath(); c.arc(hx, hy, 3, 0, 2 * Math.PI);
-      c.fillStyle = (hp.isSaturated ? 'rgba(196,90,0,' : 'rgba(26,111,196,') + alpha.toFixed(2) + ')';
+      c.fillStyle = (hp.isSaturated ? 'rgba(196,90,0,' : 'rgba(0,51,204,') + alpha.toFixed(2) + ')';
       c.fill();
     }
   }
@@ -563,13 +753,19 @@ const HarmonicModule = (() => {
     var satEl  = document.getElementById('pt-sat-badge');
     var histEl = document.getElementById('pt-history');
 
-    if (_ptHasData && ampEl) {
-      if (_ptIsSaturated) {
-        ampEl.innerHTML = '<span style="color:#c45a00;">Sat: ' +
-          _ptSatPct.toFixed(0) + '%</span>';
-      } else {
-        ampEl.textContent = 'Amp: ' + _ptAmpG.toFixed(3) + ' g';
+    if ((_ptHasData || _ptHasDataB) && ampEl) {
+      var parts = [];
+      if (_ptHasData) {
+        parts.push(_ptIsSaturated
+          ? '<span style="color:#c45a00;">A Sat ' + _ptSatPct.toFixed(0) + '%</span>'
+          : '<span style="color:' + HARM_COL_A + '">A ' + _ptAmpG.toFixed(3) + ' g</span>');
       }
+      if (_ptHasDataB) {
+        parts.push(_ptIsSaturatedB
+          ? '<span style="color:#c45a00;">B Sat</span>'
+          : '<span style="color:' + HARM_COL_B + '">B ' + _ptAmpGB.toFixed(3) + ' g</span>');
+      }
+      ampEl.innerHTML = parts.join('  |  ');
     }
 
     if (satEl) {
@@ -621,5 +817,8 @@ const HarmonicModule = (() => {
   function resize()  { _resize(); }
   function getRPM()  { return _rpm; }
 
-  return { init, onData, onHarmBinary, resize, getRPM, setRunning, harmToggle, switchView };
+  return {
+    init, onData, onHarmBinary, onHarmBinaryB,
+    resize, getRPM, setRunning, beginFromMenu, harmToggle, switchView,
+  };
 })();

@@ -13,6 +13,22 @@ const AN_COLOR_B = '#e67e22';
 const AN_FILL_A  = 'rgba(0,51,204,0.07)';
 const AN_FILL_B  = 'rgba(230,126,34,0.07)';
 
+/** Slot primaire (anData) = sonde B en mono B (routage WS). */
+function _anPrimaryTag() {
+  if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB()) return 'B';
+  return 'A';
+}
+function _anPrimaryColor() {
+  return _anPrimaryTag() === 'B' ? AN_COLOR_B : AN_COLOR_A;
+}
+function _anPrimaryFill() {
+  return _anPrimaryTag() === 'B' ? AN_FILL_B : AN_FILL_A;
+}
+function _anIsDualUi() {
+  return (typeof DualSession !== 'undefined' && DualSession.is()) ||
+         !!_anDualArm || !!(anDataB && anDataB.length);
+}
+
 let anMagB = null;
 let anMagVelB = null;
 let anDemodResultB = null;
@@ -38,15 +54,20 @@ window.analyseToggleVis = analyseToggleVis;
 function _anUpdateVisBtns() {
   const ba = document.getElementById('btn-an-vis-a');
   const bb = document.getElementById('btn-an-vis-b');
-  const hasB = !!(anDataB && anDataB.length);
+  // Bouton B visible dès session DOUBLE (pas seulement quand la trame B arrive)
+  const dualUi = _anIsDualUi();
+  const monoB = (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB());
   if (ba) {
+    // Ne pas toucher style.color (CSS .active = texte blanc sur fond bleu)
+    ba.textContent = monoB && !dualUi ? '👁 B' : '👁 A';
     ba.classList.toggle('active', anShowA);
     ba.classList.toggle('off', !anShowA);
   }
   if (bb) {
-    bb.style.display = hasB ? '' : 'none';
-    bb.classList.toggle('active', anShowB && hasB);
-    bb.classList.toggle('off', !anShowB || !hasB);
+    bb.textContent = '👁 B';
+    bb.style.display = dualUi ? '' : 'none';
+    bb.classList.toggle('active', anShowB && dualUi);
+    bb.classList.toggle('off', !anShowB || !dualUi);
   }
 }
 
@@ -105,15 +126,20 @@ function analyseResetDualSession() {
   _anDualArm = false;
   _anGotA = false;
   analyseFlushB();
+  if (typeof DualSession !== 'undefined') DualSession.end();
+  _anUpdateVisBtns();
 }
 window.analyseResetDualSession = analyseResetDualSession;
 
-/** Appelé juste avant ANAL_START — réarme DOUBLE si 2 ESP. */
+/** Appelé juste avant ANAL_START / bump STOP — réarme session DOUBLE si 2 ESP. */
 function analyseArmDual() {
-  analyseResetDualSession();
-  _anDualArm = (typeof isDualMode === 'function' && isDualMode());
+  analyseFlushB();
   _anGotA = false;
   _anGotB = false;
+  _anDualArm = (typeof DualSession !== 'undefined')
+    ? DualSession.begin()
+    : (typeof isDualMode === 'function' && isDualMode());
+  _anUpdateVisBtns();
 }
 window.analyseArmDual = analyseArmDual;
 
@@ -504,15 +530,16 @@ function bumpSetStatus(text) {
 }
 
 function bumpStart() {
-  // Entrée module : flush vieilles traces ; dual se réarme au STOP
-  if (typeof analyseResetDualSession === 'function') analyseResetDualSession();
+  // Entrée module : session dual dès maintenant (UI A+B), flush vieilles traces
+  if (typeof analyseArmDual === 'function') analyseArmDual();
+  else if (typeof analyseResetDualSession === 'function') analyseResetDualSession();
   anMode = 'bump_wait';
   bumpLiveRunning = false;
   _bumpResetLive();
   _bumpStopAnim();
   const btn = document.getElementById('btn-bump-start');
   if (btn) btn.textContent = 'DEMARRER';
-  const dual = (typeof isDualMode === 'function' && isDualMode());
+  const dual = (typeof DualSession !== 'undefined') ? DualSession.is() : false;
   _bumpStatusLines = [
     dual ? 'Mode DOUBLE pret - DEMARRER (A+B)' : 'Mode pret - appuyez DEMARRER',
     '',
@@ -531,12 +558,12 @@ function bumpStart() {
 
 function bumpSendStart() {
   const btn = document.getElementById('btn-bump-start');
-  const dual = (typeof isDualMode === 'function' && isDualMode());
+  const dual = (typeof DualSession !== 'undefined') ? DualSession.is() : false;
   if (!bumpLiveRunning) {
     anMag = null; anMagVel = null; anDemodResult = null;
     anData = null; anDataB = null;
-    wsSend('BUMP_START\n');
-    if (dual && typeof wsSendB === 'function') wsSendB('BUMP_START');
+    if (typeof DualSession !== 'undefined') DualSession.sendBoth('BUMP_START');
+    else wsSend('BUMP_START\n');
     bumpLiveRunning = true;
     anMode = 'bump_stream';
     if (btn) btn.textContent = 'STOP';
@@ -548,9 +575,8 @@ function bumpSendStart() {
   } else {
     // STOP : figer A+B ensemble, puis recevoir les 2 binaires
     if (dual && typeof analyseArmDual === 'function') analyseArmDual();
-    else if (typeof analyseResetDualSession === 'function') analyseResetDualSession();
-    wsSend('BUMP_STOP\n');
-    if (dual && typeof wsSendB === 'function') wsSendB('BUMP_STOP');
+    if (typeof DualSession !== 'undefined') DualSession.sendBoth('BUMP_STOP');
+    else wsSend('BUMP_STOP\n');
     bumpLiveRunning = false;
     _bumpStopAnim();
     if (btn) btn.textContent = 'DEMARRER';
@@ -624,13 +650,15 @@ function bumpSetConfig(g, fs, n) {
 }
 
 function bumpExit() {
-  const dual = (typeof isDualMode === 'function' && isDualMode());
+  const dual = (typeof DualSession !== 'undefined')
+    ? DualSession.is()
+    : (typeof isDualMode === 'function' && isDualMode());
   if (bumpLiveRunning) {
-    wsSend('BUMP_STOP\n');
-    if (dual && typeof wsSendB === 'function') wsSendB('BUMP_STOP');
+    if (typeof DualSession !== 'undefined' && dual) DualSession.sendBoth('BUMP_STOP');
+    else wsSend('BUMP_STOP\n');
   }
-  wsSend('r\n');
-  if (dual && typeof wsSendB === 'function') wsSendB('r');
+  if (typeof DualSession !== 'undefined' && dual) DualSession.stopBoth('r');
+  else wsSend('r\n');
   bumpLiveRunning = false;
   _bumpStopAnim();
   _bumpResetLive();
@@ -721,18 +749,23 @@ function anDrawBumpLive() {
 
   ctx.save();
   ctx.beginPath(); ctx.rect(P.l, P.t, pW, pH); ctx.clip();
-  _strokeBumpWin(bumpWindow, bumpWriteHead, bumpFilled, AN_COLOR_A);
+  const dualBump = !!(bumpWindowB && bumpWindowB.length);
+  _strokeBumpWin(bumpWindow, bumpWriteHead, bumpFilled,
+    dualBump ? AN_COLOR_A : _anPrimaryColor());
   _strokeBumpWin(bumpWindowB, bumpWriteHeadB, bumpFilledB, AN_COLOR_B);
   ctx.restore();
 
   // Légende
   ctx.font = 'bold 10px Arial';
   ctx.textAlign = 'left';
-  ctx.fillStyle = AN_COLOR_A;
-  ctx.fillText('A', P.l + 6, P.t + 12);
-  if (bumpWindowB) {
+  if (dualBump) {
+    ctx.fillStyle = AN_COLOR_A;
+    ctx.fillText('A', P.l + 6, P.t + 12);
     ctx.fillStyle = AN_COLOR_B;
     ctx.fillText('B', P.l + 28, P.t + 12);
+  } else {
+    ctx.fillStyle = _anPrimaryColor();
+    ctx.fillText(_anPrimaryTag(), P.l + 6, P.t + 12);
   }
 }
 
@@ -758,6 +791,48 @@ function _analyseAfterReceive(t, fromB) {
   if (!fromB) _anPersistSave();
 }
 
+/** DOUBLE temporel : afficher A+B ensemble (pas A seul puis B en retard). */
+let _anDualDrawTimer = null;
+const AN_DUAL_DRAW_WAIT_MS = 45000; // transfert B peut prendre longtemps (WiFi séquentiel)
+
+function _anCancelDualDrawWait() {
+  if (_anDualDrawTimer) {
+    clearTimeout(_anDualDrawTimer);
+    _anDualDrawTimer = null;
+  }
+}
+
+function _anShowDualWaitStatus() {
+  const st = document.getElementById('an-status') || document.getElementById('an-fs');
+  const msg = _anGotA && !_anGotB
+    ? 'DOUBLE — A reçu, transfert B…'
+    : (!_anGotA && _anGotB
+      ? 'DOUBLE — B reçu, attente A…'
+      : 'DOUBLE — réception A+B…');
+  if (st) st.textContent = msg;
+  if (typeof termAddLine === 'function') termAddLine('[DOUBLE] ' + msg, 'sys');
+}
+
+function _anTryDualDraw(forceAlone) {
+  if (!_anDualArm) {
+    _anCancelDualDrawWait();
+    if (anData && anData.length) _analyseAfterReceive(anP.t, false);
+    return;
+  }
+  if (_anGotA && _anGotB) {
+    _anCancelDualDrawWait();
+    _analyseAfterReceive(anP.t, false);
+    return;
+  }
+  if (forceAlone && _anGotA) {
+    _anCancelDualDrawWait();
+    if (typeof termAddLine === 'function') {
+      termAddLine('[DOUBLE] timeout B — affichage A seul', 'sys');
+    }
+    _analyseAfterReceive(anP.t, false);
+  }
+}
+
 // ── Réception depuis app.js (ESP A) ───────────────────────
 function analyseReceiveBloc(g, fs, t, n, raw) {
   acqHideProgress();
@@ -772,10 +847,15 @@ function analyseReceiveBloc(g, fs, t, n, raw) {
   _anGotA = true;
   // Hors dual (ex. bump) : jamais garder un vieux B
   if (!_anDualArm) analyseFlushB();
-  if (_anDualArm && !_anGotB && typeof termAddLine === 'function') {
-    termAddLine('[A] acquis. reçue — attente ESP B…', 'sys');
+  if (_anDualArm) {
+    // Ne PAS dessiner A seul — attendre B (transfert WiFi séquentiel)
+    _anShowDualWaitStatus();
+    _anCancelDualDrawWait();
+    _anDualDrawTimer = setTimeout(function () { _anTryDualDraw(true); }, AN_DUAL_DRAW_WAIT_MS);
+    _anTryDualDraw(false);
+  } else {
+    _analyseAfterReceive(t, false);
   }
-  _analyseAfterReceive(t, false);
 }
 
 /** Réception ESP B (mode DOUBLE) — même G/Fs attendus. */
@@ -798,8 +878,9 @@ function analyseReceiveBlocB(g, fs, t, n, raw) {
   if (typeof termAddLine === 'function') {
     termAddLine('[B] acquis. reçue' + (_anGotA ? ' — DOUBLE OK' : ' — attente A…'), 'sys');
   }
-  // Affichage seulement si A est déjà là (sinon A redessinera en DOUBLE)
-  if (anData && anData.length) {
+  if (_anDualArm) {
+    _anTryDualDraw(false);
+  } else if (anData && anData.length) {
     anUpdateStats();
     analyseDraw();
   } else if (!anP.n) {
@@ -1023,18 +1104,22 @@ function anDrawTime() {
     }
     ctx.stroke();
   }
-  if (_anVisA()) _strokeSig(_sig, AN_COLOR_A, 1.2);
+  const dualTime = !!(anDataB && anDataB.length);
+  if (_anVisA()) _strokeSig(_sig, dualTime ? AN_COLOR_A : _anPrimaryColor(), 1.2);
   const _sigB = anDataDisplayB || anDataB;
   if (_anVisB() && _sigB && _sigB.length) _strokeSig(_sigB, AN_COLOR_B, 1.2);
   ctx.restore();
-  // Légende A / B (grisée si masquée)
+  // Légende (mono B → orange « B », pas bleu « A »)
   ctx.font = 'bold 10px Arial';
   ctx.textAlign = 'left';
-  ctx.fillStyle = _anVisA() ? AN_COLOR_A : '#bbb';
-  ctx.fillText('A', P.l + 6, P.t + 12);
-  if (anDataB && anDataB.length) {
+  if (dualTime) {
+    ctx.fillStyle = _anVisA() ? AN_COLOR_A : '#bbb';
+    ctx.fillText('A', P.l + 6, P.t + 12);
     ctx.fillStyle = _anVisB() ? AN_COLOR_B : '#bbb';
     ctx.fillText('B', P.l + 28, P.t + 12);
+  } else {
+    ctx.fillStyle = _anVisA() ? _anPrimaryColor() : '#bbb';
+    ctx.fillText(_anPrimaryTag(), P.l + 6, P.t + 12);
   }
   if(anSelStart>=0&&anSelEnd>anSelStart){
     const xS=P.l+(Math.max(anSelStart,anZMin)-anZMin)/span*pW;
@@ -1180,13 +1265,16 @@ function anDrawFFT() {
   }
   ctx.fillStyle = '#555'; ctx.font = '10px Arial'; ctx.textAlign = 'center';
   ctx.fillText('Fréquence (RPM)', P.l + pW / 2, H);
+  const dualFft = !!magB;
   ctx.save(); ctx.beginPath(); ctx.rect(P.l, P.t, pW, pH); ctx.clip();
-  if (_anVisA() && mag) {
-    _anStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aS, AN_COLOR_A, AN_FILL_A, maxA);
-  }
   if (_anVisB() && magB) {
     const maxBB = Math.min(maxB, magB.length - 1);
     _anStrokeMag(ctx, magB, minB, maxBB, rpmPB, zMin, span, pW, pH, aS, AN_COLOR_B, AN_FILL_B, maxA);
+  }
+  if (_anVisA() && mag) {
+    _anStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aS,
+      dualFft ? AN_COLOR_A : _anPrimaryColor(),
+      dualFft ? AN_FILL_A : _anPrimaryFill(), maxA);
   }
   // Pic sur la 1re sonde visible
   const magPk = _anVisA() && mag ? mag : (_anVisB() && magB ? magB : null);
@@ -1204,11 +1292,14 @@ function anDrawFFT() {
   ctx.restore();
   // Légende
   ctx.font = 'bold 10px Arial'; ctx.textAlign = 'left';
-  ctx.fillStyle = _anVisA() ? AN_COLOR_A : '#bbb';
-  ctx.fillText('A', P.l + 6, P.t + 12);
-  if (magB) {
+  if (dualFft) {
+    ctx.fillStyle = _anVisA() ? AN_COLOR_A : '#bbb';
+    ctx.fillText('A', P.l + 6, P.t + 12);
     ctx.fillStyle = _anVisB() ? AN_COLOR_B : '#bbb';
     ctx.fillText('B', P.l + 28, P.t + 12);
+  } else {
+    ctx.fillStyle = _anVisA() ? _anPrimaryColor() : '#bbb';
+    ctx.fillText(_anPrimaryTag(), P.l + 6, P.t + 12);
   }
   if (anCursorX >= P.l && anCursorX <= P.l + pW && magPk) {
     const rpm = zMin + ((anCursorX - P.l) / pW) * span;
@@ -1352,20 +1443,28 @@ function anDrawDemod() {
     }
     ctx.stroke();
   }
-  if (_anVisA()) _strokeDemod(amps, AN_COLOR_A, AN_FILL_A);
-  if (_anVisB() && anDemodResultB && anDemodResultB.amps) {
+  const dualDemod = !!(anDemodResultB && anDemodResultB.amps);
+  if (_anVisB() && dualDemod) {
     _strokeDemod(anDemodResultB.amps, AN_COLOR_B, AN_FILL_B);
+  }
+  if (_anVisA()) {
+    _strokeDemod(amps,
+      dualDemod ? AN_COLOR_A : _anPrimaryColor(),
+      dualDemod ? AN_FILL_A : _anPrimaryFill());
   }
 
   ctx.restore(); // fin clip
 
-  // Légende A / B
+  // Légende
   ctx.font = 'bold 10px Arial'; ctx.textAlign = 'left';
-  ctx.fillStyle = _anVisA() ? AN_COLOR_A : '#bbb';
-  ctx.fillText('A', P.l + 6, P.t + 12);
-  if (anDemodResultB) {
+  if (dualDemod) {
+    ctx.fillStyle = _anVisA() ? AN_COLOR_A : '#bbb';
+    ctx.fillText('A', P.l + 6, P.t + 12);
     ctx.fillStyle = _anVisB() ? AN_COLOR_B : '#bbb';
     ctx.fillText('B', P.l + 28, P.t + 12);
+  } else {
+    ctx.fillStyle = _anVisA() ? _anPrimaryColor() : '#bbb';
+    ctx.fillText(_anPrimaryTag(), P.l + 6, P.t + 12);
   }
 
   // ── Cadre axes ────────────────────────────────────────
@@ -2046,15 +2145,48 @@ function analyseFilter(){
     f1=parseFloat(parts[0]);f2=parseFloat(parts[1]);
     if(isNaN(f1)||isNaN(f2)||f1<=0||f2<=f1||f2>=nyq){alert('Fréquences invalides');return;}
   }
-  anDataDisplay=applyFilter(anData,anP.fs,t,f1,f2);
-  anDataDisplayB = anDataB ? applyFilter(anDataB, anP.fs, t, f1, f2) : null;
-  if(t==='ph')      anFilterInfo='PH '+f1.toFixed(0)+' Hz';
-  else if(t==='pb') anFilterInfo='PB '+f1.toFixed(0)+' Hz';
-  else              anFilterInfo='BP '+f1.toFixed(0)+'-'+f2.toFixed(0)+' Hz';
-  anMag=null;anMagVel=null;anMagB=null;anMagVelB=null;
-  _anUpdateFilterLabel();
-  if(anMode==='fft'){anMode='time';anZMin=0;anZMax=anP.t;anUpdateBtnStates();}
-  anCursorX=-1;analyseDraw();
+  // FFT 65k ×2 (A+B) bloque le thread → heartbeat WS tombe. Async + hold.
+  _anRunFilterAsync(t, f1, f2);
+}
+
+function _anRunFilterAsync(t, f1, f2) {
+  const st = document.getElementById('an-fs');
+  const prev = st ? st.textContent : '';
+  if (st) st.textContent = 'Filtre… A';
+  if (typeof wsBeginHeavy === 'function') wsBeginHeavy();
+  if (typeof termAddLine === 'function') termAddLine('[filtre] calcul A…', 'sys');
+
+  setTimeout(function () {
+    try {
+      anDataDisplay = applyFilter(anData, anP.fs, t, f1, f2);
+    } catch (e) {
+      if (typeof termAddLine === 'function') termAddLine('[filtre] !! erreur A: ' + e, 'sys');
+    }
+    if (typeof wsBeginHeavy === 'function') { /* keep hold */ }
+    if (st) st.textContent = anDataB ? 'Filtre… B' : 'Filtre… fin';
+
+    setTimeout(function () {
+      try {
+        anDataDisplayB = anDataB ? applyFilter(anDataB, anP.fs, t, f1, f2) : null;
+      } catch (e) {
+        if (typeof termAddLine === 'function') termAddLine('[filtre] !! erreur B: ' + e, 'sys');
+        anDataDisplayB = null;
+      }
+      if (t === 'ph') anFilterInfo = 'PH ' + f1.toFixed(0) + ' Hz';
+      else if (t === 'pb') anFilterInfo = 'PB ' + f1.toFixed(0) + ' Hz';
+      else anFilterInfo = 'BP ' + f1.toFixed(0) + '-' + f2.toFixed(0) + ' Hz';
+      anMag = null; anMagVel = null; anMagB = null; anMagVelB = null;
+      _anUpdateFilterLabel();
+      if (anMode === 'fft') {
+        anMode = 'time'; anZMin = 0; anZMax = anP.t; anUpdateBtnStates();
+      }
+      anCursorX = -1;
+      if (typeof wsEndHeavy === 'function') wsEndHeavy();
+      if (st && !anFilterInfo) st.textContent = prev;
+      analyseDraw();
+      if (typeof termAddLine === 'function') termAddLine('[filtre] OK ' + anFilterInfo, 'sys');
+    }, 30);
+  }, 30);
 }
 
 function analyseFilterReset(){

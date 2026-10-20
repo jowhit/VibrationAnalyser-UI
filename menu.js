@@ -4,6 +4,7 @@
 const MenuModule = (() => {
 
   const L = {
+    PROBE:       'probe',        // choix sonde A / B / A+B
     ROOT:        'root',
     ANALYSE:     'analyse',      // sous-menu Analyse type
     G_RANGE:     'g_range',      // choix plage ±g
@@ -24,6 +25,10 @@ const MenuModule = (() => {
     return s >= 10 ? (Math.round(s) + ' s') : (s.toFixed(1) + ' s');
   }
 
+  function _probeSet() {
+    return (typeof ProbeMode !== 'undefined' && ProbeMode.isSet());
+  }
+
   // ──────────────────────────────────────────────────────
   // Init — appelé depuis app.js au DOMContentLoaded
   // ──────────────────────────────────────────────────────
@@ -32,31 +37,57 @@ const MenuModule = (() => {
     _switchTab = switchTabFn;
     _navGoto   = navGotoFn || null;
     _container = document.getElementById('menu-tree');
-    _render(L.ROOT);
+    if (_probeSet()) _render(L.ROOT);
+    else showProbeSelect();
   }
 
   // ──────────────────────────────────────────────────────
   // Rendu — reconstruit les boutons à chaque changement de niveau
   // ──────────────────────────────────────────────────────
   function _render(level) {
+    // Pas de modules tant que la sonde n'est pas choisie
+    if (level !== L.PROBE && !_probeSet()) {
+      showProbeSelect();
+      return;
+    }
     _level = level;
     if (!_container) return;
     _container.innerHTML = '';
 
     // ── Fil d'Ariane + Retour ──────────────────────────
-    if (_path.length > 0) {
+    // PROBE : titre seul (pas de retour — rien derrière)
+    // ROOT  : Retour → choix sonde
+    // sinon : Retour dans l'arbre Analyse
+    if (level === L.PROBE) {
+      const nav = document.createElement('div');
+      nav.className = 'sc-nav';
+      const crumb = document.createElement('span');
+      crumb.className = 'sc-crumb';
+      crumb.textContent = 'Choisir sonde';
+      nav.appendChild(crumb);
+      _container.appendChild(nav);
+    } else if (level === L.ROOT || _path.length > 0) {
       const nav = document.createElement('div');
       nav.className = 'sc-nav';
 
       const back = document.createElement('button');
       back.className = 'sc sc-back';
       back.textContent = '← Retour';
-      back.onclick = _goBack;
+      if (level === L.ROOT) {
+        back.onclick = () => {
+          if (typeof ProbeMode !== 'undefined') ProbeMode.change();
+          else showProbeSelect();
+        };
+      } else {
+        back.onclick = _goBack;
+      }
       nav.appendChild(back);
 
       const crumb = document.createElement('span');
       crumb.className = 'sc-crumb';
-      crumb.textContent = _path.join(' › ');
+      crumb.textContent = level === L.ROOT
+        ? ('Sonde ' + (typeof ProbeMode !== 'undefined' ? ProbeMode.get() : '?'))
+        : _path.join(' › ');
       nav.appendChild(crumb);
 
       _container.appendChild(nav);
@@ -66,12 +97,16 @@ const MenuModule = (() => {
     _getButtons(level).forEach(btn => {
       const el = document.createElement('button');
       el.className = 'sc sc-menu' + (btn.accent ? ' sc-accent-menu' : '');
+      if (btn.disabled) {
+        el.disabled = true;
+        el.classList.add('sc-disabled');
+      }
       if (btn.sub) {
         el.innerHTML = `<span class="sc-label">${btn.label}</span><span class="sc-sub">${btn.sub}</span>`;
       } else {
         el.textContent = btn.label;
       }
-      el.onclick = () => _onChoice(btn);
+      el.onclick = () => { if (!btn.disabled) _onChoice(btn); };
       _container.appendChild(el);
     });
   }
@@ -81,6 +116,16 @@ const MenuModule = (() => {
   // ──────────────────────────────────────────────────────
   function _getButtons(level) {
     switch (level) {
+
+      case L.PROBE: {
+        const aOk = typeof ProbeMode !== 'undefined' && ProbeMode.aOk();
+        const bOk = typeof ProbeMode !== 'undefined' && ProbeMode.bOk();
+        return [
+          { label: 'Sonde A',  sub: aOk ? 'ESP A connecté' : 'ESP A hors ligne', key: 'probe_a',  disabled: !aOk },
+          { label: 'Sonde B',  sub: bOk ? 'ESP B connecté' : 'ESP B hors ligne', key: 'probe_b',  disabled: !bOk },
+          { label: 'A + B',    sub: (aOk && bOk) ? 'Mode duo' : 'A et B requis', key: 'probe_ab', accent: true, disabled: !(aOk && bOk) },
+        ];
+      }
 
       // ── Racine ──────────────────────────────────────
       case L.ROOT: return [
@@ -143,12 +188,30 @@ const MenuModule = (() => {
   function _onChoice(btn) {
     switch (_level) {
 
+      case L.PROBE:
+        if (typeof ProbeMode === 'undefined') break;
+        if (btn.key === 'probe_a' && ProbeMode.set('A')) {
+          _path = []; _render(L.ROOT);
+        } else if (btn.key === 'probe_b' && ProbeMode.set('B')) {
+          _path = []; _render(L.ROOT);
+        } else if (btn.key === 'probe_ab' && ProbeMode.set('AB')) {
+          _path = []; _render(L.ROOT);
+        }
+        break;
+
       case L.ROOT:
         if (btn.key === 'eq') {
           _path = [];
           _render(L.ROOT);
-          if (_navGoto) _navGoto('balance', 'WS_GOTO=EQ');
-          else { _send('WS_GOTO=EQ\n'); setTimeout(() => _switchTab('balance'), 200); }
+          // Duo : EQ sur A+B en parallèle (2 plans duo = capture simultanée)
+          if (typeof DualSession !== 'undefined' && DualSession.available()) {
+            DualSession.startModule('balance', 'WS_GOTO=EQ', { label: 'Équilibrage' });
+          } else if (_navGoto) {
+            _navGoto('balance', 'WS_GOTO=EQ');
+          } else {
+            _send('WS_GOTO=EQ\n');
+            setTimeout(() => _switchTab('balance'), 200);
+          }
         } else if (btn.key === 'analyse') {
           _path = ['Analyse']; _render(L.ANALYSE);
         }
@@ -165,30 +228,49 @@ const MenuModule = (() => {
 
         } else if (btn.key === 'live_fft') {
           _path = []; _render(L.ROOT);
-          if (_navGoto) {
-            _navGoto('fft', 'WS_GOTO=ANAL_LIVE', {
-              onAck: () => {
-                if (typeof _fftStartDualLive === 'function') _fftStartDualLive();
-                else _send('LIVE_START\n');
-                fftRunning = true;
-                const b = document.getElementById('btn-fft-start');
-                if (b) { b.textContent = '■ Stop'; b.classList.add('running'); }
-              },
+          const liveReady = (dual) => {
+            if (typeof _fftStartDualLive === 'function') _fftStartDualLive(dual);
+            else if (typeof DualSession !== 'undefined') DualSession.sendBoth('LIVE_START');
+            else _send('LIVE_START\n');
+            fftRunning = true;
+            const b = document.getElementById('btn-fft-start');
+            if (b) { b.textContent = '■ Stop'; b.classList.add('running'); }
+          };
+          if (typeof DualSession !== 'undefined') {
+            DualSession.startModule('fft', 'WS_GOTO=ANAL_LIVE', {
+              label: 'Live FFT',
+              onReady: liveReady,
             });
+          } else if (_navGoto) {
+            _navGoto('fft', 'WS_GOTO=ANAL_LIVE', { onAck: liveReady });
           } else {
             _send('WS_GOTO=ANAL_LIVE\n');
-            setTimeout(() => {
-              if (typeof _fftStartDualLive === 'function') _fftStartDualLive();
-              else _send('LIVE_START\n');
-              fftRunning = true;
-            }, 200);
+            setTimeout(liveReady, 200);
             setTimeout(() => _switchTab('fft'), 200);
           }
 
         } else if (btn.key === 'harmonique') {
           _path = []; _render(L.ROOT);
-          if (_navGoto) _navGoto('harmonic', 'WS_GOTO=ANAL_HARM');
-          else { _send('WS_GOTO=ANAL_HARM\n'); setTimeout(() => _switchTab('harmonic'), 200); }
+          if (_navGoto) {
+            // beginFromMenu : A+B en parallèle + UI dual dès le départ (si mode AB)
+            if (typeof HarmonicModule !== 'undefined' &&
+                typeof HarmonicModule.beginFromMenu === 'function') {
+              HarmonicModule.beginFromMenu();
+            }
+            _navGoto('harmonic', 'WS_GOTO=ANAL_HARM', {
+              onAck: () => {
+                if (typeof HarmonicModule !== 'undefined') HarmonicModule.setRunning(true);
+              },
+            });
+          } else {
+            if (typeof HarmonicModule !== 'undefined' &&
+                typeof HarmonicModule.beginFromMenu === 'function') {
+              HarmonicModule.beginFromMenu();
+            } else {
+              _send('WS_GOTO=ANAL_HARM\n');
+            }
+            setTimeout(() => _switchTab('harmonic'), 200);
+          }
         }
         break;
 
@@ -207,7 +289,7 @@ const MenuModule = (() => {
       case L.FS: {
         const g  = _selectedG || '16';
         const fs = btn.cmd;
-        
+
         // 1. Navigation pure vers l'onglet analyse
         if (_navGoto) {
           _navGoto('analyse', 'WS_GOTO=ANAL_TEMP', {
@@ -218,7 +300,9 @@ const MenuModule = (() => {
                 _send('ANAL_START G=' + g + ' FS=' + fs + '\n');
               }
               // DOUBLE : compteur démarre sur ACQ_PROGRESS (après FIRE), pas pendant ARM
-              const dual = (typeof isDualMode === 'function' && isDualMode());
+              const dual = (typeof DualSession !== 'undefined')
+                ? DualSession.available()
+                : (typeof isDualMode === 'function' && isDualMode());
               if (!dual && typeof acqStartTemporal === 'function') {
                 acqStartTemporal({ g: g, fs: fs, autoRange: (g === ' ' || g === '') });
               }
@@ -241,9 +325,9 @@ const MenuModule = (() => {
             _switchTab('analyse');
           }, 500);
         }
-        
-        _path = []; 
-        _selectedG = null; 
+
+        _path = [];
+        _selectedG = null;
         _render(L.ROOT);
         break;
       }
@@ -252,27 +336,25 @@ const MenuModule = (() => {
         const g = _selectedG || '2';
         const fs = btn.cmd || '4000';
         const cmd = 'WS_GOTO=ANAL_BUMP G=' + g + ' FS=' + fs;
-        if (_navGoto) {
+        const bumpReady = () => {
+          if (typeof analyseArmDual === 'function') analyseArmDual();
+          setTimeout(() => _switchTab('analyse'), 150);
+        };
+        if (typeof DualSession !== 'undefined') {
+          // B reçoit le GOTO en parallèle de A (pas après NAV_ACK) — mode AB seulement
+          DualSession.startModule('analyse', cmd, {
+            label: 'Bump G=' + g + ' FS=' + fs,
+            onReady: bumpReady,
+            onFail: () => _switchTab('analyse'),
+          });
+        } else if (_navGoto) {
           _navGoto('analyse', cmd, {
-            onAck: () => {
-              // DOUBLE : même config sur B (NAV_ACK déjà reçu de A)
-              if (typeof isDualMode === 'function' && isDualMode() &&
-                  typeof wsSendB === 'function') {
-                if (typeof termAddLine === 'function') {
-                  termAddLine('[DOUBLE] Bump A+B  G=' + g + ' FS=' + fs, 'sys');
-                }
-                wsSendB(cmd);
-              }
-              setTimeout(() => _switchTab('analyse'), 150);
-            },
+            onAck: bumpReady,
             onTimeout: () => _switchTab('analyse'),
           });
         } else {
           _send(cmd + '\n');
-          if (typeof isDualMode === 'function' && isDualMode() && typeof wsSendB === 'function') {
-            wsSendB(cmd);
-          }
-          setTimeout(() => _switchTab('analyse'), 250);
+          setTimeout(bumpReady, 250);
         }
         _path = [];
         _selectedG = null;
@@ -294,7 +376,23 @@ const MenuModule = (() => {
     else                           { _path = [];                        _render(L.ROOT);    }
   }
 
-  function reset() { _path = []; _selectedG = null; _render(L.ROOT); }
+  function showProbeSelect() {
+    _path = ['Sonde'];
+    _selectedG = null;
+    _render(L.PROBE);
+  }
 
-  return { init, reset };
+  /** Re-dessine les boutons sonde quand A/B connecte/déconnecte. */
+  function refreshProbeIfShown() {
+    if (_level === L.PROBE) _render(L.PROBE);
+  }
+
+  function reset() {
+    _path = [];
+    _selectedG = null;
+    if (_probeSet()) _render(L.ROOT);
+    else showProbeSelect();
+  }
+
+  return { init, reset, showProbeSelect, refreshProbeIfShown };
 })();

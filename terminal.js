@@ -26,8 +26,16 @@ function termSendInput() {
   const inp = document.getElementById('term-input');
   const val = inp.value;
   if (!val) return;
-  wsSend(val);
   inp.value = '';
+  const clean = val.trim();
+  // Commandes locales browser (pas envoyées à l'ESP)
+  if (/^invert(a|b)?\b/i.test(clean)) {
+    termAddLine('>> ' + clean, 'sent');
+    if (typeof handleInvertCommand === 'function') handleInvertCommand(clean);
+    else termAddLine('!! handleInvertCommand absent — recharge app.js', 'sys');
+    return;
+  }
+  wsSend(val);
 }
 
 document.getElementById('term-input').addEventListener('keydown', e => {

@@ -18,6 +18,14 @@ body { display: flex; flex-direction: column; }
 #dot.err, #dot-b.err { background: #ff4444; }
 #dot-b { outline: 1px solid #666; }
 #ip-label { color: #aaa; font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.probe-badge {
+  font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 3px;
+  flex-shrink: 0; letter-spacing: 0.03em;
+}
+.probe-badge--none { background: #3a3a20; color: #ccaa44; }
+.probe-badge--a { background: #1a3a5a; color: #6ab0ff; }
+.probe-badge--b { background: #3a1a4a; color: #c98cff; }
+.probe-badge--ab { background: #1a4a3a; color: #5dffb0; }
 #topbar button {
   background: #2a2a4a; color: #aaa; border: 1px solid #444;
   border-radius: 3px; padding: 3px 8px; font-size: 11px; cursor: pointer;
@@ -130,8 +138,8 @@ body { display: flex; flex-direction: column; }
 #an-stats b { color: #0066cc; }
 #an-fs { font-size: 10px !important; color: #aaa !important; }
 
-/* ── Progression acquisition temporelle ── */
-#an-canvas-wrap { position: relative; }
+/* ── Progression acquisition temporelle / attente Live FFT ── */
+#an-canvas-wrap, #fft-canvas-wrap { position: relative; }
 .an-acq-overlay {
   position: absolute; inset: 0; z-index: 12;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -518,6 +526,12 @@ body { display: flex; flex-direction: column; }
   color: #fff;
   border-color: #0055aa;
 }
+.bal-mode-toggle--locked,
+.bal-mode-toggle:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  pointer-events: none;
+}
 .bal-cmdbar {
   display: flex;
   align-items: center;
@@ -788,6 +802,13 @@ body { display: flex; flex-direction: column; }
   text-align: left;
 }
 .sc-menu:active { background: #ddd; }
+.sc-menu.sc-disabled, .sc-menu:disabled {
+  opacity: 0.4; cursor: not-allowed; pointer-events: none;
+}
+.sc-menu.sc-disabled,
+.sc-menu:disabled {
+  opacity: 0.4; cursor: not-allowed; pointer-events: none;
+}
 
 /* Label principal du bouton menu */
 .sc-label {
