@@ -21,6 +21,12 @@ const BalanceModule = (() => {
   let _mode  = null;
   /** true = 2P + ProbeMode AB : sondes fixes, capture simultanée */
   let _duo2P = false;
+  /** Évite de redemander la sauvegarde à chaque clic après calcul. */
+  let _saveOfferedThisProc = false;
+  /** Session pause (localStorage) — survit au refresh. */
+  const BAL_LS_KEY = 'va_balance_v1';
+  let _sessionPaused = false;
+  let _espStateName = 'IDLE';
 
   // ── Données 1P ───────────────────────────────────────────────
   let _run1=null, _run2=null, _runs1P=[];
@@ -86,7 +92,7 @@ const BalanceModule = (() => {
 
   // ── DOM ──────────────────────────────────────────────────────
   let _canvas1P, _ctx1P, _canvasA, _ctxA, _canvasB, _ctxB;
-  let statusEl, logEl, resultEl, btnRun, btnStart, btnResetTop, btnSaveCoeff, btnLoadCoeff;
+  let statusEl, logEl, resultEl, btnRun, btnResetTop, btnSaveCoeff, btnLoadCoeff;
   let btnMode1p, btnMode2p, inMass, inAngle;
   let _initialized=false;
   let _nvsCoeffValid=false;
@@ -126,7 +132,9 @@ const BalanceModule = (() => {
   }
   function _canSaveCoeff() {
     if (_mode === '1P') return _influenceRatio > 0 && !!_run1 && !!_run2;
-    if (_mode === '2P') return _influence2PComplete(_influence2P) && _2pStep >= _stepsLen();
+    // 2P : dès que la matrice est calculée (ne pas attendre _2pStep — ICM
+    // est appelé AVANT _advanceStep sur la dernière capture)
+    if (_mode === '2P') return _influence2PComplete(_influence2P);
     return false;
   }
   function _canLoadCoeff() {
@@ -151,12 +159,15 @@ const BalanceModule = (() => {
     _influenceRatio = 0;
     _phaseShift = 0;
     _influence2P = null;
+    _sessionPaused = false;
+    _clearStorage();
     _clearBalLogs();
     _mode = '1P';
     setMode('1P');
     state = S.IDLE;
     _updateUI();
     _updateCoeffButtons();
+    _updatePauseBanner();
   }
 
   // ════════════════════════════════════════════════════════════
@@ -178,7 +189,6 @@ const BalanceModule = (() => {
     logEl = document.getElementById('bal-log');
     resultEl = document.getElementById('bal-result');
     btnRun = document.getElementById('btn-bal-run');
-    btnStart = document.getElementById('btn-bal-start');
     btnResetTop = document.getElementById('btn-bal-reset-top');
     btnSaveCoeff = document.getElementById('btn-bal-save-coeff');
     btnLoadCoeff = document.getElementById('btn-bal-load-coeff');
@@ -188,19 +198,22 @@ const BalanceModule = (() => {
     inAngle = document.getElementById('bal-trial-angle');
 
     if (btnRun) btnRun.addEventListener('click', _doRun);
-    if (btnStart) btnStart.addEventListener('click', doStart);
     if (btnResetTop) btnResetTop.addEventListener('click', doReset);
     if (btnSaveCoeff) btnSaveCoeff.addEventListener('click', doSaveCoeff);
     if (btnLoadCoeff) btnLoadCoeff.addEventListener('click', doLoadCoeff);
     if (btnMode1p) btnMode1p.addEventListener('click', () => setMode('1P'));
     if (btnMode2p) btnMode2p.addEventListener('click', () => setMode('2P'));
+    const btnResume = document.getElementById('btn-bal-resume');
+    if (btnResume) btnResume.addEventListener('click', resumeSession);
     window.addEventListener('resize', resize);
 
     log('Module équilibrage prêt');
     state = S.IDLE;
     if (!_mode) setMode('1P');
+    _restoreFromStorageIfAny();
     _updateUI();
     _updateCoeffButtons();
+    _updatePauseBanner();
     sendFn('BAL_INIT\n');
   }
 
@@ -253,8 +266,11 @@ const BalanceModule = (() => {
     _refreshDuoFlag();
     if (!_mode) setMode('1P');
     else if (_mode === '2P') setMode('2P'); // re-évalue duo
-    _balSend('BAL_INIT');
-    _startTachWatch();
+    if (!_sessionPaused) {
+      _balSend('BAL_INIT');
+      _startTachWatch();
+    }
+    _updatePauseBanner();
     setTimeout(resize, 60);
   }
 
@@ -537,6 +553,7 @@ const BalanceModule = (() => {
       log('✓ R1: '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°');
       _suppressLiveTour = true;
       _resetAvg(); _balSend('BAL_ACCEPT'); _showMassInput('Masse et angle essai');
+      persistSession();
     } else if (state===S.RUN2_RUNNING) {
       _run2=avg; _pushPts(_runs1P,2,avg.amp,avg.phase,'#2a8a3e');
       log('✓ R2: '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°');
@@ -547,6 +564,8 @@ const BalanceModule = (() => {
       if (resultEl) resultEl.innerHTML=_html1PCorrResult('Correction 1 Plan',icm.corrMass,icm.corrAngle,
         'R1: '+_run1.amp.toFixed(3)+'g @'+_run1.phase.toFixed(1)+'°  |  R2: '+_run2.amp.toFixed(3)+'g @'+_run2.phase.toFixed(1)+'°');
       _drawPolar1P(); _hideMassInput(); _suppressLiveTour = true; _resetAvg(); _balSend('BAL_ACCEPT');
+      persistSession();
+      _maybeOfferSave();
     } else if (state===S.RUNX_RUNNING) {
       _runXcount++; _pushPts(_runs1P,_runXcount,avg.amp,avg.phase,'#c45a00');
       const corrMass=_influenceRatio>0?avg.amp/_influenceRatio:0;
@@ -756,6 +775,7 @@ const BalanceModule = (() => {
       'Essai A: '+_trialMasses[0].mass.toFixed(1)+'g @'+_trialMasses[0].angle.toFixed(1)+
       '°  |  Essai B: '+_trialMasses[1].mass.toFixed(1)+'g @'+_trialMasses[1].angle.toFixed(1)+'°', null, null);
     _updateCoeffButtons();
+    _maybeOfferSave();
   }
 
   // ── Afficher correction résiduelle RunX ──────────────────────
@@ -819,6 +839,7 @@ const BalanceModule = (() => {
     _updateUI();
     _updateCoeffButtons();
     _updateModeLock();
+    persistSession();
   }
 
   // ── Afficher le bon encadrement polaire ───────────────────────
@@ -919,6 +940,7 @@ const BalanceModule = (() => {
 
   function _applyState(name) {
     state=name;
+    _espStateName = _normalizeEspStateName(name);
     if([S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING].includes(state)) {
       _suppressLiveTour = false;
       _resetAvg();
@@ -950,6 +972,7 @@ const BalanceModule = (() => {
     log('ESP: '+name);
     _updateUI();
     _updateCoeffButtons();
+    if (hasProgress()) persistSession();
   }
 
   // RPM
@@ -994,6 +1017,7 @@ const BalanceModule = (() => {
     state = S.IDLE;
     _run1 = null; _run2 = null; _runs1P = []; _runXcount = 2;
     _testMass1P = 0; _testAngle1P = 0;
+    _saveOfferedThisProc = false;
     if (!keepCoeff) {
       _influenceRatio = 0; _phaseShift = 0; _influence2P = null;
       _coeffLoaded = false;
@@ -1021,23 +1045,13 @@ const BalanceModule = (() => {
     _updateCoeffButtons();
   }
 
-  function doStart() {
-    _procedureResetLocal(_coeffLoaded);
-    if (!_coeffLoaded) {
-      _influenceRatio = 0;
-      _phaseShift = 0;
-      _influence2P = null;
-    }
-    _suppressLiveTour = false;
-    _resetAvg();
-    _balSend('BAL_RUN');
-    log('→ Nouvelle procédure' + (_isDuo2P() ? ' duo' : ''));
-  }
-
   function doReset() {
     _procedureResetLocal(_coeffLoaded);
+    _sessionPaused = false;
+    _clearStorage();
+    _updatePauseBanner();
     log('─── RESET procédure ───');
-    _balSend('BAL_RESET');
+    _balSendAllEsp('BAL_RESET');
   }
 
   function doSaveCoeff() {
@@ -1055,6 +1069,20 @@ const BalanceModule = (() => {
         + ' h_bb_amp=' + pBB.amp.toFixed(6) + ' h_bb_phase=' + pBB.phase.toFixed(2);
     }
     _balSend(cmd);
+  }
+
+  /** Après 2 runs (1P) ou 3 runs (2P) : proposer la sauvegarde NVS une fois. */
+  function _maybeOfferSave() {
+    if (!_canSaveCoeff() || _saveOfferedThisProc) return;
+    _saveOfferedThisProc = true;
+    _updateCoeffButtons();
+    const msg = _mode === '1P'
+      ? 'Coefficient calculé (2 runs).\nSauvegarder pour reprise plus tard ?'
+      : 'Coefficient 2 plans calculé (3 runs).\nSauvegarder pour reprise plus tard ?';
+    // setTimeout : laisse le rendu des corrections avant la boîte de dialogue
+    setTimeout(function () {
+      if (confirm(msg)) doSaveCoeff();
+    }, 50);
   }
 
   function doLoadCoeff() {
@@ -1201,8 +1229,253 @@ const BalanceModule = (() => {
     if(_mode==='2P') _drawAll2P(); else _drawPolar1P();
   }
 
+  // ════════════════════════════════════════════════════════════
+  // PAUSE / REPRISE — mémoire JS (localStorage), pas NVS mid-run
+  // ════════════════════════════════════════════════════════════
+  function _normalizeEspStateName(name) {
+    if (name === 'RUN1_RUNNING') return 'RUN1_READY';
+    if (name === 'RUN2_RUNNING') return 'RUN2_READY';
+    if (name === 'RUNX_RUNNING') return 'RUNX_READY';
+    if (name === 'RPM_SCAN') return 'IDLE';
+    return name || 'IDLE';
+  }
+
+  function _balSendAllEsp(cmd) {
+    const clean = (cmd || '').replace(/\n+$/, '');
+    const dual = (typeof ProbeMode !== 'undefined' && ProbeMode.isDual()) ||
+      (typeof DualSession !== 'undefined' && DualSession.available());
+    if (dual) {
+      if (typeof DualSession !== 'undefined') DualSession.begin();
+      if (typeof DualSession !== 'undefined' && DualSession.sendBoth) {
+        DualSession.sendBoth(clean);
+      } else {
+        if (typeof wsSend === 'function') wsSend(clean);
+        if (typeof wsSendB === 'function') wsSendB(clean);
+      }
+    } else {
+      _balSend(clean);
+    }
+  }
+
+  function hasProgress() {
+    if (_mode === '1P') {
+      return !!_run1 || !!_run2 || _influenceRatio > 0 ||
+        [S.RUN1_READY, S.RUN1_RUNNING, S.R2_CONFIG, S.RUN2_READY, S.RUN2_RUNNING,
+         S.CORRECTION, S.RUNX_READY, S.RUNX_RUNNING, S.RPM_SCAN].includes(state);
+    }
+    if (_mode === '2P') {
+      if (_2pStep > 0) return true;
+      if (_influence2PComplete(_influence2P)) return true;
+      for (let i = 0; i < 3; i++) {
+        if (_meas[i].A || _meas[i].B) return true;
+      }
+    }
+    return _sessionPaused;
+  }
+
+  function _snapshot() {
+    return {
+      v: 1,
+      paused: _sessionPaused,
+      mode: _mode,
+      duo: !!_duo2P,
+      probe: (typeof ProbeMode !== 'undefined') ? ProbeMode.get() : null,
+      espState: _normalizeEspStateName(_espStateName || state),
+      state: state,
+      step2p: _2pStep,
+      run1: _run1,
+      run2: _run2,
+      runs1P: _runs1P,
+      testMass1P: _testMass1P,
+      testAngle1P: _testAngle1P,
+      influenceRatio: _influenceRatio,
+      phaseShift: _phaseShift,
+      runXcount: _runXcount,
+      meas: _meas,
+      trialMasses: _trialMasses,
+      influence2P: _influence2P,
+      polarPtsA: _polarPtsA,
+      polarPtsB: _polarPtsB,
+      runXData: _runXData,
+      coeffLoaded: _coeffLoaded,
+      saveOffered: _saveOfferedThisProc,
+      resultHtml: resultEl ? resultEl.innerHTML : '',
+      result2pHtml: _result2pHtml(),
+      ts: Date.now(),
+    };
+  }
+
+  function persistSession() {
+    if (!hasProgress() && !_sessionPaused) return;
+    try {
+      localStorage.setItem(BAL_LS_KEY, JSON.stringify(_snapshot()));
+    } catch (e) {}
+  }
+
+  function _clearStorage() {
+    try { localStorage.removeItem(BAL_LS_KEY); } catch (e) {}
+  }
+
+  function _readStorage() {
+    try {
+      const raw = localStorage.getItem(BAL_LS_KEY);
+      if (!raw) return null;
+      const o = JSON.parse(raw);
+      if (!o || o.v !== 1) return null;
+      return o;
+    } catch (e) { return null; }
+  }
+
+  function _applySnapshot(o) {
+    if (!o) return;
+    _mode = o.mode === '2P' ? '2P' : '1P';
+    _duo2P = !!o.duo;
+    _sessionPaused = !!o.paused;
+    _espStateName = o.espState || 'IDLE';
+    state = o.state || S.IDLE;
+    _2pStep = o.step2p || 0;
+    _run1 = o.run1 || null;
+    _run2 = o.run2 || null;
+    _runs1P = Array.isArray(o.runs1P) ? o.runs1P : [];
+    _testMass1P = o.testMass1P || 0;
+    _testAngle1P = o.testAngle1P || 0;
+    _influenceRatio = o.influenceRatio || 0;
+    _phaseShift = o.phaseShift || 0;
+    _runXcount = o.runXcount || 2;
+    _meas = o.meas || [{ A: null, B: null }, { A: null, B: null }, { A: null, B: null }];
+    _trialMasses = o.trialMasses || [{ mass: 0, angle: 0 }, { mass: 0, angle: 0 }];
+    _influence2P = o.influence2P || null;
+    _polarPtsA = Array.isArray(o.polarPtsA) ? o.polarPtsA : [];
+    _polarPtsB = Array.isArray(o.polarPtsB) ? o.polarPtsB : [];
+    _runXData = o.runXData || {};
+    _coeffLoaded = !!o.coeffLoaded;
+    _saveOfferedThisProc = !!o.saveOffered;
+    if (resultEl) resultEl.innerHTML = o.resultHtml || '';
+    const r2p = document.getElementById('bal-result-2p');
+    if (r2p) r2p.innerHTML = o.result2pHtml || '';
+    setMode(_mode);
+    _drawPolar1P();
+    _drawAll2P();
+    _updateUI();
+    _updateCoeffButtons();
+    _updatePauseBanner();
+  }
+
+  function _restoreFromStorageIfAny() {
+    const o = _readStorage();
+    if (!o) return;
+    _applySnapshot(o);
+    if (o.paused) log('Session en pause restaurée (refresh)');
+    else if (hasProgress()) log('Session équilibrage restaurée');
+  }
+
+  function _updatePauseBanner() {
+    const el = document.getElementById('bal-pause-banner');
+    const txt = document.getElementById('bal-pause-banner-txt');
+    if (!el) return;
+    const show = !!_sessionPaused && hasProgress();
+    el.style.display = show ? 'flex' : 'none';
+    el.setAttribute('aria-hidden', show ? 'false' : 'true');
+    if (txt && show) {
+      const label = _mode === '2P'
+        ? (_duo2P ? '2P duo' : '2P')
+        : '1P';
+      txt.textContent = 'Équilibrage ' + label + ' en pause — Reprendre pour continuer';
+    }
+  }
+
+  /** Appelé avant d'aller Analyse / Live FFT / Harm / term. */
+  function pauseForLeave() {
+    if (!hasProgress()) return false;
+    _sessionPaused = true;
+    _espStateName = _normalizeEspStateName(_espStateName || state);
+    persistSession();
+    _balSendAllEsp('BAL_PAUSE');
+    _stopTachWatch();
+    _updatePauseBanner();
+    log('⏸ Pause équilibrage (autre module)');
+    if (typeof termAddLine === 'function') {
+      termAddLine('[BAL] pause — session gardée', 'sys');
+    }
+    return true;
+  }
+
+  function discardSession() {
+    _sessionPaused = false;
+    _procedureResetLocal(false);
+    _clearStorage();
+    _balSendAllEsp('BAL_RESET');
+    _updatePauseBanner();
+    log('Session équilibrage abandonnée');
+  }
+
+  /** Nouveau depuis menu : confirme si progression, puis flush. */
+  function prepareNewFromMenu() {
+    if (hasProgress() || _sessionPaused || _readStorage()) {
+      if (!confirm('Nouvelle procédure d\'équilibrage ?\nLa session en cours / en pause sera perdue.')) {
+        return false;
+      }
+      discardSession();
+    }
+    return true;
+  }
+
+  function resumeSession() {
+    const snap = _readStorage();
+    if (snap) _applySnapshot(snap);
+    if (!hasProgress()) {
+      setStatus('Aucune session à reprendre', 'err');
+      return;
+    }
+    _sessionPaused = false;
+    persistSession();
+    _updatePauseBanner();
+
+    const espState = _normalizeEspStateName(_espStateName || state || 'IDLE');
+    const onReady = function () {
+      _balSendAllEsp('BAL_RESUME STATE=' + espState);
+      _startTachWatch();
+      _balSend('BAL_INIT');
+      setStatus('Session reprise', 'ok');
+      log('▶ Reprise équilibrage → ' + espState);
+      _updateUI();
+      setTimeout(resize, 60);
+    };
+
+    if (typeof DualSession !== 'undefined' && DualSession.available()) {
+      DualSession.startModule('balance', 'WS_GOTO=EQ_RESUME', {
+        label: 'Équilibrage (reprise)',
+        onReady: onReady,
+        onFail: function () {
+          setStatus('Reprise échouée (NAV)', 'err');
+          _sessionPaused = true;
+          persistSession();
+          _updatePauseBanner();
+        },
+      });
+    } else if (typeof window.wsGoto === 'function') {
+      window.wsGoto('balance', 'WS_GOTO=EQ_RESUME', {
+        onAck: onReady,
+        onTimeout: function () {
+          setStatus('Reprise échouée (NAV)', 'err');
+          _sessionPaused = true;
+          persistSession();
+          _updatePauseBanner();
+        },
+      });
+    } else {
+      _balSendAllEsp('WS_GOTO=EQ_RESUME');
+      setTimeout(onReady, 300);
+      if (typeof showTab === 'function') showTab('balance');
+    }
+  }
+
+  function selectMode(m) { setMode(m); }
+
   return {
     init, enterBalance, onData, onTourBinary, onTourBinaryB, onRpmB,
-    setMode, resize, clearSession, selectSensor,
+    setMode, selectMode, resize, clearSession, selectSensor,
+    hasProgress, persistSession, pauseForLeave, resumeSession,
+    discardSession, prepareNewFromMenu,
   };
 })();

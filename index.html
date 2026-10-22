@@ -20,7 +20,7 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=27">
+<link rel="stylesheet" href="style.css?v=38">
 <link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   function showPwaInstallUi() {
@@ -39,11 +39,22 @@
   }
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('service-worker.js', { scope: './' })
-      .then(function (reg) { if (reg && reg.update) reg.update(); })
+    // ?v= force la récupération du SW (sinon Android garde l'ancien cache)
+    navigator.serviceWorker.register('service-worker.js?v=38', { scope: './' })
+      .then(function (reg) {
+        if (reg && reg.update) reg.update();
+        if (reg && reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+      })
       .catch(function (err) {
         console.warn('Service worker refuse:', err);
       });
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      // Nouveau SW actif — un seul reload pour prendre les fichiers frais
+      if (!window._swReloaded) {
+        window._swReloaded = true;
+        location.reload();
+      }
+    });
   }
 
   window.addEventListener('beforeinstallprompt', function (e) {
@@ -534,14 +545,18 @@
     <!-- Interface principale -->
     <div id="bal-main" style="display:flex; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
 
+      <div id="bal-pause-banner" class="bal-pause-banner" style="display:none;" aria-hidden="true">
+        <span id="bal-pause-banner-txt">Session en pause</span>
+        <button type="button" id="btn-bal-resume" class="bal-btn bal-btn-run">Reprendre</button>
+      </div>
       <div class="bal-toolbar">
-        <button type="button" id="btn-bal-start" class="bal-btn">Démarrer</button>
         <button type="button" id="btn-bal-load-coeff" class="bal-btn" disabled>Load Coeff</button>
         <button type="button" id="btn-bal-reset-top" class="bal-btn bal-btn-reset">Reset</button>
         <button type="button" id="btn-bal-save-coeff" class="bal-btn" disabled>Save Coeff</button>
         <div class="bal-cmdbar-sep"></div>
         <button type="button" id="btn-bal-mode-1p" class="bal-btn bal-mode-toggle bal-mode-toggle--active">1 Plan</button>
         <button type="button" id="btn-bal-mode-2p" class="bal-btn bal-mode-toggle">2 Plans</button>
+        <span id="bal-build-stamp" class="bal-build-stamp" title="Version UI">v38</span>
       </div>
 
       <!-- ── Layout MODE 1P ─────────────────────────────────── -->
@@ -716,13 +731,13 @@
 </div><!-- #main -->
 
 <script src="terminal.js?v=17"></script>
-<script src="fft.js?v=24"></script>
+<script src="fft.js?v=38"></script>
 <script src="demod.js?v=16"></script>
 <script src="analyse.js?v=29"></script>
 <script src="calc.js?v=16"></script>
-<script src="balance.js?v=21"></script>
-<script src="harmonic.js?v=20"></script>
-<script src="menu.js?v=28"></script>
-<script src="app.js?v=40"></script>
+<script src="balance.js?v=38"></script>
+<script src="harmonic.js?v=38"></script>
+<script src="menu.js?v=38"></script>
+<script src="app.js?v=38"></script>
 </body>
 </html>

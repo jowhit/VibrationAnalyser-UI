@@ -1,7 +1,7 @@
 // Shell PWA — chemins relatifs au dossier du service worker
 // (fonctionne a la racine ESP32 et sous /VibrationAnalyser-UI/ sur GitHub Pages).
 
-const CACHE_NAME = 'vibanalyser-v32';
+const CACHE_NAME = 'vibanalyser-v38';
 const FILES = [
   './index.html',
   './app.js',
@@ -16,7 +16,9 @@ const FILES = [
   './style.css',
   './manifest.json',
   './icon-192.png',
-  './icon-512.png'
+  './icon-512.png',
+  './icon-192-maskable.png',
+  './icon-512-maskable.png'
 ];
 
 function _url(name) {
@@ -48,6 +50,11 @@ self.addEventListener('activate', function (event) {
   );
 });
 
+self.addEventListener('message', function (event) {
+  if (event.data && event.data.type === 'SKIP_WAITING') self.skipWaiting();
+});
+
+// Network-first : sinon Android garde l'ancien JS (pause / UI invisibles)
 self.addEventListener('fetch', function (event) {
   if (event.request.method !== 'GET') return;
   var url;
@@ -58,20 +65,20 @@ self.addEventListener('fetch', function (event) {
   var indexUrl = _url('./index.html');
 
   event.respondWith(
-    caches.open(CACHE_NAME).then(function (cache) {
-      var lookup = isNav ? indexUrl : event.request;
-      return cache.match(lookup, { ignoreSearch: true }).then(function (cached) {
-        var network = fetch(event.request).then(function (response) {
-          if (response && response.ok && url.pathname.indexOf('.') >= 0) {
-            cache.put(event.request, response.clone());
-          }
-          if (response && response.ok && isNav) cache.put(indexUrl, response.clone());
-          return response;
-        }).catch(function () { return null; });
-        if (cached) return cached;
-        return network.then(function (response) {
-          if (response) return response;
-          return cache.match(indexUrl);
+    fetch(event.request, { cache: 'no-cache' }).then(function (response) {
+      if (response && response.ok) {
+        var clone = response.clone();
+        caches.open(CACHE_NAME).then(function (cache) {
+          if (isNav) cache.put(indexUrl, clone);
+          else cache.put(event.request, clone);
+        });
+      }
+      return response;
+    }).catch(function () {
+      return caches.open(CACHE_NAME).then(function (cache) {
+        var lookup = isNav ? indexUrl : event.request;
+        return cache.match(lookup, { ignoreSearch: true }).then(function (cached) {
+          return cached || cache.match(indexUrl);
         });
       });
     })

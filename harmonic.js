@@ -187,10 +187,23 @@ const HarmonicModule = (() => {
     _harmUpdateRpmBar();
     _drawPolar();
     _drawSpeed();
-    if (_dualSession) {
-      if (typeof termAddLine === 'function') termAddLine('[DOUBLE] Harmonic A+B (tach)', 'sys');
-      wsSendB('WS_GOTO=ANAL_HARM');
-    }
+    // GOTO B géré par DualSession.startModule / harmToggle — pas de double envoi ici
+  }
+
+  /** Menu / DualSession : A+B prêts (NAV_ACK des deux). */
+  function onDualReady(dual) {
+    _dualSession = !!dual;
+    if (_dualSession && typeof DualSession !== 'undefined') DualSession.begin();
+    _clearLiveData();
+    setRunning(true);
+    _startStaleWatch();
+    _harmUpdateRpmBar();
+    _drawPolar();
+    _drawSpeed();
+  }
+
+  function abortStart() {
+    _abortSession();
   }
 
   function _stopBothEsp() {
@@ -248,17 +261,21 @@ const HarmonicModule = (() => {
         _pauseSession();
       }
     } else {
-      // A et B démarrés ensemble (B n'attend plus le NAV_ACK de A)
-      _startBothEsp();
-      if (go) {
+      _clearLiveData();
+      if (typeof DualSession !== 'undefined') {
+        DualSession.startModule('harmonic', 'WS_GOTO=ANAL_HARM', {
+          label: 'Harmonique',
+          onReady: (dual) => onDualReady(dual),
+          onFail: () => _abortSession(),
+        });
+      } else if (go) {
         go('harmonic', 'WS_GOTO=ANAL_HARM', {
-          onAck: () => { setRunning(true); _startStaleWatch(); },
+          onAck: () => onDualReady(false),
           onTimeout: () => _abortSession(),
         });
       } else {
         wsSend('WS_GOTO=ANAL_HARM');
-        setRunning(true);
-        _startStaleWatch();
+        onDualReady(false);
       }
     }
   }
@@ -273,10 +290,9 @@ const HarmonicModule = (() => {
     _updateBtn();
   }
 
-  /** Entrée menu : même contrat start (A+B en parallèle). */
+  /** @deprecated — préférer DualSession.startModule + onDualReady */
   function beginFromMenu() {
-    _startBothEsp();
-    setRunning(true);
+    onDualReady((typeof DualSession !== 'undefined') && DualSession.available());
   }
 
   function _updateBtn() {
@@ -819,6 +835,7 @@ const HarmonicModule = (() => {
 
   return {
     init, onData, onHarmBinary, onHarmBinaryB,
-    resize, getRPM, setRunning, beginFromMenu, harmToggle, switchView,
+    resize, getRPM, setRunning, beginFromMenu, onDualReady, abortStart,
+    harmToggle, switchView,
   };
 })();

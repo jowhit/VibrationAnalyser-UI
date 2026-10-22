@@ -623,7 +623,7 @@ function fftSpecRMS(mag, minBin, maxBin) {
   return Math.sqrt(s * 2);
 }
 
-// ── Attente 1ère trame (rond bleu = même style temporel) ──────
+// ── Attente 1ère trame (même overlay / anneau que temporel) ───
 let _fftWaitRaf = null;
 let _fftWaitActive = false;
 
@@ -664,7 +664,7 @@ function _fftWaitAnim() {
     ctx.beginPath();
     ctx.arc(cx, cy, R, 0, 2 * Math.PI);
     ctx.stroke();
-    // Arc tournant (même rendu que phase « transfert » temporelle)
+    // Même rendu que phase « transfert » temporelle
     const spin = (Date.now() % 1200) / 1200 * 2 * Math.PI;
     ctx.strokeStyle = '#0066cc';
     ctx.lineWidth = 7;

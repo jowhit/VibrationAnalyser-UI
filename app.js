@@ -407,6 +407,10 @@ window.ProbeMode = ProbeMode;
  */
 const DualSession = (() => {
   let _active = false;
+  /** Attente NAV_ACK de B après startModule dual. */
+  let _pendingB = null; // { expectTab, timer, onOk, onFail }
+  /** ACK B arrivé avant que A soit prêt (B souvent plus rapide). */
+  let _bAckEarly = null;
 
   function available() {
     if (typeof ProbeMode !== 'undefined' && ProbeMode.isSet()) {
@@ -418,8 +422,40 @@ const DualSession = (() => {
     _active = available();
     return _active;
   }
-  function end() { _active = false; }
+  function end() {
+    _clearPendingB();
+    _bAckEarly = null;
+    _active = false;
+  }
   function is() { return _active; }
+
+  function _clearPendingB() {
+    if (_pendingB && _pendingB.timer) clearTimeout(_pendingB.timer);
+    _pendingB = null;
+  }
+
+  function _tabMatch(expect, tab) {
+    if (!expect) return true;
+    if (tab === expect) return true;
+    if (expect === 'analyse' && tab === 'bumptest') return true;
+    if (expect === 'bumptest' && tab === 'analyse') return true;
+    return false;
+  }
+
+  /** NAV_ACK reçu sur le canal B (appelé depuis handleTextB). */
+  function onNavAckB(tab) {
+    if (_pendingB) {
+      if (!_tabMatch(_pendingB.expectTab, tab)) return false;
+      const cb = _pendingB.onOk;
+      _clearPendingB();
+      _bAckEarly = null;
+      if (cb) cb();
+      return true;
+    }
+    // Trop tôt : mémoriser pour quand A sera prêt
+    _bAckEarly = tab;
+    return true;
+  }
 
   function sendBoth(cmd) {
     // Mode mono B : wsSend route déjà vers B — ne pas doubler via wsSendB
@@ -435,6 +471,8 @@ const DualSession = (() => {
     opts = opts || {};
     // available() avant wsGoto : wsGoto → analyseResetDualSession → DualSession.end()
     const wantDual = available();
+    _bAckEarly = null;
+    _clearPendingB();
     if (wantDual) {
       if (typeof termAddLine === 'function') {
         termAddLine('[DOUBLE] ' + (opts.label || tab) + ' A+B', 'sys');
@@ -442,15 +480,46 @@ const DualSession = (() => {
       wsSendB(gotoCmd);
     }
     const go = typeof window.wsGoto === 'function' ? window.wsGoto : null;
+
+    function readyDual() {
+      _bAckEarly = null;
+      begin();
+      if (opts.onReady) opts.onReady(true);
+    }
+    function failDual() {
+      _clearPendingB();
+      _bAckEarly = null;
+      end();
+      if (typeof termAddLine === 'function') {
+        termAddLine('[DOUBLE] !! B pas prêt (NAV_ACK)', 'sys');
+      }
+      if (opts.onFail) opts.onFail();
+    }
+
     if (go) {
       go(tab, gotoCmd, {
         onAck: function () {
-          // Re-begin après le reset de wsGoto
-          if (wantDual) begin();
-          else end();
-          if (opts.onReady) opts.onReady(wantDual);
+          if (!wantDual) {
+            end();
+            if (opts.onReady) opts.onReady(false);
+            return;
+          }
+          // A prêt — B déjà ACK ? sinon attendre
+          if (_bAckEarly && _tabMatch(tab, _bAckEarly)) {
+            readyDual();
+            return;
+          }
+          _clearPendingB();
+          _pendingB = {
+            expectTab: tab,
+            onOk: readyDual,
+            onFail: failDual,
+            timer: setTimeout(failDual, 2500),
+          };
         },
         onTimeout: function () {
+          _clearPendingB();
+          _bAckEarly = null;
           end();
           if (opts.onFail) opts.onFail();
         },
@@ -473,7 +542,8 @@ const DualSession = (() => {
   }
 
   return { available: available, begin: begin, end: end, is: is,
-           sendBoth: sendBoth, startModule: startModule, stopBoth: stopBoth };
+           sendBoth: sendBoth, startModule: startModule, stopBoth: stopBoth,
+           onNavAckB: onNavAckB };
 })();
 window.DualSession = DualSession;
 
@@ -875,6 +945,12 @@ function _wsConnectBTo(host) {
         ? (' [sonde ' + ProbeMode.get() + ']')
         : ' → choisir sonde'), 'sys');
     _startHeartbeatB();
+    // Comme A : resync état module après reconnexion WiFi
+    setTimeout(() => {
+      if (wsB && wsB.readyState === WebSocket.OPEN) {
+        try { wsB.send('WS_GOTO=SYNC\n'); } catch (e) {}
+      }
+    }, 300);
   };
 
   wsB.onclose = (e) => {
@@ -943,7 +1019,11 @@ function handleTextB(raw) {
       }
     }
 
-    if (line === 'NAV_ACK=analyse' || line.startsWith('NAV_ACK=')) return;
+    if (line.startsWith('NAV_ACK=')) {
+      const modB = line.slice(8).trim();
+      if (typeof DualSession !== 'undefined' && DualSession.onNavAckB(modB)) return;
+      return;
+    }
     if (line.startsWith('ANAL_ARM_OK')) {
       _onAnalArmOk(true);
       return;
@@ -1635,6 +1715,14 @@ function wsGoto(tab, cmdLine, opts) {
   rxStateB = 'text';
   rxHeadersB = {};
 
+  // Pause auto équilibrage si on quitte vers un autre module
+  const isBalStay = /^WS_GOTO=EQ(_RESUME)?(\s|$)/.test(clean);
+  if (!isBalStay && typeof BalanceModule !== 'undefined' &&
+      typeof BalanceModule.hasProgress === 'function' && BalanceModule.hasProgress() &&
+      typeof BalanceModule.pauseForLeave === 'function') {
+    BalanceModule.pauseForLeave();
+  }
+
   _navPending = true;
   _navOpts = opts || null;
   try {
@@ -1772,6 +1860,17 @@ document.addEventListener('DOMContentLoaded', () => {
   showTab(lastTab);
   if (typeof MenuModule     !== 'undefined') MenuModule.init(wsSend, showTab, wsGoto);
   if (typeof HarmonicModule !== 'undefined') HarmonicModule.init();
+  // Restaure snapshot équilibrage même avant WS (pause / refresh)
+  if (typeof BalanceModule !== 'undefined') BalanceModule.init(wsSend);
+});
+
+/** Demande confirmation avant refresh (Android : parfois sans dialogue — localStorage sauve quand même). */
+window.addEventListener('beforeunload', function (e) {
+  if (typeof BalanceModule === 'undefined') return;
+  if (typeof BalanceModule.hasProgress !== 'function' || !BalanceModule.hasProgress()) return;
+  if (typeof BalanceModule.persistSession === 'function') BalanceModule.persistSession();
+  e.preventDefault();
+  e.returnValue = '';
 });
 
 document.addEventListener('visibilitychange', () => {

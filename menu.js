@@ -203,6 +203,22 @@ const MenuModule = (() => {
         if (btn.key === 'eq') {
           _path = [];
           _render(L.ROOT);
+          // Session en pause → proposer Reprendre, sinon confirmer nouveau
+          if (typeof BalanceModule !== 'undefined') {
+            const paused = BalanceModule.hasProgress && BalanceModule.hasProgress();
+            if (paused) {
+              if (confirm('Session d\'équilibrage en pause.\n\nOK = Reprendre\nAnnuler = choisir…')) {
+                if (typeof BalanceModule.resumeSession === 'function') {
+                  BalanceModule.resumeSession();
+                }
+                return;
+              }
+              if (typeof BalanceModule.prepareNewFromMenu === 'function' &&
+                  !BalanceModule.prepareNewFromMenu()) {
+                return;
+              }
+            }
+          }
           // Duo : EQ sur A+B en parallèle (2 plans duo = capture simultanée)
           if (typeof DualSession !== 'undefined' && DualSession.available()) {
             DualSession.startModule('balance', 'WS_GOTO=EQ', { label: 'Équilibrage' });
@@ -251,25 +267,35 @@ const MenuModule = (() => {
 
         } else if (btn.key === 'harmonique') {
           _path = []; _render(L.ROOT);
-          if (_navGoto) {
-            // beginFromMenu : A+B en parallèle + UI dual dès le départ (si mode AB)
-            if (typeof HarmonicModule !== 'undefined' &&
-                typeof HarmonicModule.beginFromMenu === 'function') {
-              HarmonicModule.beginFromMenu();
+          const harmReady = (dual) => {
+            if (typeof HarmonicModule !== 'undefined') {
+              if (typeof HarmonicModule.onDualReady === 'function') {
+                HarmonicModule.onDualReady(dual);
+              } else {
+                HarmonicModule.setRunning(true);
+              }
             }
+          };
+          const harmFail = () => {
+            if (typeof HarmonicModule !== 'undefined' &&
+                typeof HarmonicModule.abortStart === 'function') {
+              HarmonicModule.abortStart();
+            }
+          };
+          if (typeof DualSession !== 'undefined') {
+            DualSession.startModule('harmonic', 'WS_GOTO=ANAL_HARM', {
+              label: 'Harmonique',
+              onReady: harmReady,
+              onFail: harmFail,
+            });
+          } else if (_navGoto) {
             _navGoto('harmonic', 'WS_GOTO=ANAL_HARM', {
-              onAck: () => {
-                if (typeof HarmonicModule !== 'undefined') HarmonicModule.setRunning(true);
-              },
+              onAck: () => harmReady(false),
+              onTimeout: harmFail,
             });
           } else {
-            if (typeof HarmonicModule !== 'undefined' &&
-                typeof HarmonicModule.beginFromMenu === 'function') {
-              HarmonicModule.beginFromMenu();
-            } else {
-              _send('WS_GOTO=ANAL_HARM\n');
-            }
-            setTimeout(() => _switchTab('harmonic'), 200);
+            _send('WS_GOTO=ANAL_HARM\n');
+            setTimeout(() => { harmReady(false); _switchTab('harmonic'); }, 200);
           }
         }
         break;

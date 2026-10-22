@@ -138,7 +138,7 @@ body { display: flex; flex-direction: column; }
 #an-stats b { color: #0066cc; }
 #an-fs { font-size: 10px !important; color: #aaa !important; }
 
-/* ── Progression acquisition temporelle / attente Live FFT ── */
+/* ── Progression acquisition temporelle ── */
 #an-canvas-wrap, #fft-canvas-wrap { position: relative; }
 .an-acq-overlay {
   position: absolute; inset: 0; z-index: 12;
@@ -146,8 +146,8 @@ body { display: flex; flex-direction: column; }
   background: rgba(248, 248, 248, 0.88);
   pointer-events: none;
 }
-#an-acq-ring { width: 96px; height: 96px; display: block; }
-#an-acq-label {
+#an-acq-ring, #fft-wait-ring { width: 96px; height: 96px; display: block; }
+#an-acq-label, #fft-wait-label {
   margin-top: 10px; font-size: 11px; color: #444;
   font-family: 'Courier New', monospace; text-align: center; line-height: 1.35;
 }
@@ -510,6 +510,28 @@ body { display: flex; flex-direction: column; }
 }
 .bal-log div:last-child { color: #333; }
 
+/* ── Pause / reprise équilibrage ── */
+.bal-pause-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  flex-shrink: 0;
+  background: #fff6e6;
+  border-bottom: 1px solid #e0c48a;
+  color: #5a4200;
+  font-size: 12px;
+  font-family: 'Courier New', monospace;
+}
+.bal-pause-banner .bal-btn-run { flex-shrink: 0; }
+.bal-build-stamp {
+  margin-left: auto;
+  font-size: 10px;
+  color: #999;
+  font-family: 'Courier New', monospace;
+}
+
 /* ── Barre de commandes ── */
 .bal-toolbar {
   display: flex;
@@ -559,7 +581,7 @@ body { display: flex; flex-direction: column; }
 .bal-btn-run  { background: #0066cc; color: #fff; border-color: #0055aa; }
 .bal-btn-run:hover:not(:disabled) { background: #0055aa; }
 
-.bal-btn-reset { color: #cc2200; border-color: #cc2200; margin-left: auto; }
+.bal-btn-reset { color: #cc2200; border-color: #cc2200; }
 .bal-btn-reset:hover:not(:disabled) { background: #fde8e8; }
 
 .btn-waiting { animation: bal-pulse .8s ease-in-out infinite; pointer-events: none; }
