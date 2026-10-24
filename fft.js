@@ -100,6 +100,7 @@ function fftReceiveBloc(g, fs, n, raw) {
 
   showTab('fft');
   _fftWaitHide();
+  if (typeof FftSession !== 'undefined' && FftSession.onFrame) FftSession.onFrame();
   fftDraw();
   _fftUpdateStatus(sig);
 }
@@ -126,6 +127,7 @@ function fftReceiveBlocB(g, fs, n, raw) {
   fftMagVelB = computeVelFFT(sig, fsUse, nUse);
   showTab('fft');
   if (fftMag) _fftWaitHide();
+  if (typeof FftSession !== 'undefined' && FftSession.onFrame) FftSession.onFrame();
   fftDraw();
   _fftUpdateStatus(_fftLastSigA);
 }
@@ -679,81 +681,8 @@ function _fftWaitAnim() {
   _fftWaitRaf = requestAnimationFrame(_fftWaitAnim);
 }
 
-// ── Contrôles boutons ─────────────────────────────────────────
-/**
- * LIVE_START sur A (+ B si dual).
- * @param {boolean} [dualFlag] — passé par DualSession.onReady (fiable après wsGoto reset)
- */
-function _fftFireLiveStart(dualFlag) {
-  fftMag = null; fftMagVel = null;
-  fftMagB = null; fftMagVelB = null;
-  if (typeof dualFlag === 'boolean') {
-    _fftDualSession = dualFlag;
-    if (dualFlag && typeof DualSession !== 'undefined') DualSession.begin();
-  } else {
-    _fftDualSession = (typeof DualSession !== 'undefined') ? DualSession.is() : false;
-  }
-  _fftWaitShow(_fftDualSession ? 'Live FFT A+B…' : 'Live FFT…');
-  // A+B ensemble — B a déjà reçu WS_GOTO=ANAL_LIVE avant le NAV_ACK de A
-  if (_fftDualSession && typeof DualSession !== 'undefined') {
-    DualSession.sendBoth('LIVE_START');
-  } else {
-    wsSend('LIVE_START');
-  }
-}
-window._fftStartDualLive = _fftFireLiveStart;
-
-function fftToggle() {
-  const btn = document.getElementById('btn-fft-start');
-  if (!fftRunning) {
-    const ready = function (dual) {
-      _fftFireLiveStart(dual);
-      fftRunning = true;
-      if (btn) {
-        btn.textContent = '■ Stop';
-        btn.classList.add('running');
-      }
-    };
-    _fftWaitShow('Connexion Live FFT…');
-    if (typeof DualSession !== 'undefined') {
-      DualSession.startModule('fft', 'WS_GOTO=ANAL_LIVE', {
-        label: 'Live FFT',
-        onReady: ready,
-        onFail: function () {
-          _fftWaitHide();
-          if (typeof termAddLine === 'function') {
-            termAddLine('!! Live FFT: NAV timeout', 'sys');
-          }
-        },
-      });
-    } else if (typeof window.wsGoto === 'function') {
-      window.wsGoto('fft', 'WS_GOTO=ANAL_LIVE', {
-        onAck: function () { ready(false); },
-        onTimeout: function () {
-          _fftWaitHide();
-          if (typeof termAddLine === 'function') {
-            termAddLine('!! Live FFT: NAV timeout', 'sys');
-          }
-        },
-      });
-    } else {
-      wsSend('WS_GOTO=ANAL_LIVE');
-      setTimeout(function () { ready(false); }, 400);
-    }
-  } else {
-    if (typeof DualSession !== 'undefined') DualSession.stopBoth('r');
-    else wsSend('r');
-    fftRunning = false;
-    _fftWaitHide();
-    // Garder fftMag / fftMagB : gel de la dernière trame pour zoom / pan après Stop
-    // (effacés au prochain Start dans _fftFireLiveStart)
-    if (btn) {
-      btn.textContent = '▶ Live FFT';
-      btn.classList.remove('running');
-    }
-    fftDraw();
-  }
-}
+// ── Contrôles : FftSession (fft-session.js) ────────────────────
+// _fftFireLiveStart / fftToggle / _fftStartDualLive → fft-session.js
 function fftManualZoom(f) {
   fftAutoScale = false;
   const maxRpm = fftUnit === 'mm/s' ? fftMaxRpmVel(fftP.fs) : fftMaxRpmG(fftP.fs);
@@ -763,11 +692,18 @@ function fftManualZoom(f) {
   if (fftZMax - fftZMin < 100) fftZMax = fftZMin + 100;
   fftDraw();
 }
-function fftToggleUnit() {
-  fftUnit = (fftUnit === 'g') ? 'mm/s' : 'g';
-  const btn = document.getElementById('btn-fft-unit');
-  btn.textContent = fftUnit;
-  btn.classList.toggle('active', fftUnit === 'mm/s');
+function _fftUpdateUnitBtns() {
+  const g = document.getElementById('btn-fft-g');
+  const v = document.getElementById('btn-fft-vel');
+  if (g) g.classList.toggle('bal-mode-toggle--active', fftUnit === 'g');
+  if (v) v.classList.toggle('bal-mode-toggle--active', fftUnit === 'mm/s');
+}
+
+function fftSetUnit(unit) {
+  if (unit !== 'g' && unit !== 'mm/s') return;
+  if (fftUnit === unit) return;
+  fftUnit = unit;
+  _fftUpdateUnitBtns();
   fftCursorBin = -1;
   if (fftAutoScale && fftMag) {
     const mag    = fftUnit === 'g' ? fftMag : (fftMagVel || fftMag);
@@ -785,3 +721,9 @@ function fftToggleUnit() {
   }
   fftDraw();
 }
+
+/** @deprecated — bascule ; préférer fftSetUnit */
+function fftToggleUnit() {
+  fftSetUnit(fftUnit === 'g' ? 'mm/s' : 'g');
+}
+window.fftSetUnit = fftSetUnit;

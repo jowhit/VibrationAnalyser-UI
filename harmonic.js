@@ -3,16 +3,17 @@
 // Architecture : ESP32 envoie HARM_BIN (binaire brut)
 // JS fait : DFT multi-harmoniques → polaire + speedomètre
 //
-// Start/Stop :
-//   Start → WS_GOTO=ANAL_HARM → ESP commence, envoie en boucle
-//   Stop  → WS_GOTO=HARM_STOP → ESP s'arrête, dernière trame gelée (pause)
+// Start/Stop : PhaseSession (phase-session.js) — entrée unique Terminal.
+//   Start → WS_GOTO=ANAL_HARM → ESP boucle HARM_BIN
+//   Stop  → WS_GOTO=HARM_STOP → dernière trame gelée (VIEW)
 // ═══════════════════════════════════════════════════════════════
 
 const HarmonicModule = (() => {
 
   // Canaux A/B : même structure (pas de chemin « mono + patch B »).
   // _dualSession = true dès le Start en mode DOUBLE → UI A+B immédiate.
-  const HARM_TACH_STALE_MS = 1500;
+  // > cycle estimation+sync+acq (~2–3 s) ; 1.5 s trop court → RPM clignote à 0
+  const HARM_TACH_STALE_MS = 5000;
   const HARM_COL_A = '#0033cc';
   const HARM_COL_B = '#e67e22';
 
@@ -69,7 +70,12 @@ const HarmonicModule = (() => {
     _ptCtx       = _ptCanvas ? _ptCanvas.getContext('2d') : null;
 
     const btn = document.getElementById('btn-harm-toggle');
-    if (btn) btn.addEventListener('click', harmToggle);
+    if (btn) {
+      btn.addEventListener('click', function () {
+        if (typeof PhaseSession !== 'undefined' && PhaseSession.toggle) PhaseSession.toggle();
+        else harmToggle();
+      });
+    }
 
     _applyCanvasVisibility();
     window.addEventListener('resize', _resize);
@@ -195,29 +201,29 @@ const HarmonicModule = (() => {
     _dualSession = !!dual;
     if (_dualSession && typeof DualSession !== 'undefined') DualSession.begin();
     _clearLiveData();
-    setRunning(true);
-    _startStaleWatch();
+    // Ne PAS setRunning(true) ici : sinon bouton rouge « Arrêter » alors
+    // qu’aucune trame n’arrive encore (estimation RPM / pas de tach).
+    // La 1ʳᵉ HARM_BIN dans onHarmBinary* appelle setRunning(true).
+    setRunning(false);
     _harmUpdateRpmBar();
     _drawPolar();
     _drawSpeed();
+    if (_phaseTrackingMode) {
+      _drawPhaseCircle();
+      _updatePhaseUI();
+    }
   }
 
   function abortStart() {
     _abortSession();
   }
 
-  function _stopBothEsp() {
-    if (_dualSession && typeof wsSendB === 'function') {
-      wsSendB('WS_GOTO=HARM_STOP');
-    }
-  }
-
-  /** Stop = pause : garde polaire / phase / RPM affichés. */
-  function _pauseSession() {
+  /** Stop = pause : garde polaire / phase / RPM affichés. Appelé par PhaseSession.stop. */
+  function pauseSession() {
     _stopStaleWatch();
     // Ne pas _clearLiveData — gel de la dernière trame (mono et duo)
     if (typeof DualSession !== 'undefined') DualSession.end();
-    setRunning(false);
+    _running = false;
     _harmUpdateRpmBar();
     _updateInfo();
     _drawPolar();
@@ -228,13 +234,13 @@ const HarmonicModule = (() => {
     }
   }
 
-  /** Abandon (timeout Start) : tout effacer. */
+  /** Abandon (timeout / leave) : tout effacer. */
   function _abortSession() {
     _stopStaleWatch();
     _clearLiveData();
     _dualSession = false;
     if (typeof DualSession !== 'undefined') DualSession.end();
-    setRunning(false);
+    _running = false;
     _harmUpdateRpmBar();
     _updateInfo();
     _drawPolar();
@@ -245,49 +251,22 @@ const HarmonicModule = (() => {
     }
   }
 
+  /** @deprecated — passer par PhaseSession.toggle() */
   function harmToggle() {
-    const go = typeof window.wsGoto === 'function' ? window.wsGoto : null;
-    if (_running) {
-      // Stop immédiat côté UI (ne pas attendre NAV_ACK pour geler)
-      _stopStaleWatch();
-      _stopBothEsp();
-      if (go) {
-        go('harmonic', 'WS_GOTO=HARM_STOP', {
-          onAck: () => _pauseSession(),
-          onTimeout: () => _pauseSession(),
-        });
-      } else {
-        wsSend('WS_GOTO=HARM_STOP');
-        _pauseSession();
-      }
-    } else {
-      _clearLiveData();
-      if (typeof DualSession !== 'undefined') {
-        DualSession.startModule('harmonic', 'WS_GOTO=ANAL_HARM', {
-          label: 'Harmonique',
-          onReady: (dual) => onDualReady(dual),
-          onFail: () => _abortSession(),
-        });
-      } else if (go) {
-        go('harmonic', 'WS_GOTO=ANAL_HARM', {
-          onAck: () => onDualReady(false),
-          onTimeout: () => _abortSession(),
-        });
-      } else {
-        wsSend('WS_GOTO=ANAL_HARM');
-        onDualReady(false);
-      }
+    if (typeof PhaseSession !== 'undefined' && PhaseSession.toggle) {
+      PhaseSession.toggle();
+      return;
     }
   }
 
   // ============================================================
-  // setRunning — met à jour l'état et le bouton
+  // setRunning — flag live + stale-watch (bouton = PhaseSession)
   // ============================================================
   function setRunning(on) {
     _running = on;
-    if (on) _startStaleWatch();
-    else _stopStaleWatch();
-    _updateBtn();
+    // Stale-watch seulement après 1ʳᵉ trame (estimation RPM peut > 1.5 s)
+    if (!on) _stopStaleWatch();
+    if (typeof PhaseSession === 'undefined') _updateBtn();
   }
 
   /** @deprecated — préférer DualSession.startModule + onDualReady */
@@ -299,13 +278,13 @@ const HarmonicModule = (() => {
     const btn = document.getElementById('btn-harm-toggle');
     if (!btn) return;
     if (_running) {
-      btn.textContent = '◼ Stop';
-      btn.classList.add('running');
-      btn.classList.remove('btn-primary');
+      btn.textContent = '◼ Arrêter';
+      btn.classList.add('bal-btn-stop');
+      btn.classList.remove('bal-btn-run');
     } else {
-      btn.textContent = '▶ Start';
-      btn.classList.remove('running');
-      btn.classList.add('btn-primary');
+      btn.textContent = '▶ Démarrer';
+      btn.classList.remove('bal-btn-stop');
+      btn.classList.add('bal-btn-run');
     }
   }
 
@@ -319,14 +298,16 @@ const HarmonicModule = (() => {
     var rpmShow = Math.max(_rpm || 0, _rpmB || 0);
     if (rpmEl) rpmEl.textContent = String(Math.round(rpmShow || 0));
     if (dotEl) {
-      dotEl.className = (rpmShow > 0) ? 'ok' : '';
+      dotEl.className = 'bal-rpm-dot ' + (rpmShow > 0 ? 'bal-rpm-dot--ok' : 'bal-rpm-dot--lost');
     }
   }
 
   function onHarmBinary(gRange, fs, rpm, n, samples) {
+    if (typeof PhaseSession !== 'undefined' && PhaseSession.onFrame) PhaseSession.onFrame();
     if (!_running) setRunning(true);
+    if (!_staleTimer) _startStaleWatch();
     _noteFrame();
-    _rpm = rpm;
+    _rpm = (typeof rpm === 'number' && isFinite(rpm)) ? rpm : 0;
     _fs  = fs;
     _harmUpdateRpmBar();
 
@@ -343,9 +324,11 @@ const HarmonicModule = (() => {
 
   function onHarmBinaryB(gRange, fs, rpm, n, samples) {
     if (!_dualSession) return; // ignore B hors session DOUBLE
+    if (typeof PhaseSession !== 'undefined' && PhaseSession.onFrame) PhaseSession.onFrame();
     if (!_running) setRunning(true);
+    if (!_staleTimer) _startStaleWatch();
     _noteFrame();
-    _rpmB = rpm;
+    _rpmB = (typeof rpm === 'number' && isFinite(rpm)) ? rpm : 0;
     if (!_fs) _fs = fs;
     _harmUpdateRpmBar();
 
@@ -624,16 +607,21 @@ const HarmonicModule = (() => {
   // ============================================================
   function _phaseTracking(samples, gRange, fs, rpm, N) {
     var lsbPerG = 16384 / gRange;
-    var fund    = rpm / 60;
+    var fund    = (rpm > 0) ? (rpm / 60) : 0;
 
     // Saturation
     var satCount = 0;
     for (var i = 0; i < N; i++) {
       if (Math.abs(samples[i]) >= PT_SAT_THRESHOLD) satCount++;
     }
-    var halfPeriodSamples = fs / fund / 2;
+    var halfPeriodSamples = (fund > 0) ? (fs / fund / 2) : N;
+    if (!(halfPeriodSamples > 0)) halfPeriodSamples = N;
     var satPct = Math.min((satCount / halfPeriodSamples) * 100, 100);
     var isSaturated = satPct >= PT_SAT_WARN_PCT;
+
+    if (!(fund > 0) || !(fs > 0) || !(N > 1)) {
+      return { phase: 0, amp_g: 0, satPct: satPct, isSaturated: isSaturated };
+    }
 
     // DFT 1X sur samples non saturés
     var mean = 0, totalValid = 0;
@@ -748,17 +736,7 @@ const HarmonicModule = (() => {
       c.fillText(Math.round(_ptPhaseB) + '°', cx, cy);
     }
     c.textBaseline = 'alphabetic';
-
-    for (var i = 0; i < _ptHistory.length - 1; i++) {
-      var hp = _ptHistory[i];
-      var hRad = (hp.phase - 90) * Math.PI / 180;
-      var hx = cx + R * 0.7 * Math.cos(hRad);
-      var hy = cy + R * 0.7 * Math.sin(hRad);
-      var alpha = 0.15 + 0.1 * (i / PT_HISTORY_SIZE);
-      c.beginPath(); c.arc(hx, hy, 3, 0, 2 * Math.PI);
-      c.fillStyle = (hp.isSaturated ? 'rgba(196,90,0,' : 'rgba(0,51,204,') + alpha.toFixed(2) + ')';
-      c.fill();
-    }
+    // Pas de trace historique sur le cercle — flèche nette uniquement
   }
 
   // ============================================================
@@ -768,9 +746,12 @@ const HarmonicModule = (() => {
     var ampEl  = document.getElementById('pt-amp-line');
     var satEl  = document.getElementById('pt-sat-badge');
     var histEl = document.getElementById('pt-history');
+    _harmUpdateRpmBar();
 
     if ((_ptHasData || _ptHasDataB) && ampEl) {
       var parts = [];
+      var rpmShow = Math.round(Math.max(_rpm || 0, _rpmB || 0));
+      parts.push('<b>RPM</b> ' + rpmShow);
       if (_ptHasData) {
         parts.push(_ptIsSaturated
           ? '<span style="color:#c45a00;">A Sat ' + _ptSatPct.toFixed(0) + '%</span>'
@@ -820,9 +801,11 @@ const HarmonicModule = (() => {
 
     if (classicEl) classicEl.style.display = view === 'classic' ? 'flex' : 'none';
     if (phaseEl)   phaseEl.style.display   = view === 'phase'   ? 'flex' : 'none';
-    if (btnC) btnC.classList.toggle('harm-view-active', view === 'classic');
-    if (btnP) btnP.classList.toggle('harm-view-active', view === 'phase');
+    if (btnC) btnC.classList.toggle('bal-mode-toggle--active', view === 'classic');
+    if (btnP) btnP.classList.toggle('bal-mode-toggle--active', view === 'phase');
 
+    _harmUpdateRpmBar();
+    if (_phaseTrackingMode) _updatePhaseUI();
     _applyCanvasVisibility();
     setTimeout(_resize, 30);
   }
@@ -836,6 +819,6 @@ const HarmonicModule = (() => {
   return {
     init, onData, onHarmBinary, onHarmBinaryB,
     resize, getRPM, setRunning, beginFromMenu, onDualReady, abortStart,
-    harmToggle, switchView,
+    pauseSession, harmToggle, switchView,
   };
 })();

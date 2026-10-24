@@ -336,6 +336,16 @@ const ProbeMode = (() => {
     }
   }
 
+  /** Changement de sonde → chaque SM quitte via son API (pas de logique métier ici). */
+  function _abortSessions() {
+    if (typeof _cancelNavPending === 'function') _cancelNavPending(true);
+    if (typeof FftSession !== 'undefined') FftSession.reset(true);
+    if (typeof PhaseSession !== 'undefined') PhaseSession.reset(true);
+    if (typeof BalanceSession !== 'undefined') BalanceSession.reset(true);
+    if (typeof AnalSession !== 'undefined') AnalSession.reset(true);
+    if (typeof BumpSession !== 'undefined') BumpSession.reset(true);
+  }
+
   function set(mode) {
     if (mode !== 'A' && mode !== 'B' && mode !== 'AB') return false;
     if (!canSelect(mode)) {
@@ -344,6 +354,7 @@ const ProbeMode = (() => {
       }
       return false;
     }
+    _abortSessions();
     _mode = mode;
     try { localStorage.setItem('probe_mode', mode); } catch (e) {}
     _updateBadge();
@@ -360,6 +371,7 @@ const ProbeMode = (() => {
 
   function clear(reason) {
     const was = _mode;
+    _abortSessions();
     _mode = null;
     try { localStorage.removeItem('probe_mode'); } catch (e) {}
     if (typeof DualSession !== 'undefined') DualSession.end();
@@ -473,6 +485,20 @@ const DualSession = (() => {
     const wantDual = available();
     _bAckEarly = null;
     _clearPendingB();
+
+    // Pause équilibrage AVANT tout WS_GOTO (sinon B part en Analyse sans BAL_PAUSE)
+    const cleanGoto = (gotoCmd || '').replace(/\n+$/, '');
+    const isBalStay = /^WS_GOTO=EQ(_RESUME)?(\s|$)/.test(cleanGoto);
+    if (!isBalStay) {
+      if (typeof BalanceSession !== 'undefined' && BalanceSession.pause) {
+        BalanceSession.pause();
+      } else if (typeof BalanceModule !== 'undefined' &&
+          typeof BalanceModule.hasProgress === 'function' && BalanceModule.hasProgress() &&
+          typeof BalanceModule.pauseForLeave === 'function') {
+        BalanceModule.pauseForLeave();
+      }
+    }
+
     if (wantDual) {
       if (typeof termAddLine === 'function') {
         termAddLine('[DOUBLE] ' + (opts.label || tab) + ' A+B', 'sys');
@@ -536,8 +562,15 @@ const DualSession = (() => {
 
   function stopBoth(cmd) {
     const c = cmd || 'r';
-    if (typeof wsSend === 'function') wsSend(c);
-    if (_active && typeof wsSendB === 'function') wsSendB(c);
+    // Mono B : wsSend → B uniquement. Sinon A + B si duo (ProbeMode ou session active).
+    if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB()) {
+      if (typeof wsSend === 'function') wsSend(c);
+    } else {
+      if (typeof wsSend === 'function') wsSend(c);
+      const needB = _active ||
+        (typeof ProbeMode !== 'undefined' && ProbeMode.isDual());
+      if (needB && typeof wsSendB === 'function') wsSendB(c);
+    }
     end();
   }
 
@@ -550,31 +583,25 @@ window.DualSession = DualSession;
 function updateConnStatus() {
   const aOk = !!(ws && ws.readyState === WebSocket.OPEN);
   const bOk = !!(wsB && wsB.readyState === WebSocket.OPEN);
-  const dotA = document.getElementById('dot');
-  const dotB = document.getElementById('dot-b');
-  const lbl = document.getElementById('ip-label');
-  if (dotA) dotA.className = aOk ? 'ok' : (ESP32_HOST ? 'err' : '');
-  if (dotB) {
+  const letterA = document.getElementById('conn-a');
+  const letterB = document.getElementById('conn-b');
+  if (letterA) {
+    letterA.className = 'conn-letter ' + (aOk ? 'ok' : (ESP32_HOST ? 'err' : 'off'));
+    letterA.title = aOk
+      ? ('ESP A connecté — ' + (ESP32_HOST || ''))
+      : (ESP32_HOST ? ('ESP A hors ligne — ' + ESP32_HOST) : 'ESP A — pas d\'IP');
+  }
+  if (letterB) {
     if (!ESP32_HOST_B) {
-      dotB.className = '';
-      dotB.style.opacity = '0.35';
+      letterB.className = 'conn-letter off';
+      letterB.title = 'ESP B — pas d\'IP';
     } else {
-      dotB.style.opacity = '1';
-      dotB.className = bOk ? 'ok' : 'err';
+      letterB.className = 'conn-letter ' + (bOk ? 'ok' : 'err');
+      letterB.title = bOk
+        ? ('ESP B connecté — ' + ESP32_HOST_B)
+        : ('ESP B hors ligne — ' + ESP32_HOST_B);
     }
   }
-  if (!lbl) return;
-  const aTxt = aOk ? ('A ' + (ESP32_HOST || '?')) : (ESP32_HOST ? ('A …' + ESP32_HOST) : 'A —');
-  const bTxt = ESP32_HOST_B
-    ? (bOk ? ('B ' + ESP32_HOST_B) : ('B …' + ESP32_HOST_B))
-    : 'B —';
-  let mode = '';
-  if (typeof ProbeMode !== 'undefined' && ProbeMode.isSet()) {
-    const pm = ProbeMode.get();
-    mode = pm === 'AB' ? ' · A+B' : (' · sonde ' + pm);
-  } else if (aOk && bOk) mode = ' · sonde ?';
-  else if (aOk || bOk) mode = ' · sonde ?';
-  lbl.textContent = aTxt + '  |  ' + bTxt + mode;
   if (typeof ProbeMode !== 'undefined') ProbeMode.updateBadge();
   if (typeof MenuModule !== 'undefined' &&
       typeof MenuModule.refreshProbeIfShown === 'function') {
@@ -669,6 +696,10 @@ function forceCloseA(reason) {
 
 function forceCloseB(reason) {
   _stopHeartbeatB();
+  // Mono B : la nav pendante est sur wsB — l'annuler sinon WS_GOTO bloqué
+  if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB()) {
+    _cancelNavPending(true);
+  }
   rxStateB = 'text'; rxHeadersB = {};
   const old = wsB;
   wsB = null;
@@ -1000,10 +1031,7 @@ function handleTextB(raw) {
             if (typeof bumpStart === 'function') bumpStart();
           } else if (mod) {
             showTab(mod);
-            if (mod === 'balance' && typeof BalanceModule !== 'undefined' &&
-                typeof BalanceModule.enterBalance === 'function') {
-              BalanceModule.enterBalance();
-            }
+            // balance : enterBalance via BalanceSession.beginLive / resume — pas ici
           }
           if (o && typeof o.onAck === 'function') o.onAck();
         }
@@ -1038,7 +1066,12 @@ function handleTextB(raw) {
       return;
     }
     if (line.startsWith('ACQ_PROGRESS=')) {
-      // A pilote déjà la barre de progression
+      // Mono B : B est la sonde primaire → appliquer le cadran (comme A)
+      // Duo : A pilote déjà — ignorer le doublon B
+      if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB() &&
+          typeof acqShowProgress === 'function') {
+        acqShowProgress(line.slice(13));
+      }
       return;
     }
     if (line.startsWith('BUMP_STATUS=')) {
@@ -1193,133 +1226,18 @@ function wsSendB(cmd) {
 }
 window.wsSendB = wsSendB;
 
-// DOUBLE sync : ARM → FIRE (capture sync) → SEND A+B en parallèle (2 WS)
-// phase: 'arm' | 'fire' | 'send' | 'done'
-let _dualSync = null;
-
-function _dualClearTimer() {
-  if (_dualSync && _dualSync.timer) {
-    clearTimeout(_dualSync.timer);
-    _dualSync.timer = null;
-  }
-}
-
-function _dualAbort(msg) {
-  if (!_dualSync) return;
-  _dualClearTimer();
-  termAddLine('[DOUBLE] !! ' + msg, 'sys');
-  if (typeof acqHideProgress === 'function') acqHideProgress();
-  _dualSync = null;
-}
-
-function _dualFireNow() {
-  if (!_dualSync || _dualSync.phase !== 'arm') return;
-  _dualClearTimer();
-  _dualSync.phase = 'fire';
-  _dualSync.capA = false;
-  _dualSync.capB = false;
-  termAddLine('[DOUBLE] FIRE A+B (capture sync)', 'sys');
-  wsSend('ANAL_FIRE');
-  wsSendB('ANAL_FIRE');
-  _dualSync.timer = setTimeout(function () {
-    _dualAbort('timeout capture (pas de CAP_OK) — firmware à jour sur A et B ?');
-  }, 60000);
-}
-
-/** Transfert parallèle A+B — 2 WebSockets distincts (évite le retard B séquentiel). */
-function _dualSendBoth() {
-  if (!_dualSync || _dualSync.phase !== 'fire') return;
-  if (!_dualSync.capA || !_dualSync.capB) return;
-  _dualClearTimer();
-  _dualSync.phase = 'send';
-  _dualSync.binA = false;
-  _dualSync.binB = false;
-  termAddLine('[DOUBLE] SEND A+B (parallèle)', 'sys');
-  if (typeof acqSetTransferPhase === 'function') acqSetTransferPhase();
-  wsSend('ANAL_SEND');
-  wsSendB('ANAL_SEND');
-  _dualSync.timer = setTimeout(function () {
-    _dualAbort('timeout transfert A+B');
-  }, 60000);
-}
-
-function _dualOnBinaryA() {
-  if (!_dualSync || _dualSync.phase !== 'send') return;
-  _dualSync.binA = true;
-  termAddLine('[DOUBLE] A reçu' + (_dualSync.binB ? ' — OK' : ' — attente B…'), 'sys');
-  if (_dualSync.binA && _dualSync.binB) {
-    _dualClearTimer();
-    _dualSync.phase = 'done';
-    termAddLine('[DOUBLE] OK — A+B reçus', 'sys');
-    _dualSync = null;
-  }
-}
-
-function _dualOnBinaryB() {
-  if (!_dualSync || _dualSync.phase !== 'send') return;
-  _dualSync.binB = true;
-  termAddLine('[DOUBLE] B reçu' + (_dualSync.binA ? ' — OK' : ' — attente A…'), 'sys');
-  if (_dualSync.binA && _dualSync.binB) {
-    _dualClearTimer();
-    _dualSync.phase = 'done';
-    termAddLine('[DOUBLE] OK — A+B reçus', 'sys');
-    _dualSync = null;
-  }
-}
-
+// Acquisition temporelle : machine d'états dans anal-session.js (AnalSession).
+// Ici : pont WS → AnalSession uniquement.
 function _onAnalArmOk(fromB) {
-  if (!_dualSync || _dualSync.phase !== 'arm') return;
-  if (fromB) _dualSync.armB = true;
-  else _dualSync.armA = true;
-  termAddLine('[' + (fromB ? 'B' : 'A') + '] ARM_OK', 'sys');
-  if (_dualSync.armA && _dualSync.armB) _dualFireNow();
+  if (typeof AnalSession !== 'undefined') AnalSession.onArmOk(!!fromB);
 }
-
 function _onAnalCapOk(fromB) {
-  if (!_dualSync || _dualSync.phase !== 'fire') return;
-  if (fromB) _dualSync.capB = true;
-  else _dualSync.capA = true;
-  termAddLine('[' + (fromB ? 'B' : 'A') + '] CAP_OK', 'sys');
-  _dualSendBoth();
+  if (typeof AnalSession !== 'undefined') AnalSession.onCapOk(!!fromB);
 }
-
-/** Démarre acquis. temporelle. Simple = ANAL_START. DOUBLE = ARM→FIRE→SEND. */
-function startAnalTemporal(g, fs) {
-  if (typeof analyseArmDual === 'function') analyseArmDual();
-  const params = 'G=' + g + ' FS=' + fs;
-  const dual = (typeof DualSession !== 'undefined')
-    ? DualSession.available()
-    : isDualMode();
-
-  if (!dual) {
-    wsSend('ANAL_START ' + params);
-    return;
-  }
-
-  _dualClearTimer();
-  _dualSync = {
-    phase: 'arm',
-    armA: false, armB: false,
-    capA: false, capB: false,
-    timer: null,
-  };
-  termAddLine('[DOUBLE] ARM A+B — ' + params, 'sys');
-  const armCmd = 'ANAL_ARM ' + params;
-  wsSend(armCmd);
-  wsSendB(armCmd);
-  _dualSync.timer = setTimeout(function () {
-    if (!_dualSync || _dualSync.phase !== 'arm') return;
-    if (_dualSync.armA || _dualSync.armB) {
-      termAddLine('[DOUBLE] !! un seul ARM_OK — FIRE quand même', 'sys');
-      _dualFireNow();
-    } else {
-      _dualAbort('timeout ARM — flashe le firmware (pas seulement LittleFS) sur A et B');
-    }
-  }, 25000);
+function _dualAbort(msg) {
+  if (typeof AnalSession !== 'undefined') AnalSession.abort(msg || 'abort');
 }
-window.startAnalTemporal = startAnalTemporal;
-window._dualOnBinaryA = _dualOnBinaryA;
-window._dualOnBinaryB = _dualOnBinaryB;
+// startAnalTemporal / _dualOnBinaryA/B exposés par anal-session.js
 
 async function wsConnect() {
   if (_isSetupPortalPage()) return;
@@ -1424,9 +1342,7 @@ function handleText(raw) {
           if (typeof bumpStart === 'function') bumpStart();
         } else if (mod) {
           showTab(mod);
-          if (mod === 'balance' && typeof BalanceModule !== 'undefined' && typeof BalanceModule.enterBalance === 'function') {
-            BalanceModule.enterBalance();
-          }
+          // balance : enterBalance via BalanceSession.beginLive / resume — pas ici
         }
         if (o && typeof o.onAck === 'function') o.onAck();
       }
@@ -1668,13 +1584,20 @@ function showTab(name) {
     const el = document.getElementById('page-' + n);
     if (el) el.style.display = (n === name) ? 'flex' : 'none';
   });
-  document.querySelectorAll('.tab').forEach((t, i) => {
-    t.classList.toggle('active', ALL_TABS[i] === name);
+  // data-tab (pas l'index) : Live FFT n'a plus de bouton dans la barre
+  document.querySelectorAll('.tab').forEach((t) => {
+    const id = t.getAttribute('data-tab');
+    t.classList.toggle('active', id === name);
   });
   if (name === 'fft')      setTimeout(fftDraw,     50);
   if (name === 'analyse')  setTimeout(analyseDraw,  50);
   if (name === 'balance')  setTimeout(() => {
-    if (typeof BalanceModule  !== 'undefined') BalanceModule.resize();
+    if (typeof BalanceModule !== 'undefined') {
+      // Viewer only — pas de BAL_INIT ici (sinon IDLE juste après EQ_RESUME
+      // tant que BAL_RESUME n'a pas encore basculé systemState).
+      // enterBalance / skipInit : BalanceSession.beginLive / beginResumeLive.
+      BalanceModule.resize();
+    }
   }, 50);
   if (name === 'harmonic') setTimeout(() => {
     if (typeof HarmonicModule !== 'undefined') HarmonicModule.resize();
@@ -1683,6 +1606,42 @@ function showTab(name) {
     if (typeof demodDraw !== 'undefined') demodDraw();
   }, 50);
 }
+
+/**
+ * Clic onglet utilisateur — modules capteurs passent par WS_GOTO
+ * (sinon ESP reste au menu → pas de BAL_RPM / pas d'acq).
+ */
+function requestTab(name) {
+  if (name === 'term' || name === 'calc') {
+    showTab(name);
+    return;
+  }
+  if (name === 'analyse') {
+    showTab('analyse');
+    return;
+  }
+  if (name === 'balance') {
+    // Viewer only — démarrage via Terminal → BalanceSession.start/resume
+    showTab('balance');
+    return;
+  }
+  if (name === 'harmonic') {
+    // Viewer only — démarrage uniquement via Terminal → PhaseSession.start()
+    showTab('harmonic');
+    return;
+  }
+  if (name === 'fft') {
+    if (_activeTab === 'fft') {
+      showTab('fft');
+      return;
+    }
+    // Live FFT : l'onglet suffit (Start envoie ANAL_LIVE) — juste afficher
+    showTab('fft');
+    return;
+  }
+  showTab(name);
+}
+window.requestTab = requestTab;
 
 /**
  * Envoie WS_GOTO=… et n’appelle showTab qu’après NAV_ACK (timeout 2,5 s).
@@ -1707,21 +1666,28 @@ function wsGoto(tab, cmdLine, opts) {
     termAddLine('!! format invalide: WS_GOTO sans parametres', 'sys');
     return;
   }
-  // Changement de module → flush traces dual
+  // Changement de module → reset machines d'états + flush dual
+  if (typeof AnalSession !== 'undefined') AnalSession.reset(true);
+  if (typeof BumpSession !== 'undefined') BumpSession.reset(true);
+  if (typeof FftSession !== 'undefined') FftSession.reset(true);
+  if (typeof PhaseSession !== 'undefined') PhaseSession.reset(true);
+  // Balance : pause (pas reset destructif) — sauf si on reste en EQ
+  const isBalStay = /^WS_GOTO=EQ(_RESUME)?(\s|$)/.test(clean);
+  if (!isBalStay) {
+    if (typeof BalanceSession !== 'undefined' && BalanceSession.pause) {
+      BalanceSession.pause();
+    } else if (typeof BalanceModule !== 'undefined' &&
+        typeof BalanceModule.hasProgress === 'function' && BalanceModule.hasProgress() &&
+        typeof BalanceModule.pauseForLeave === 'function') {
+      BalanceModule.pauseForLeave();
+    }
+  }
   if (typeof analyseResetDualSession === 'function') analyseResetDualSession();
   // Re-assert dual session si mode AB (analyseReset DualSession.end)
   if (typeof ProbeMode !== 'undefined' && ProbeMode.isDual() &&
       typeof DualSession !== 'undefined') DualSession.begin();
   rxStateB = 'text';
   rxHeadersB = {};
-
-  // Pause auto équilibrage si on quitte vers un autre module
-  const isBalStay = /^WS_GOTO=EQ(_RESUME)?(\s|$)/.test(clean);
-  if (!isBalStay && typeof BalanceModule !== 'undefined' &&
-      typeof BalanceModule.hasProgress === 'function' && BalanceModule.hasProgress() &&
-      typeof BalanceModule.pauseForLeave === 'function') {
-    BalanceModule.pauseForLeave();
-  }
 
   _navPending = true;
   _navOpts = opts || null;

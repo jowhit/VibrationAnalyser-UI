@@ -5,6 +5,7 @@ const MenuModule = (() => {
 
   const L = {
     PROBE:       'probe',        // choix sonde A / B / A+B
+    CONN:        'conn',         // IP ESP A/B + reset session
     ROOT:        'root',
     ANALYSE:     'analyse',      // sous-menu Analyse type
     G_RANGE:     'g_range',      // choix plage ±g
@@ -45,8 +46,8 @@ const MenuModule = (() => {
   // Rendu — reconstruit les boutons à chaque changement de niveau
   // ──────────────────────────────────────────────────────
   function _render(level) {
-    // Pas de modules tant que la sonde n'est pas choisie
-    if (level !== L.PROBE && !_probeSet()) {
+    // Pas de modules tant que la sonde n'est pas choisie (Connexion OK sans sonde)
+    if (level !== L.PROBE && level !== L.CONN && !_probeSet()) {
       showProbeSelect();
       return;
     }
@@ -124,12 +125,24 @@ const MenuModule = (() => {
           { label: 'Sonde A',  sub: aOk ? 'ESP A connecté' : 'ESP A hors ligne', key: 'probe_a',  disabled: !aOk },
           { label: 'Sonde B',  sub: bOk ? 'ESP B connecté' : 'ESP B hors ligne', key: 'probe_b',  disabled: !bOk },
           { label: 'A + B',    sub: (aOk && bOk) ? 'Mode duo' : 'A et B requis', key: 'probe_ab', accent: true, disabled: !(aOk && bOk) },
+          { label: '🔌 Connexion', sub: 'IP · reset · copier log', key: 'conn_menu' },
+        ];
+      }
+
+      case L.CONN: {
+        const aHost = (typeof ESP32_HOST !== 'undefined' && ESP32_HOST) ? ESP32_HOST : 'non défini';
+        const bHost = (typeof ESP32_HOST_B !== 'undefined' && ESP32_HOST_B) ? ESP32_HOST_B : 'non défini';
+        return [
+          { label: 'ESP A', sub: aHost, key: 'conn_a' },
+          { label: 'ESP B', sub: bHost, key: 'conn_b' },
+          { label: 'Reset', sub: 'NVS + éq.', key: 'conn_reset' },
+          { label: '📋 Log', sub: 'Copier terminal', key: 'conn_copy_log', accent: true },
         ];
       }
 
       // ── Racine ──────────────────────────────────────
       case L.ROOT: return [
-        { label: '⚖ Équilibrage', sub: '1 ou 2 plans',       key: 'eq',      accent: true },
+        { label: 'Equilibrage',   sub: '1 ou 2 plans',       key: 'eq',      accent: true },
         { label: '📊 Analyse',    sub: 'Temp · FFT · Live',  key: 'analyse'              },
       ];
 
@@ -138,7 +151,7 @@ const MenuModule = (() => {
         { label: '〜 Temporel',   sub: 'Brut + FFT',      key: 'temporelle'              },
         { label: '🔨 Bump Test',  sub: 'Impulsionnel',    key: 'bump'                    },
         { label: '📈 Live FFT',   sub: 'Spectre continu', key: 'live_fft'                },
-        { label: '🔁 Harmonique', sub: '1X 2X 3X phase',  key: 'harmonique'              },
+        { label: 'Phase',         sub: 'Harmonique · Suivi', key: 'harmonique'            },
       ];
 
       // ── Choix plage ±g ───────────────────────────────
@@ -189,6 +202,11 @@ const MenuModule = (() => {
     switch (_level) {
 
       case L.PROBE:
+        if (btn.key === 'conn_menu') {
+          _path = ['Sonde', 'Connexion'];
+          _render(L.CONN);
+          break;
+        }
         if (typeof ProbeMode === 'undefined') break;
         if (btn.key === 'probe_a' && ProbeMode.set('A')) {
           _path = []; _render(L.ROOT);
@@ -199,16 +217,34 @@ const MenuModule = (() => {
         }
         break;
 
+      case L.CONN:
+        if (btn.key === 'conn_a' && typeof changeIpA === 'function') changeIpA();
+        else if (btn.key === 'conn_b' && typeof changeIpB === 'function') changeIpB();
+        else if (btn.key === 'conn_reset' && typeof clearVaSession === 'function') clearVaSession();
+        else if (btn.key === 'conn_copy_log' && typeof termCopyLog === 'function') termCopyLog();
+        _render(L.CONN);
+        break;
+
       case L.ROOT:
         if (btn.key === 'eq') {
           _path = [];
           _render(L.ROOT);
-          // Session en pause → proposer Reprendre, sinon confirmer nouveau
+          // Entrée unique BalanceSession
+          if (typeof BalanceSession !== 'undefined' && BalanceSession.isLive &&
+              BalanceSession.isLive()) {
+            BalanceSession.start(); // déjà LIVE → réaffiche l'onglet
+            break;
+          }
           if (typeof BalanceModule !== 'undefined') {
-            const paused = BalanceModule.hasProgress && BalanceModule.hasProgress();
+            const paused = (typeof BalanceSession !== 'undefined' && BalanceSession.isPaused &&
+                            BalanceSession.isPaused()) ||
+              (BalanceModule.isPaused && BalanceModule.isPaused() &&
+               BalanceModule.hasProgress && BalanceModule.hasProgress());
             if (paused) {
               if (confirm('Session d\'équilibrage en pause.\n\nOK = Reprendre\nAnnuler = choisir…')) {
-                if (typeof BalanceModule.resumeSession === 'function') {
+                if (typeof BalanceSession !== 'undefined' && BalanceSession.resume) {
+                  BalanceSession.resume();
+                } else if (typeof BalanceModule.resumeSession === 'function') {
                   BalanceModule.resumeSession();
                 }
                 return;
@@ -219,8 +255,9 @@ const MenuModule = (() => {
               }
             }
           }
-          // Duo : EQ sur A+B en parallèle (2 plans duo = capture simultanée)
-          if (typeof DualSession !== 'undefined' && DualSession.available()) {
+          if (typeof BalanceSession !== 'undefined' && BalanceSession.start) {
+            BalanceSession.start();
+          } else if (typeof DualSession !== 'undefined' && DualSession.available()) {
             DualSession.startModule('balance', 'WS_GOTO=EQ', { label: 'Équilibrage' });
           } else if (_navGoto) {
             _navGoto('balance', 'WS_GOTO=EQ');
@@ -244,58 +281,16 @@ const MenuModule = (() => {
 
         } else if (btn.key === 'live_fft') {
           _path = []; _render(L.ROOT);
-          const liveReady = (dual) => {
-            if (typeof _fftStartDualLive === 'function') _fftStartDualLive(dual);
-            else if (typeof DualSession !== 'undefined') DualSession.sendBoth('LIVE_START');
-            else _send('LIVE_START\n');
-            fftRunning = true;
-            const b = document.getElementById('btn-fft-start');
-            if (b) { b.textContent = '■ Stop'; b.classList.add('running'); }
-          };
-          if (typeof DualSession !== 'undefined') {
-            DualSession.startModule('fft', 'WS_GOTO=ANAL_LIVE', {
-              label: 'Live FFT',
-              onReady: liveReady,
-            });
-          } else if (_navGoto) {
-            _navGoto('fft', 'WS_GOTO=ANAL_LIVE', { onAck: liveReady });
-          } else {
-            _send('WS_GOTO=ANAL_LIVE\n');
-            setTimeout(liveReady, 200);
-            setTimeout(() => _switchTab('fft'), 200);
-          }
+          // Entrée unique machine d'états
+          if (typeof FftSession !== 'undefined' && FftSession.start) FftSession.start();
+          else if (typeof fftToggle === 'function') fftToggle();
 
         } else if (btn.key === 'harmonique') {
           _path = []; _render(L.ROOT);
-          const harmReady = (dual) => {
-            if (typeof HarmonicModule !== 'undefined') {
-              if (typeof HarmonicModule.onDualReady === 'function') {
-                HarmonicModule.onDualReady(dual);
-              } else {
-                HarmonicModule.setRunning(true);
-              }
-            }
-          };
-          const harmFail = () => {
-            if (typeof HarmonicModule !== 'undefined' &&
-                typeof HarmonicModule.abortStart === 'function') {
-              HarmonicModule.abortStart();
-            }
-          };
-          if (typeof DualSession !== 'undefined') {
-            DualSession.startModule('harmonic', 'WS_GOTO=ANAL_HARM', {
-              label: 'Harmonique',
-              onReady: harmReady,
-              onFail: harmFail,
-            });
-          } else if (_navGoto) {
-            _navGoto('harmonic', 'WS_GOTO=ANAL_HARM', {
-              onAck: () => harmReady(false),
-              onTimeout: harmFail,
-            });
-          } else {
-            _send('WS_GOTO=ANAL_HARM\n');
-            setTimeout(() => { harmReady(false); _switchTab('harmonic'); }, 200);
+          // Entrée unique machine d'états
+          if (typeof PhaseSession !== 'undefined' && PhaseSession.start) PhaseSession.start();
+          else if (typeof HarmonicModule !== 'undefined' && HarmonicModule.harmToggle) {
+            HarmonicModule.harmToggle();
           }
         }
         break;
@@ -316,22 +311,20 @@ const MenuModule = (() => {
         const g  = _selectedG || '16';
         const fs = btn.cmd;
 
-        // 1. Navigation pure vers l'onglet analyse
+        // Entrée unique : AnalSession.start (mono + duo) — plus de if dual ici
+        const _startTempo = () => {
+          if (typeof AnalSession !== 'undefined' && AnalSession.start) {
+            AnalSession.start({ g: g, fs: fs });
+          } else if (typeof startAnalTemporal === 'function') {
+            startAnalTemporal(g, fs);
+          } else {
+            _send('ANAL_START G=' + g + ' FS=' + fs + '\n');
+          }
+        };
         if (_navGoto) {
           _navGoto('analyse', 'WS_GOTO=ANAL_TEMP', {
             onAck: () => {
-              if (typeof startAnalTemporal === 'function') {
-                startAnalTemporal(g, fs);
-              } else {
-                _send('ANAL_START G=' + g + ' FS=' + fs + '\n');
-              }
-              // DOUBLE : compteur démarre sur ACQ_PROGRESS (après FIRE), pas pendant ARM
-              const dual = (typeof DualSession !== 'undefined')
-                ? DualSession.available()
-                : (typeof isDualMode === 'function' && isDualMode());
-              if (!dual && typeof acqStartTemporal === 'function') {
-                acqStartTemporal({ g: g, fs: fs, autoRange: (g === ' ' || g === '') });
-              }
+              _startTempo();
               setTimeout(() => _switchTab('analyse'), 300);
             },
             onTimeout: () => {
@@ -340,14 +333,9 @@ const MenuModule = (() => {
             }
           });
         } else {
-          // Fallback si pas de navGoto
           _send('WS_GOTO=ANAL_TEMP\n');
           setTimeout(() => {
-            if (typeof startAnalTemporal === 'function') startAnalTemporal(g, fs);
-            else _send('ANAL_START G=' + g + ' FS=' + fs + '\n');
-            if (typeof acqStartTemporal === 'function') {
-              acqStartTemporal({ g: g, fs: fs, autoRange: (g === ' ' || g === '') });
-            }
+            _startTempo();
             _switchTab('analyse');
           }, 500);
         }
@@ -362,21 +350,27 @@ const MenuModule = (() => {
         const g = _selectedG || '2';
         const fs = btn.cmd || '4000';
         const cmd = 'WS_GOTO=ANAL_BUMP G=' + g + ' FS=' + fs;
+        // Toujours armer le panneau Bump (an-bump-panel) — sinon onglet Analyse vide
         const bumpReady = () => {
-          if (typeof analyseArmDual === 'function') analyseArmDual();
-          setTimeout(() => _switchTab('analyse'), 150);
+          if (typeof BumpSession !== 'undefined' && BumpSession.enter) BumpSession.enter();
+          else if (typeof bumpStart === 'function') bumpStart();
+          else if (typeof analyseArmDual === 'function') analyseArmDual();
+          setTimeout(() => {
+            if (typeof showTab === 'function') showTab('analyse');
+            else if (_switchTab) _switchTab('analyse');
+          }, 50);
         };
         if (typeof DualSession !== 'undefined') {
           // B reçoit le GOTO en parallèle de A (pas après NAV_ACK) — mode AB seulement
           DualSession.startModule('analyse', cmd, {
             label: 'Bump G=' + g + ' FS=' + fs,
             onReady: bumpReady,
-            onFail: () => _switchTab('analyse'),
+            onFail: bumpReady,
           });
         } else if (_navGoto) {
           _navGoto('analyse', cmd, {
             onAck: bumpReady,
-            onTimeout: () => _switchTab('analyse'),
+            onTimeout: bumpReady,
           });
         } else {
           _send(cmd + '\n');
@@ -394,7 +388,8 @@ const MenuModule = (() => {
   // Navigation Retour
   // ──────────────────────────────────────────────────────
   function _goBack() {
-    if      (_level === L.ANALYSE) { _path = [];                        _render(L.ROOT);    }
+    if      (_level === L.CONN)    { _path = ['Sonde'];                 _render(L.PROBE);   }
+    else if (_level === L.ANALYSE) { _path = [];                        _render(L.ROOT);    }
     else if (_level === L.G_RANGE) { _path = ['Analyse'];               _render(L.ANALYSE); }
     else if (_level === L.FS)      { _path = ['Analyse', 'Temporel'];   _render(L.G_RANGE); }
     else if (_level === L.BUMP_G)  { _path = ['Analyse'];               _render(L.ANALYSE); }
@@ -411,6 +406,7 @@ const MenuModule = (() => {
   /** Re-dessine les boutons sonde quand A/B connecte/déconnecte. */
   function refreshProbeIfShown() {
     if (_level === L.PROBE) _render(L.PROBE);
+    else if (_level === L.CONN) _render(L.CONN);
   }
 
   function reset() {

@@ -20,7 +20,7 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=38">
+<link rel="stylesheet" href="style.css?v=67">
 <link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   function showPwaInstallUi() {
@@ -40,7 +40,7 @@
 
   if ('serviceWorker' in navigator) {
     // ?v= force la récupération du SW (sinon Android garde l'ancien cache)
-    navigator.serviceWorker.register('service-worker.js?v=38', { scope: './' })
+    navigator.serviceWorker.register('service-worker.js?v=67', { scope: './' })
       .then(function (reg) {
         if (reg && reg.update) reg.update();
         if (reg && reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
@@ -131,24 +131,17 @@
   </div>
 </div>
 
-<div id="topbar">
-  <span id="dot" title="ESP A"></span>
-  <span id="dot-b" title="ESP B"></span>
-  <span id="probe-mode-label" class="probe-badge probe-badge--none">Sonde ?</span>
-  <span id="ip-label">Deconnecte</span>
-  <button type="button" onclick="ProbeMode.change()" title="Changer sonde A / B / A+B">Sonde</button>
-  <button type="button" onclick="clearVaSession()" title="Effacer la mémoire de session (navigateur + reset équilibrage)">Reset session</button>
-  <button type="button" onclick="changeIpA()" title="IP du premier ESP32">ESP A</button>
-  <button type="button" onclick="changeIpB()" title="IP du second ESP32 (optionnel)">ESP B</button>
-</div>
-
 <div id="tabs">
-  <div class="tab active" onclick="showTab('term')">Terminal</div>
-  <div class="tab"        onclick="showTab('fft')">Live FFT</div>
-  <div class="tab"        onclick="showTab('analyse')">Analyse</div>
-  <div class="tab"        onclick="showTab('calc')">Calculatrice</div>
-  <div class="tab"        onclick="showTab('balance')">⚖ Bal</div>
-  <div class="tab"        onclick="showTab('harmonic')">📊 Harm</div>
+  <div id="conn-letters" class="conn-letters" title="État connexion ESP">
+    <span id="conn-a" class="conn-letter off" title="ESP A">A</span>
+    <span id="conn-b" class="conn-letter off" title="ESP B">B</span>
+  </div>
+  <div class="tab active" data-tab="term" onclick="requestTab('term')">Terminal</div>
+  <!-- Live FFT : pas d'onglet — uniquement Terminal → Analyse → Live FFT -->
+  <div class="tab" data-tab="analyse" onclick="requestTab('analyse')">Analyse</div>
+  <div class="tab" data-tab="balance" onclick="requestTab('balance')">Equilibrage</div>
+  <div class="tab" data-tab="harmonic" onclick="requestTab('harmonic')">Phase</div>
+  <div class="tab" data-tab="calc" onclick="requestTab('calc')">Calcul</div>
 </div>
 
 <div id="main">
@@ -159,6 +152,7 @@
     <div id="input-row">
       <input id="term-input" type="text" placeholder="commande..."
         autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      <button type="button" id="btn-term-copy" class="btn-term-side" title="Copier le journal" onclick="termCopyLog()">📋</button>
       <button id="btn-send" onclick="termSendInput()">&#9654;</button>
     </div>
     <div id="shortcuts">
@@ -180,11 +174,12 @@
         <span id="fft-wait-label">Live FFT…</span>
       </div>
     </div>
-    <div class="ctrl-bar">
-      <button id="btn-fft-start" class="btn-primary" onclick="fftToggle()">&#9654; Live FFT</button>
-      <button id="btn-fft-unit" onclick="fftToggleUnit()">g</button>
-      <button onclick="fftManualZoom(2)">&#8722;</button>
-      <button onclick="fftManualZoom(0.5)">+</button>
+    <div class="ctrl-bar mod-cmdbar">
+      <button type="button" id="btn-fft-g" class="bal-btn bal-mode-toggle bal-mode-toggle--active" onclick="fftSetUnit('g')">g</button>
+      <button type="button" id="btn-fft-vel" class="bal-btn bal-mode-toggle" onclick="fftSetUnit('mm/s')">mm/s</button>
+      <button type="button" class="bal-btn" onclick="fftManualZoom(2)">&#8722;</button>
+      <button type="button" class="bal-btn" onclick="fftManualZoom(0.5)">+</button>
+      <button type="button" id="btn-fft-start" class="bal-btn bal-btn-run mod-start-btn" onclick="fftToggle()">&#9654; Démarrer</button>
     </div>
   </div>
 
@@ -209,9 +204,8 @@
     <div id="an-bump-panel" style="display:none;">
       <div class="an-bump-title" id="an-bump-title">MODE BUMP TEST</div>
       <pre id="an-bump-monitor">Mode pret - appuyez DEMARRER</pre>
-      <div class="an-bump-actions">
-        <button id="btn-bump-start" class="btn-primary" onclick="bumpSendStart()">DEMARRER</button>
-        <button id="btn-bump-exit" onclick="bumpExit()">EXIT</button>
+      <div class="an-bump-actions mod-cmdbar">
+        <button type="button" id="btn-bump-start" class="bal-btn bal-btn-run mod-start-btn" onclick="bumpSendStart()">&#9654; Démarrer</button>
       </div>
     </div>
     <div style="position:relative; flex-shrink:0;">
@@ -250,28 +244,21 @@
         <div class="ham-field"><label class="ham-lbl-ftf">FTF ×</label><input id="demod-ftf" type="number" placeholder="ex: 0.4" step="0.01" min="0"></div>
         <div class="ham-row"><button class="ham-btn-demod" onclick="analyseRunDemod()">⚙ Analyser Démod</button></div>
       </div>
-      <div class="ctrl-bar">
+      <div class="ctrl-bar an-ctrl-bar mod-cmdbar">
         <button id="btn-an-fft"   onclick="analyseToggleFFT()">FFT</button>
         <button id="btn-an-g"     onclick="anSetUnit('g')">g</button>
         <button id="btn-an-vel"   onclick="anSetUnit('mm/s')">mm/s</button>
         <button id="btn-an-demod" onclick="analyseToggleDemod()">Démod</button>
         <button id="btn-an-ham"   onclick="anToggleHam()">☰</button>
-        <button class="btn-primary" onclick="analyseSave()">💾 Sauv</button>
-        <button onclick="analyseLoad()">📂 Ouvrir</button>
+        <button class="btn-primary" onclick="analyseSave()">Sauv</button>
+        <button onclick="analyseLoad()">Ouvrir</button>
       </div>
     </div>
   </div>
 
   <!-- CALCULATRICE -->
   <div id="page-calc">
-    <div class="calc-tabs">
-      <button id="calc-tab-essai"    class="calc-tab active" data-pane="essai">Masse essai</button>
-      <button id="calc-tab-combiner" class="calc-tab"        data-pane="combiner">Combiner</button>
-      <button id="calc-tab-diviser"  class="calc-tab"        data-pane="diviser">Diviser</button>
-      <button id="calc-tab-ic1"      class="calc-tab"        data-pane="ic1">Influence 1P</button>
-      <button id="calc-tab-ic2"      class="calc-tab"        data-pane="ic2">Influence 2P</button>
-    </div>
-
+    <div class="calc-body">
     <div id="calc-essai" class="calc-pane active">
       <div class="calc-input-group">
         <label>RPM</label>
@@ -510,7 +497,15 @@
       </div>
       <div id="ic2-err" class="calc-err"></div>
     </div>
+    </div><!-- .calc-body -->
 
+    <div class="calc-tabs mod-cmdbar">
+      <button id="calc-tab-essai"    class="calc-tab active" data-pane="essai">Essai</button>
+      <button id="calc-tab-combiner" class="calc-tab"        data-pane="combiner">Combiner</button>
+      <button id="calc-tab-diviser"  class="calc-tab"        data-pane="diviser">Diviser</button>
+      <button id="calc-tab-ic1"      class="calc-tab"        data-pane="ic1" title="Influence 1 plan">1 Plan</button>
+      <button id="calc-tab-ic2"      class="calc-tab"        data-pane="ic2" title="Influence 2 plans">2 Plan</button>
+    </div>
   </div>
 
 
@@ -549,24 +544,24 @@
         <span id="bal-pause-banner-txt">Session en pause</span>
         <button type="button" id="btn-bal-resume" class="bal-btn bal-btn-run">Reprendre</button>
       </div>
-      <div class="bal-toolbar">
-        <button type="button" id="btn-bal-load-coeff" class="bal-btn" disabled>Load Coeff</button>
-        <button type="button" id="btn-bal-reset-top" class="bal-btn bal-btn-reset">Reset</button>
-        <button type="button" id="btn-bal-save-coeff" class="bal-btn" disabled>Save Coeff</button>
-        <div class="bal-cmdbar-sep"></div>
-        <button type="button" id="btn-bal-mode-1p" class="bal-btn bal-mode-toggle bal-mode-toggle--active">1 Plan</button>
-        <button type="button" id="btn-bal-mode-2p" class="bal-btn bal-mode-toggle">2 Plans</button>
-        <span id="bal-build-stamp" class="bal-build-stamp" title="Version UI">v38</span>
+
+      <!-- RPM en haut (comme Harmonic) -->
+      <div class="mod-rpm-strip">
+        <div id="bal-rpm" class="mod-rpm-box">
+          <span id="bal-rpm-dot" class="bal-rpm-dot bal-rpm-dot--lost"></span>
+          <span class="bal-rpm-label">RPM</span>
+          <span id="bal-rpm-val" class="bal-rpm-val">0</span>
+        </div>
+        <div id="bal-rpm-2p" class="mod-rpm-box" style="display:none;">
+          <span id="bal-rpm-dot-2p" class="bal-rpm-dot bal-rpm-dot--lost"></span>
+          <span class="bal-rpm-label">RPM</span>
+          <span id="bal-rpm-val-2p" class="bal-rpm-val">0</span>
+        </div>
       </div>
 
       <!-- ── Layout MODE 1P ─────────────────────────────────── -->
       <div id="bal-layout-1p" class="bal-layout" style="display:flex;">
         <div class="bal-chart-area">
-          <div id="bal-rpm" class="bal-rpm-box">
-            <span id="bal-rpm-dot" class="bal-rpm-dot bal-rpm-dot--lost"></span>
-            <span class="bal-rpm-label">RPM</span>
-            <span id="bal-rpm-val" class="bal-rpm-val">0</span>
-          </div>
           <div id="bal-canvas-wrap">
             <canvas id="bal-canvas"></canvas>
           </div>
@@ -577,17 +572,17 @@
           </div>
         </div>
         <div class="bal-ctrl-area">
-          <div id="bal-status" class="bal-status">Prêt</div>
+          <div id="bal-status" class="bal-status">Prêt — cliquer Démarrer pour estimer le RPM</div>
           <div id="bal-params" class="bal-params" style="display:none;">
             <div id="bal-params-title" class="bal-params-title">Masse essai</div>
             <div class="bal-param-row">
-              <label class="bal-param-label" for="bal-trial-mass">Masse</label>
-              <input id="bal-trial-mass" type="number" value="100" min="0.1" step="0.1" class="bal-input">
+              <label class="bal-param-label" for="bal-trial-mass-1p">Masse</label>
+              <input id="bal-trial-mass-1p" type="number" value="100" min="0.1" step="0.1" class="bal-input">
               <span class="bal-param-unit">g</span>
             </div>
             <div class="bal-param-row">
-              <label class="bal-param-label" for="bal-trial-angle">Angle</label>
-              <input id="bal-trial-angle" type="number" value="0" min="0" max="360" step="1" class="bal-input">
+              <label class="bal-param-label" for="bal-trial-angle-1p">Angle</label>
+              <input id="bal-trial-angle-1p" type="number" value="0" min="0" max="360" step="1" class="bal-input">
               <span class="bal-param-unit">°</span>
             </div>
           </div>
@@ -598,16 +593,6 @@
 
       <!-- ── Layout MODE 2P ─────────────────────────────────── -->
       <div id="bal-layout-2p" style="display:none; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
-
-        <!-- RPM live -->
-        <div style="display:flex; align-items:center; gap:8px; padding:5px 8px; flex-shrink:0;">
-          <span id="bal-rpm-dot" class="bal-rpm-dot bal-rpm-dot--lost" style="display:none;"></span>
-          <div id="bal-rpm-2p" class="bal-rpm-box" style="flex:1;">
-            <span id="bal-rpm-dot-2p" class="bal-rpm-dot bal-rpm-dot--lost"></span>
-            <span class="bal-rpm-label">RPM</span>
-            <span id="bal-rpm-val-2p" class="bal-rpm-val">0</span>
-          </div>
-        </div>
 
         <!-- Deux polaires côte à côte — TAPPABLES -->
         <div class="bal-2p-polars">
@@ -644,17 +629,17 @@
 
         <!-- Status et contrôles 2P -->
         <div class="bal-ctrl-area" style="padding:0 8px; overflow:hidden; flex:1; min-height:0;">
-          <div id="bal-status-2p" class="bal-status" style="margin-top:4px;">Prêt</div>
+          <div id="bal-status-2p" class="bal-status" style="margin-top:4px;">Prêt — cliquer Démarrer</div>
           <div id="bal-params-2p" class="bal-params" style="display:none;">
-            <div id="bal-params-title" class="bal-params-title">Masse essai</div>
+            <div id="bal-params-title-2p" class="bal-params-title">Masse essai</div>
             <div class="bal-param-row">
-              <label class="bal-param-label" for="bal-trial-mass">Masse</label>
-              <input id="bal-trial-mass" type="number" value="100" min="0.1" step="0.1" class="bal-input">
+              <label class="bal-param-label" for="bal-trial-mass-2p">Masse</label>
+              <input id="bal-trial-mass-2p" type="number" value="100" min="0.1" step="0.1" class="bal-input">
               <span class="bal-param-unit">g</span>
             </div>
             <div class="bal-param-row">
-              <label class="bal-param-label" for="bal-trial-angle">Angle</label>
-              <input id="bal-trial-angle" type="number" value="0" min="0" max="360" step="1" class="bal-input">
+              <label class="bal-param-label" for="bal-trial-angle-2p">Angle</label>
+              <input id="bal-trial-angle-2p" type="number" value="0" min="0" max="360" step="1" class="bal-input">
               <span class="bal-param-unit">°</span>
             </div>
           </div>
@@ -663,9 +648,28 @@
         </div>
       </div>
 
-      <!-- Barre de commandes -->
-      <div class="bal-cmdbar">
-        <button id="btn-bal-run" class="bal-btn bal-btn-run" disabled>Run</button>
+      <!-- Barre bas — style Analyse -->
+      <div class="bal-cmdbar mod-cmdbar">
+        <button type="button" id="btn-bal-save-coeff" class="bal-btn" disabled>Save</button>
+        <button type="button" id="btn-bal-mode-1p" class="bal-btn bal-mode-toggle bal-mode-toggle--active">1 Plan</button>
+        <button type="button" id="btn-bal-mode-2p" class="bal-btn bal-mode-toggle">2 Plans</button>
+        <div class="bal-more-wrap">
+          <button type="button" id="btn-bal-more" class="bal-btn" title="Plus d'options" aria-expanded="false" aria-controls="bal-more-panel">☰</button>
+          <div id="bal-more-panel" class="bal-more-panel bal-more-panel--up" style="display:none;" role="menu">
+            <button type="button" id="btn-bal-load-coeff" class="bal-btn" disabled role="menuitem">Load Coeff</button>
+            <button type="button" id="btn-bal-reset-top" class="bal-btn bal-btn-reset" role="menuitem">Reset</button>
+            <button type="button" id="btn-bal-copy-log" class="bal-btn" title="Copier le journal" role="menuitem">📋 Log</button>
+            <div class="bal-more-divider"></div>
+            <div class="bal-more-row">
+              <span class="bal-win-label">Moy</span>
+              <button type="button" class="bal-btn bal-mode-toggle" data-bal-win="8">8</button>
+              <button type="button" class="bal-btn bal-mode-toggle bal-mode-toggle--active" data-bal-win="16">16</button>
+              <button type="button" class="bal-btn bal-mode-toggle" data-bal-win="32">32</button>
+            </div>
+            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v52</div>
+          </div>
+        </div>
+        <button id="btn-bal-run" class="bal-btn bal-btn-run" disabled>&#9654; Démarrer</button>
       </div>
     </div>
 
@@ -674,14 +678,11 @@
   <!-- HARMONIQUE -->
   <div id="page-harmonic" style="display:none;">
 
-    <!-- Sélecteur de visage -->
-    <div class="harm-view-bar">
-      <button id="btn-harm-view-classic" class="harm-view-btn harm-view-active" onclick="HarmonicModule.switchView('classic')">Harmonique</button>
-      <button id="btn-harm-view-phase"   class="harm-view-btn" onclick="HarmonicModule.switchView('phase')">Suivi Phase</button>
-      <div class="harm-rpm-indicator">
-        <span id="harm-rpm-dot"></span>
-        <span id="harm-rpm-val">0</span>
-        <span>RPM</span>
+    <div class="mod-rpm-strip">
+      <div class="mod-rpm-box">
+        <span id="harm-rpm-dot" class="bal-rpm-dot bal-rpm-dot--lost"></span>
+        <span class="bal-rpm-label">RPM</span>
+        <span id="harm-rpm-val" class="bal-rpm-val">0</span>
       </div>
     </div>
 
@@ -723,21 +724,28 @@
       </div>
     </div>
 
-    <div class="ctrl-bar">
-      <button id="btn-harm-toggle" class="btn-primary">&#9654; Start</button>
+    <div class="bal-cmdbar harm-cmdbar mod-cmdbar">
+      <button type="button" id="btn-harm-view-classic" class="bal-btn bal-mode-toggle bal-mode-toggle--active" onclick="HarmonicModule.switchView('classic')">Harmonique</button>
+      <button type="button" id="btn-harm-view-phase" class="bal-btn bal-mode-toggle" onclick="HarmonicModule.switchView('phase')">Suivi Phase</button>
+      <button type="button" id="btn-harm-toggle" class="bal-btn bal-btn-run harm-start-btn mod-start-btn">&#9654; Démarrer</button>
     </div>
   </div>
 
 </div><!-- #main -->
 
-<script src="terminal.js?v=17"></script>
-<script src="fft.js?v=38"></script>
+<script src="terminal.js?v=56"></script>
+<script src="fft.js?v=67"></script>
+<script src="fft-session.js?v=67"></script>
 <script src="demod.js?v=16"></script>
-<script src="analyse.js?v=29"></script>
-<script src="calc.js?v=16"></script>
-<script src="balance.js?v=38"></script>
-<script src="harmonic.js?v=38"></script>
-<script src="menu.js?v=38"></script>
-<script src="app.js?v=38"></script>
+<script src="analyse.js?v=67"></script>
+<script src="anal-session.js?v=67"></script>
+<script src="bump-session.js?v=67"></script>
+<script src="calc.js?v=67"></script>
+<script src="balance.js?v=67"></script>
+<script src="balance-session.js?v=67"></script>
+<script src="harmonic.js?v=67"></script>
+<script src="phase-session.js?v=67"></script>
+<script src="menu.js?v=67"></script>
+<script src="app.js?v=67"></script>
 </body>
 </html>

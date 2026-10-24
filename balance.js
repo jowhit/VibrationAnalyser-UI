@@ -83,8 +83,17 @@ const BalanceModule = (() => {
   let _runXData = {};
 
   // ── Moyennage vectoriel (mono = slot A ; duo = A et B) ───────
-  let _avgRe=0, _avgIm=0, _tourCount=0;
+  // Fenêtre glissante + chauffe JS + reset phasor (léger)
+  const BAL_WARMUP = 4;             // tours ignorés après Start/Capturer (JS)
+  const BAL_JUMP_THR = 0.45;        // distance phasor / amp_moy
+  const BAL_JUMP_NEED = 2;          // 2 tours suspects d'affilée → reset
+  let _winMax = 16;                 // 8 / 16 / 32 (opérateur)
+  let _winA = [];                   // {re,im}[]
+  let _winB = [];
+  let _avgRe=0, _avgIm=0, _tourCount=0;   // sommes / N fenêtre A
   let _avgReB=0, _avgImB=0, _tourCountB=0;
+  let _warmA = 0, _warmB = 0;
+  let _jumpA = 0, _jumpB = 0;
   let _suppressLiveTour = false;
   let _pending2pCapt = null;
   let _lastTachMs = 0;
@@ -167,7 +176,11 @@ const BalanceModule = (() => {
     state = S.IDLE;
     _updateUI();
     _updateCoeffButtons();
+    _updateModeLock();
     _updatePauseBanner();
+    if (typeof BalanceSession !== 'undefined' && BalanceSession.markIdle) {
+      BalanceSession.markIdle();
+    }
   }
 
   // ════════════════════════════════════════════════════════════
@@ -194,8 +207,9 @@ const BalanceModule = (() => {
     btnLoadCoeff = document.getElementById('btn-bal-load-coeff');
     btnMode1p = document.getElementById('btn-bal-mode-1p');
     btnMode2p = document.getElementById('btn-bal-mode-2p');
-    inMass = document.getElementById('bal-trial-mass');
-    inAngle = document.getElementById('bal-trial-angle');
+    inMass = null;
+    inAngle = null;
+    _bindTrialInputs();
 
     if (btnRun) btnRun.addEventListener('click', _doRun);
     if (btnResetTop) btnResetTop.addEventListener('click', doReset);
@@ -204,16 +218,59 @@ const BalanceModule = (() => {
     if (btnMode1p) btnMode1p.addEventListener('click', () => setMode('1P'));
     if (btnMode2p) btnMode2p.addEventListener('click', () => setMode('2P'));
     const btnResume = document.getElementById('btn-bal-resume');
-    if (btnResume) btnResume.addEventListener('click', resumeSession);
+    if (btnResume) {
+      btnResume.addEventListener('click', function () {
+        if (typeof BalanceSession !== 'undefined' && BalanceSession.resume) {
+          BalanceSession.resume();
+        } else {
+          resumeSession();
+        }
+      });
+    }
+    const btnCopyLog = document.getElementById('btn-bal-copy-log');
+    if (btnCopyLog) btnCopyLog.addEventListener('click', copyLog);
+    const btnMore = document.getElementById('btn-bal-more');
+    const morePanel = document.getElementById('bal-more-panel');
+    if (btnMore && morePanel) {
+      btnMore.addEventListener('click', function (e) {
+        e.stopPropagation();
+        const open = morePanel.style.display !== 'none';
+        morePanel.style.display = open ? 'none' : 'flex';
+        btnMore.classList.toggle('bal-more-open', !open);
+        btnMore.setAttribute('aria-expanded', open ? 'false' : 'true');
+      });
+      document.addEventListener('click', function () {
+        if (morePanel.style.display === 'none') return;
+        morePanel.style.display = 'none';
+        btnMore.classList.remove('bal-more-open');
+        btnMore.setAttribute('aria-expanded', 'false');
+      });
+      morePanel.addEventListener('click', function (e) { e.stopPropagation(); });
+    }
+    document.querySelectorAll('[data-bal-win]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        const n = parseInt(btn.getAttribute('data-bal-win'), 10);
+        if (n === 8 || n === 16 || n === 32) setWinMax(n);
+      });
+    });
     window.addEventListener('resize', resize);
+
+    try {
+      const w = parseInt(localStorage.getItem('bal_win_max'), 10);
+      if (w === 8 || w === 16 || w === 32) _winMax = w;
+    } catch (e) {}
 
     log('Module équilibrage prêt');
     state = S.IDLE;
     if (!_mode) setMode('1P');
     _restoreFromStorageIfAny();
+    if (_sessionPaused && typeof BalanceSession !== 'undefined' && BalanceSession.markPaused) {
+      BalanceSession.markPaused();
+    }
     _updateUI();
     _updateCoeffButtons();
     _updatePauseBanner();
+    _updateWinButtons();
     sendFn('BAL_INIT\n');
   }
 
@@ -260,16 +317,20 @@ const BalanceModule = (() => {
     if (_tachStaleTimer) { clearInterval(_tachStaleTimer); _tachStaleTimer = null; }
   }
 
-  function enterBalance() {
+  /**
+   * @param {{ skipInit?: boolean }} [opts] skipInit après EQ_RESUME (évite double BAL_INIT)
+   */
+  function enterBalance(opts) {
+    opts = opts || {};
     const main = document.getElementById('bal-main');
     if (main) main.style.display = 'flex';
     _refreshDuoFlag();
     if (!_mode) setMode('1P');
     else if (_mode === '2P') setMode('2P'); // re-évalue duo
-    if (!_sessionPaused) {
+    if (!_sessionPaused && !opts.skipInit) {
       _balSend('BAL_INIT');
-      _startTachWatch();
     }
+    if (!_sessionPaused) _startTachWatch();
     _updatePauseBanner();
     setTimeout(resize, 60);
   }
@@ -290,15 +351,27 @@ const BalanceModule = (() => {
   function _is2PProcedureActive() {
     return _mode === '2P' && _2pStep > 0;
   }
+  /** 1P démarré (après IDLE) → ne plus basculer vers 2 Plans. */
+  function _is1PProcedureActive() {
+    return _mode === '1P' && state && state !== S.IDLE && state !== S.UNKNOWN;
+  }
 
   function _updateModeLock() {
-    const lock1p = _is2PProcedureActive();
+    const lockTo1p = _is2PProcedureActive();
+    const lockTo2p = _is1PProcedureActive();
     if (btnMode1p) {
-      btnMode1p.disabled = lock1p;
-      btnMode1p.classList.toggle('bal-mode-toggle--locked', lock1p);
-      btnMode1p.title = lock1p
+      btnMode1p.disabled = lockTo1p;
+      btnMode1p.classList.toggle('bal-mode-toggle--locked', lockTo1p);
+      btnMode1p.title = lockTo1p
         ? 'Procédure 2 plans en cours — Reset pour changer'
         : 'Mode 1 plan';
+    }
+    if (btnMode2p) {
+      btnMode2p.disabled = lockTo2p;
+      btnMode2p.classList.toggle('bal-mode-toggle--locked', lockTo2p);
+      btnMode2p.title = lockTo2p
+        ? 'Procédure 1 plan en cours — Reset pour changer'
+        : 'Mode 2 plans';
     }
   }
 
@@ -307,12 +380,21 @@ const BalanceModule = (() => {
       setStatus('Procédure 2 plans en cours — Reset pour passer en 1 Plan', 'err');
       return;
     }
+    if (mode === '2P' && _is1PProcedureActive()) {
+      setStatus('Procédure 1 plan en cours — Reset pour passer en 2 Plans', 'err');
+      return;
+    }
     _mode = mode;
     _refreshDuoFlag();
+    _bindTrialInputs();
     const l1 = document.getElementById('bal-layout-1p');
     const l2 = document.getElementById('bal-layout-2p');
+    const rpm1 = document.getElementById('bal-rpm');
+    const rpm2 = document.getElementById('bal-rpm-2p');
     if (l1) l1.style.display = mode === '1P' ? 'flex' : 'none';
     if (l2) l2.style.display = mode === '2P' ? 'flex' : 'none';
+    if (rpm1) rpm1.style.display = mode === '1P' ? 'flex' : 'none';
+    if (rpm2) rpm2.style.display = mode === '2P' ? 'flex' : 'none';
     if (mode === '2P') {
       if (_duo2P && typeof DualSession !== 'undefined') DualSession.begin();
       _update2PStatus();
@@ -418,30 +500,130 @@ const BalanceModule = (() => {
   // ════════════════════════════════════════════════════════════
   // RÉCEPTION TOUR BINAIRE
   // ════════════════════════════════════════════════════════════
+  function setWinMax(n) {
+    if (n !== 8 && n !== 16 && n !== 32) return;
+    _winMax = n;
+    try { localStorage.setItem('bal_win_max', String(n)); } catch (e) {}
+    _trimWindow('A');
+    _trimWindow('B');
+    _updateWinButtons();
+    log('Fenêtre moyenne = ' + n + ' tours');
+  }
+
+  function _updateWinButtons() {
+    document.querySelectorAll('[data-bal-win]').forEach(function (btn) {
+      const n = parseInt(btn.getAttribute('data-bal-win'), 10);
+      btn.classList.toggle('bal-mode-toggle--active', n === _winMax);
+    });
+  }
+
+  function _trimWindow(ch) {
+    const isA = ch === 'A';
+    const win = isA ? _winA : _winB;
+    while (win.length > _winMax) {
+      const old = win.shift();
+      if (isA) { _avgRe -= old.re; _avgIm -= old.im; _tourCount = win.length; }
+      else { _avgReB -= old.re; _avgImB -= old.im; _tourCountB = win.length; }
+    }
+  }
+
+  function _clearWindow(ch) {
+    if (ch === 'A') {
+      _winA = []; _avgRe = 0; _avgIm = 0; _tourCount = 0; _jumpA = 0;
+    } else {
+      _winB = []; _avgReB = 0; _avgImB = 0; _tourCountB = 0; _jumpB = 0;
+    }
+  }
+
+  /**
+   * Ajoute un tour à la moyenne (fenêtre + chauffe + reset phasor).
+   * Reset phasor = distance complexe / amp — coût négligeable.
+   * @returns {{amp:number,phase:number}|null} moyenne courante
+   */
+  function _pushTourAvg(ch, amp, phase) {
+    const isA = ch === 'A';
+    const re = amp * Math.cos(phase * Math.PI / 180);
+    const im = amp * Math.sin(phase * Math.PI / 180);
+    const tag = isA ? (_isDuo2P() ? 'A' : '') : 'B';
+
+    if (isA ? _warmA > 0 : _warmB > 0) {
+      if (isA) _warmA--; else _warmB--;
+      const left = isA ? _warmA : _warmB;
+      log('T' + tag + ' chauffe (' + (BAL_WARMUP - left) + '/' + BAL_WARMUP +
+          ')  ' + amp.toFixed(3) + 'g @' + Math.round(phase) + '°');
+      return isA ? _getLiveAvg() : _getLiveAvgB();
+    }
+
+    const count = isA ? _tourCount : _tourCountB;
+    if (count >= 2) {
+      const sRe = isA ? _avgRe : _avgReB;
+      const sIm = isA ? _avgIm : _avgImB;
+      const mRe = sRe / count, mIm = sIm / count;
+      const mAmp = Math.sqrt(mRe * mRe + mIm * mIm) || 1e-9;
+      const dist = Math.sqrt((re - mRe) * (re - mRe) + (im - mIm) * (im - mIm));
+      if (dist / mAmp > BAL_JUMP_THR) {
+        if (isA) _jumpA++; else _jumpB++;
+        const streak = isA ? _jumpA : _jumpB;
+        if (streak < BAL_JUMP_NEED) {
+          log('T' + tag + ' suspect Δphasor — ignoré (' + streak + '/' + BAL_JUMP_NEED + ')');
+          return isA ? _getLiveAvg() : _getLiveAvgB();
+        }
+        _clearWindow(ch);
+        log('T' + tag + ' RESET phasor (changement détecté)');
+      } else {
+        if (isA) _jumpA = 0; else _jumpB = 0;
+      }
+    }
+
+    const win = isA ? _winA : _winB;
+    if (win.length >= _winMax) {
+      const old = win.shift();
+      if (isA) { _avgRe -= old.re; _avgIm -= old.im; }
+      else { _avgReB -= old.re; _avgImB -= old.im; }
+    }
+    win.push({ re: re, im: im });
+    if (isA) {
+      _avgRe += re; _avgIm += im; _tourCount = win.length;
+    } else {
+      _avgReB += re; _avgImB += im; _tourCountB = win.length;
+    }
+
+    const avg = isA ? _getLiveAvg() : _getLiveAvgB();
+    if (avg) {
+      log('T' + tag + _tourCountFor(ch) + '  ' + amp.toFixed(3) + 'g @' + Math.round(phase) +
+          '°  →  Moy(' + _tourCountFor(ch) + '/' + _winMax + '): ' +
+          avg.amp.toFixed(3) + 'g @' + Math.round(avg.phase) + '°');
+    }
+    return avg;
+  }
+
+  function _tourCountFor(ch) { return ch === 'A' ? _tourCount : _tourCountB; }
+
   function onTourBinary(rpm,range,n,samples) {
     if(![S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING].includes(state)) return;
     if (_suppressLiveTour) return;
     const {amp,phase}=_dft1X(samples,range,n);
-    _avgRe+=amp*Math.cos(phase*Math.PI/180);
-    _avgIm+=amp*Math.sin(phase*Math.PI/180);
-    _tourCount++;
-    const avgAmp=Math.sqrt(_avgRe*_avgRe+_avgIm*_avgIm)/_tourCount;
-    let avgPh=Math.atan2(_avgIm,_avgRe)*180/Math.PI; if(avgPh<0)avgPh+=360;
+    const avg=_pushTourAvg('A', amp, phase);
     _updateRpm(rpm);
+    if (!avg) {
+      if (_mode==='1P') _drawPolar1P();
+      else if (_isDuo2P()) { _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA); _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB); }
+      else _drawAll2P();
+      if (_isDuo2P()) _updateUI();
+      return;
+    }
     if (_mode==='1P') {
-      _drawLivePolar(_ctx1P,_canvas1P,_runs1P,avgAmp,avgPh,_tourCount);
+      _drawLivePolar(_ctx1P,_canvas1P,_runs1P,avg.amp,avg.phase,_tourCount);
     } else if (_isDuo2P()) {
-      _drawLivePolar(_ctxA,_canvasA,_polarPtsA,avgAmp,avgPh,_tourCount);
+      _drawLivePolar(_ctxA,_canvasA,_polarPtsA,avg.amp,avg.phase,_tourCount);
       const avgB=_getLiveAvgB();
       if (avgB) _drawLivePolar(_ctxB,_canvasB,_polarPtsB,avgB.amp,avgB.phase,_tourCountB);
       else _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
     } else {
       const activeSensor=_getActiveSensor2P();
-      if (activeSensor==='A') { _drawLivePolar(_ctxA,_canvasA,_polarPtsA,avgAmp,avgPh,_tourCount); _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB); }
-      else                    { _drawLivePolar(_ctxB,_canvasB,_polarPtsB,avgAmp,avgPh,_tourCount); _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA); }
+      if (activeSensor==='A') { _drawLivePolar(_ctxA,_canvasA,_polarPtsA,avg.amp,avg.phase,_tourCount); _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB); }
+      else                    { _drawLivePolar(_ctxB,_canvasB,_polarPtsB,avg.amp,avg.phase,_tourCount); _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA); }
     }
-    const tag=_isDuo2P()?'A':'';
-    log('T'+tag+_tourCount+'  '+amp.toFixed(3)+'g @'+Math.round(phase)+'°  →  Moy: '+avgAmp.toFixed(3)+'g @'+Math.round(avgPh)+'°');
     if (_isDuo2P()) _updateUI();
   }
 
@@ -451,17 +633,13 @@ const BalanceModule = (() => {
     if(![S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING].includes(state)) return;
     if (_suppressLiveTour) return;
     const {amp,phase}=_dft1X(samples,range,n);
-    _avgReB+=amp*Math.cos(phase*Math.PI/180);
-    _avgImB+=amp*Math.sin(phase*Math.PI/180);
-    _tourCountB++;
-    const avgAmp=Math.sqrt(_avgReB*_avgReB+_avgImB*_avgImB)/_tourCountB;
-    let avgPh=Math.atan2(_avgImB,_avgReB)*180/Math.PI; if(avgPh<0)avgPh+=360;
+    const avg=_pushTourAvg('B', amp, phase);
     _updateRpm(rpm);
-    _drawLivePolar(_ctxB,_canvasB,_polarPtsB,avgAmp,avgPh,_tourCountB);
+    if (avg) _drawLivePolar(_ctxB,_canvasB,_polarPtsB,avg.amp,avg.phase,_tourCountB);
+    else _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
     const avgA=_getLiveAvg();
     if (avgA) _drawLivePolar(_ctxA,_canvasA,_polarPtsA,avgA.amp,avgA.phase,_tourCount);
     else _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA);
-    log('TB'+_tourCountB+'  '+amp.toFixed(3)+'g @'+Math.round(phase)+'°  →  Moy: '+avgAmp.toFixed(3)+'g @'+Math.round(avgPh)+'°');
     _updateUI();
   }
 
@@ -489,9 +667,50 @@ const BalanceModule = (() => {
   }
 
   function _resetAvg() {
+    _winA = []; _winB = [];
     _avgRe=0; _avgIm=0; _tourCount=0;
     _avgReB=0; _avgImB=0; _tourCountB=0;
+    _warmA = BAL_WARMUP; _warmB = BAL_WARMUP;
+    _jumpA = 0; _jumpB = 0;
     if (_mode==='2P') _drawAll2P(); else _drawPolar1P();
+  }
+
+  function copyLog() {
+    const el = _mode === '2P'
+      ? document.getElementById('bal-log-2p')
+      : document.getElementById('bal-log');
+    const text = el ? (el.innerText || el.textContent || '') : '';
+    if (!text.trim()) {
+      setStatus('Log vide', 'err');
+      return;
+    }
+    const done = function () {
+      setStatus('Log copié', 'ok');
+      log('📋 Log copié (' + text.split('\n').length + ' lignes)');
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(function () {
+        _copyLogFallback(text, done);
+      });
+    } else {
+      _copyLogFallback(text, done);
+    }
+  }
+
+  function _copyLogFallback(text, done) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (done) done();
+    } catch (e) {
+      setStatus('Copie log échouée', 'err');
+    }
   }
 
   // ════════════════════════════════════════════════════════════
@@ -535,8 +754,11 @@ const BalanceModule = (() => {
       const mass=parseFloat(inMass.value), ang=parseFloat(inAngle.value)||0;
       if (!mass||mass<=0){setStatus('Entrez une masse > 0','err');return;}
       _testMass1P=mass; _testAngle1P=ang;
+      // Empêche spam / gel si l'opérateur reclique avant BAL_STATE=RUN2_READY
+      if (btnRun) btnRun.disabled = true;
       _balSend('BAL_R2 MASS='+mass.toFixed(3)+' ANG='+ang.toFixed(3));
       log('→ Masse: '+mass.toFixed(1)+'g @ '+ang.toFixed(1)+'°');
+      setStatus('Masse envoyée — attendre confirmation ESP…', 'wait');
       return;
     }
     if ([S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING].includes(state)){_accept1P();return;}
@@ -935,7 +1157,14 @@ const BalanceModule = (() => {
     }
     if (l.startsWith('BAL_RPM=')) { _updateRpm(parseFloat(l.slice(8)) || 0); return; }
     if (l.startsWith('BAL_STATE=')) { _applyState(l.slice(10)); return; }
-    if (l.startsWith('BAL_ERR=')) { log('⚠ ' + l.slice(8)); setStatus('Erreur: ' + l.slice(8), 'err'); return; }
+    if (l.startsWith('BAL_ERR=')) {
+      log('⚠ ' + l.slice(8));
+      setStatus('Erreur: ' + l.slice(8), 'err');
+      // Débloque « Valider masse » si R2 rejeté / timeout état
+      if (btnRun) btnRun.disabled = false;
+      _updateUI();
+      return;
+    }
   }
 
   function _applyState(name) {
@@ -947,15 +1176,23 @@ const BalanceModule = (() => {
     }
 
     if (_mode==='1P') {
-      const labels={[S.IDLE]:'Prêt',[S.RPM_SCAN]:'Scan RPM…',[S.RUN1_READY]:'Run 1 prêt',
-        [S.RUN1_RUNNING]:'Run 1 — Capturer quand stable',[S.R2_CONFIG]:'Masse essai — saisir masse et angle',
-        [S.RUN2_READY]:'Run 2 prêt — démarrer acquisition',[S.RUN2_RUNNING]:'Run 2 — Capturer quand stable',
-        [S.CORRECTION]:'Correction calculée — Continuer',[S.RUNX_READY]:'Run vérif prêt',
-        [S.RUNX_RUNNING]:'Run vérif — Capturer quand stable'};
-      const isWait=[S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING,S.RPM_SCAN].includes(state);
-      const isOk=[S.RUN1_READY,S.RUN2_READY,S.RUNX_READY,S.CORRECTION].includes(state);
+      const labels={
+        [S.IDLE]:'Prêt — cliquer Démarrer pour estimer le RPM',
+        [S.RPM_SCAN]:'Estimation RPM en cours — attendre le tach…',
+        [S.RUN1_READY]:'Run 1 (sans masse) — cliquer Run 1 ▶',
+        [S.RUN1_RUNNING]:'Run 1 — attendre stabilité puis Capturer',
+        [S.R2_CONFIG]:'⛔ Arrêter le rotor — saisir masse et angle d\'essai',
+        [S.RUN2_READY]:'Masse installée — cliquer Run 2 ▶',
+        [S.RUN2_RUNNING]:'Run 2 — attendre stabilité puis Capturer',
+        [S.CORRECTION]:'✓ Correction calculée — Continuer pour RunX',
+        [S.RUNX_READY]:'Run vérif — cliquer Run vérif ▶',
+        [S.RUNX_RUNNING]:'Run vérif — attendre stabilité puis Capturer'
+      };
+      const isWait=[S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING,S.RPM_SCAN,S.R2_CONFIG].includes(state);
+      const isOk=[S.IDLE,S.RUN1_READY,S.RUN2_READY,S.RUNX_READY,S.CORRECTION].includes(state);
       setStatus(labels[state]||name,isWait?'wait':isOk?'ok':'');
-      if(state===S.R2_CONFIG) _showMassInput('Masse et angle essai');
+      if (state === S.R2_CONFIG) _showMassInput('Masse et angle essai');
+      else _hideMassInput();
     } else {
       // Mode 2P — transitions ESP
       // Mono déplacement : dummy R2 après 1ʳᵉ paire. Duo : masse A réelle (sendR2).
@@ -972,6 +1209,7 @@ const BalanceModule = (() => {
     log('ESP: '+name);
     _updateUI();
     _updateCoeffButtons();
+    _updateModeLock();
     if (hasProgress()) persistSession();
   }
 
@@ -1043,6 +1281,7 @@ const BalanceModule = (() => {
     if (_mode === '2P') _update2PStatus();
     _updateUI();
     _updateCoeffButtons();
+    _updateModeLock();
   }
 
   function doReset() {
@@ -1154,13 +1393,26 @@ const BalanceModule = (() => {
   // ════════════════════════════════════════════════════════════
   // UI HELPERS
   // ════════════════════════════════════════════════════════════
+  function _bindTrialInputs() {
+    const massId = _mode === '2P' ? 'bal-trial-mass-2p' : 'bal-trial-mass-1p';
+    const angId  = _mode === '2P' ? 'bal-trial-angle-2p' : 'bal-trial-angle-1p';
+    inMass  = document.getElementById(massId);
+    inAngle = document.getElementById(angId);
+  }
   function _showMassInput(label) {
-    const pid=_mode==='2P'?'bal-params-2p':'bal-params';
-    const el=document.getElementById(pid),lbl=document.getElementById('bal-params-title');
-    if(el) el.style.display='block'; if(lbl) lbl.textContent=label||'Masse essai';
+    _bindTrialInputs();
+    const pid = _mode === '2P' ? 'bal-params-2p' : 'bal-params';
+    const tid = _mode === '2P' ? 'bal-params-title-2p' : 'bal-params-title';
+    const el = document.getElementById(pid);
+    const lbl = document.getElementById(tid);
+    if (el) el.style.display = 'block';
+    if (lbl) lbl.textContent = label || 'Masse essai';
   }
   function _hideMassInput() {
-    ['bal-params','bal-params-2p'].forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none';});
+    ['bal-params', 'bal-params-2p'].forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'none';
+    });
   }
   function _pushPts(arr,label,amp,phase,color) {
     const idx=arr.findIndex(p=>p.label===label);
@@ -1384,7 +1636,7 @@ const BalanceModule = (() => {
     }
   }
 
-  /** Appelé avant d'aller Analyse / Live FFT / Harm / term. */
+  /** Appelé par BalanceSession.pause() avant autre module. */
   function pauseForLeave() {
     if (!hasProgress()) return false;
     _sessionPaused = true;
@@ -1397,6 +1649,9 @@ const BalanceModule = (() => {
     if (typeof termAddLine === 'function') {
       termAddLine('[BAL] pause — session gardée', 'sys');
     }
+    if (typeof BalanceSession !== 'undefined' && BalanceSession.markPaused) {
+      BalanceSession.markPaused();
+    }
     return true;
   }
 
@@ -1407,6 +1662,9 @@ const BalanceModule = (() => {
     _balSendAllEsp('BAL_RESET');
     _updatePauseBanner();
     log('Session équilibrage abandonnée');
+    if (typeof BalanceSession !== 'undefined' && BalanceSession.markIdle) {
+      BalanceSession.markIdle();
+    }
   }
 
   /** Nouveau depuis menu : confirme si progression, puis flush. */
@@ -1420,11 +1678,17 @@ const BalanceModule = (() => {
     return true;
   }
 
-  function resumeSession() {
+  /**
+   * Reprise session — opts.onLive(dual) / opts.onFail() pour BalanceSession.
+   * @param {{ onLive?: function, onFail?: function }} [opts]
+   */
+  function resumeSession(opts) {
+    opts = opts || {};
     const snap = _readStorage();
     if (snap) _applySnapshot(snap);
     if (!hasProgress()) {
       setStatus('Aucune session à reprendre', 'err');
+      if (opts.onFail) opts.onFail();
       return;
     }
     _sessionPaused = false;
@@ -1432,40 +1696,44 @@ const BalanceModule = (() => {
     _updatePauseBanner();
 
     const espState = _normalizeEspStateName(_espStateName || state || 'IDLE');
-    const onReady = function () {
+    const onReady = function (dual) {
+      // Une seule restauration d'état (EQ_RESUME côté ESP = stop modules + ACK)
       _balSendAllEsp('BAL_RESUME STATE=' + espState);
       _startTachWatch();
-      _balSend('BAL_INIT');
       setStatus('Session reprise', 'ok');
       log('▶ Reprise équilibrage → ' + espState);
       _updateUI();
-      setTimeout(resize, 60);
+      setTimeout(resize, 80);
+      if (opts.onLive) opts.onLive(!!dual);
+      else if (typeof BalanceSession !== 'undefined' && BalanceSession.markLive) {
+        BalanceSession.markLive(!!dual);
+      }
+    };
+    const onFail = function () {
+      setStatus('Reprise échouée (NAV)', 'err');
+      _sessionPaused = true;
+      persistSession();
+      _updatePauseBanner();
+      if (opts.onFail) opts.onFail();
+      else if (typeof BalanceSession !== 'undefined' && BalanceSession.markPaused) {
+        BalanceSession.markPaused();
+      }
     };
 
     if (typeof DualSession !== 'undefined' && DualSession.available()) {
       DualSession.startModule('balance', 'WS_GOTO=EQ_RESUME', {
         label: 'Équilibrage (reprise)',
         onReady: onReady,
-        onFail: function () {
-          setStatus('Reprise échouée (NAV)', 'err');
-          _sessionPaused = true;
-          persistSession();
-          _updatePauseBanner();
-        },
+        onFail: onFail,
       });
     } else if (typeof window.wsGoto === 'function') {
       window.wsGoto('balance', 'WS_GOTO=EQ_RESUME', {
-        onAck: onReady,
-        onTimeout: function () {
-          setStatus('Reprise échouée (NAV)', 'err');
-          _sessionPaused = true;
-          persistSession();
-          _updatePauseBanner();
-        },
+        onAck: function () { onReady(false); },
+        onTimeout: onFail,
       });
     } else {
       _balSendAllEsp('WS_GOTO=EQ_RESUME');
-      setTimeout(onReady, 300);
+      setTimeout(function () { onReady(false); }, 300);
       if (typeof showTab === 'function') showTab('balance');
     }
   }
@@ -1476,6 +1744,7 @@ const BalanceModule = (() => {
     init, enterBalance, onData, onTourBinary, onTourBinaryB, onRpmB,
     setMode, selectMode, resize, clearSession, selectSensor,
     hasProgress, persistSession, pauseForLeave, resumeSession,
-    discardSession, prepareNewFromMenu,
+    discardSession, prepareNewFromMenu, setWinMax, copyLog,
+    isPaused: function () { return !!_sessionPaused; },
   };
 })();

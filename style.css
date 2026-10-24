@@ -8,34 +8,27 @@ html, body {
 body { display: flex; flex-direction: column; }
 #main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-height: 0; }
 
-/* ── Topbar ── */
-#topbar {
-  display: flex; align-items: center; gap: 8px;
-  padding: 5px 10px; background: #1a1a2e; flex-shrink: 0;
-}
-#dot, #dot-b { width: 9px; height: 9px; border-radius: 50%; background: #555; flex-shrink: 0; }
-#dot.ok, #dot-b.ok  { background: #00e87a; box-shadow: 0 0 5px #00e87a; }
-#dot.err, #dot-b.err { background: #ff4444; }
-#dot-b { outline: 1px solid #666; }
-#ip-label { color: #aaa; font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.probe-badge {
-  font-size: 11px; font-weight: 700; padding: 2px 7px; border-radius: 3px;
-  flex-shrink: 0; letter-spacing: 0.03em;
-}
-.probe-badge--none { background: #3a3a20; color: #ccaa44; }
-.probe-badge--a { background: #1a3a5a; color: #6ab0ff; }
-.probe-badge--b { background: #3a1a4a; color: #c98cff; }
-.probe-badge--ab { background: #1a4a3a; color: #5dffb0; }
-#topbar button {
-  background: #2a2a4a; color: #aaa; border: 1px solid #444;
-  border-radius: 3px; padding: 3px 8px; font-size: 11px; cursor: pointer;
-}
-
-/* ── Tabs ── */
+/* ── Tabs + lettres A/B connexion ── */
 #tabs {
   display: flex; background: #1a1a2e; flex-shrink: 0;
   border-bottom: 2px solid #0066cc;
+  align-items: stretch;
 }
+.conn-letters {
+  display: flex; align-items: center; gap: 2px;
+  padding: 0 8px 0 10px; flex-shrink: 0;
+  border-right: 1px solid #2a2a4a;
+}
+.conn-letter {
+  font-family: 'Courier New', monospace;
+  font-size: 13px; font-weight: 700;
+  min-width: 16px; text-align: center;
+  color: #555; line-height: 1;
+  user-select: none;
+}
+.conn-letter.ok  { color: #00e87a; text-shadow: 0 0 6px #00e87a66; }
+.conn-letter.err { color: #ff4444; }
+.conn-letter.off { color: #555; opacity: 0.45; }
 .tab {
   flex: 1; text-align: center; padding: 7px 0;
   color: #888; cursor: pointer; font-size: 12px;
@@ -85,6 +78,12 @@ body { display: flex; flex-direction: column; }
   background: #0066cc; color: #fff; border: none;
   border-radius: 3px; padding: 7px 14px; font-size: 14px; cursor: pointer;
 }
+.btn-term-side {
+  background: #fff; color: #333; border: 1px solid #bbb;
+  border-radius: 3px; padding: 7px 10px; font-size: 14px; cursor: pointer;
+  flex-shrink: 0;
+}
+.btn-term-side:active { background: #ddd; }
 
 /* ── Graphiques communs ── */
 .graph-header {
@@ -114,20 +113,61 @@ body { display: flex; flex-direction: column; }
   height: 100%;
 }
 
-.ctrl-bar {
-  display: flex; gap: 4px; padding: 5px 8px;
+.ctrl-bar,
+.bal-cmdbar,
+.calc-tabs,
+.an-bump-actions,
+.mod-cmdbar {
+  display: flex; gap: 5px; padding: 5px 8px; align-items: center;
   background: #e8e8e8; border-top: 1px solid #ccc; flex-shrink: 0;
+  flex-wrap: nowrap;
 }
-.ctrl-bar button {
+.ctrl-bar button,
+.bal-btn,
+.calc-tab {
   background: #fff; color: #333; border: 1px solid #bbb;
-  border-radius: 3px; padding: 7px 11px; font-size: 12px; cursor: pointer;
+  border-radius: 3px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+  min-height: 34px; box-sizing: border-box;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+/* Barres bas : largeur égale, remplissent l'espace */
+.mod-cmdbar > button,
+.mod-cmdbar > .bal-btn,
+.mod-cmdbar > .calc-tab,
+.mod-cmdbar > .bal-more-wrap {
+  flex: 1 1 0;
+  min-width: 0;
+}
+.mod-cmdbar > .bal-more-wrap {
+  display: flex;
+  position: relative;
+}
+.mod-cmdbar > .bal-more-wrap > .bal-btn {
+  flex: 1 1 0;
+  width: 100%;
 }
 .ctrl-bar button:active { background: #ddd; }
-.ctrl-bar button.btn-primary { background: #0066cc; color: #fff; border-color: #0055aa; flex: 1; }
-.ctrl-bar button.running { background: #cc2200; color: #fff; border-color: #aa1100; }
-.ctrl-bar button.active  { background: #004499; color: #fff; border-color: #003377; }
-.ctrl-bar button.active.vel { background: #007744; color: #fff; border-color: #005533; }
+.ctrl-bar button.btn-primary { background: #0066cc; color: #fff; border-color: #0055aa; }
+.an-ctrl-bar { gap: 4px; padding: 5px 6px; }
+.an-ctrl-bar button { padding: 6px 6px; font-size: 11px; min-height: 32px; }
+.ctrl-bar button.running,
+.ctrl-bar .bal-btn-stop,
+.mod-cmdbar .bal-btn-stop { background: #cc2200; color: #fff; border-color: #aa1100; }
+.ctrl-bar button.active  { background: #0066cc; color: #fff; border-color: #0055aa; }
+.ctrl-bar button.active.vel { background: #0066cc; color: #fff; border-color: #0055aa; }
 .ctrl-bar button.off { color: #aaa; border-color: #ddd; }
+/* Spécificité > .ctrl-bar button { background:#fff } */
+.ctrl-bar .bal-btn-run,
+.mod-cmdbar .bal-btn-run,
+.bal-cmdbar .bal-btn-run {
+  background: #0066cc;
+  color: #fff;
+  border-color: #0055aa;
+}
+.ctrl-bar .bal-btn-run:hover:not(:disabled),
+.mod-cmdbar .bal-btn-run:hover:not(:disabled) {
+  background: #0055aa;
+}
 
 /* ── Analyse stats ── */
 #an-stats {
@@ -187,26 +227,8 @@ body { display: flex; flex-direction: column; }
   padding: 6px 8px;
 }
 .an-bump-actions {
-  display: flex;
-  gap: 6px;
-}
-.an-bump-actions button {
-  background: #fff;
-  color: #333;
-  border: 1px solid #bbb;
-  border-radius: 3px;
-  padding: 7px 11px;
-  font-size: 12px;
-  cursor: pointer;
-}
-.an-bump-actions #btn-bump-start {
-  flex: 1;
-  background: #0066cc;
-  color: #fff;
-  border-color: #0055aa;
-}
-.an-bump-actions #btn-bump-exit {
-  min-width: 90px;
+  background: #f8f8f8;
+  border-top: none;
 }
 
 /* ── Filtre actif ── */
@@ -243,23 +265,25 @@ body { display: flex; flex-direction: column; }
   padding: 10px;
 }
 
+.calc-body {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 8px;
+}
 .calc-tabs {
-  display: flex;
-  gap: 8px;
-  margin-bottom: 15px;
-  border-bottom: 1px solid #ccc;
-  padding-bottom: 8px;
+  margin: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 .calc-tab {
-  background: #fff;
-  color: #333;
-  border: 1px solid #bbb;
   border-radius: 4px;
-  padding: 6px 10px;
-  font-size: 12px;
-  cursor: pointer;
   transition: background 0.15s, border-color 0.15s;
+  white-space: nowrap;
+  padding: 6px 8px;
+  font-size: 11px;
+  min-height: 32px;
 }
 
 .calc-tab:active {
@@ -379,7 +403,21 @@ body { display: flex; flex-direction: column; }
 }
 #bal-canvas { display: block; }
 
-/* ── RPM live ── */
+/* ── RPM live (Balance + Harmonic + Phase) ── */
+.mod-rpm-strip,
+.bal-rpm-strip,
+.harm-rpm-strip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 8px;
+  flex-shrink: 0;
+  background: #f8f8f8;
+  border-bottom: 1px solid #ddd;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+.mod-rpm-box,
 .bal-rpm-box {
   display: flex;
   align-items: center;
@@ -387,8 +425,9 @@ body { display: flex; flex-direction: column; }
   background: #fff;
   border: 1px solid #ccc;
   border-radius: 6px;
-  padding: 5px 12px;
-  width: min(42vw, 340px);
+  padding: 4px 14px;
+  width: min(92vw, 320px);
+  min-height: 32px;
   box-sizing: border-box;
 }
 .bal-rpm-dot {
@@ -407,6 +446,7 @@ body { display: flex; flex-direction: column; }
   font-family: 'Courier New', monospace;
   font-size: 22px; font-weight: bold;
   color: #1a1a2e; margin-left: auto;
+  line-height: 1;
 }
 
 /* ── Légende ── */
@@ -525,11 +565,17 @@ body { display: flex; flex-direction: column; }
   font-family: 'Courier New', monospace;
 }
 .bal-pause-banner .bal-btn-run { flex-shrink: 0; }
-.bal-build-stamp {
-  margin-left: auto;
-  font-size: 10px;
-  color: #999;
+.bal-win-label {
+  font-size: 11px;
+  color: #666;
   font-family: 'Courier New', monospace;
+  margin-left: 2px;
+}
+.bal-toolbar [data-bal-win],
+.bal-more-panel [data-bal-win] {
+  min-width: 32px;
+  padding-left: 8px;
+  padding-right: 8px;
 }
 
 /* ── Barre de commandes ── */
@@ -543,11 +589,60 @@ body { display: flex; flex-direction: column; }
   border-bottom: 1px solid #ddd;
   background: #f8f8f8;
 }
-.bal-mode-toggle--active {
-  background: #0066cc;
-  color: #fff;
-  border-color: #0055aa;
+.bal-more-wrap {
+  position: relative;
 }
+.bal-more-panel {
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  min-width: 180px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.15);
+  z-index: 220;
+}
+.bal-more-panel--up {
+  top: auto;
+  bottom: calc(100% + 4px);
+  box-shadow: 0 -4px 14px rgba(0,0,0,0.15);
+}
+.bal-more-panel .bal-btn { width: 100%; text-align: left; }
+.bal-more-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.bal-more-row .bal-btn { width: auto; text-align: center; }
+.bal-more-divider {
+  height: 1px;
+  background: #e0e0e0;
+  margin: 2px 0;
+}
+.bal-more-stamp {
+  font-size: 10px;
+  color: #999;
+  font-family: 'Courier New', monospace;
+  text-align: right;
+  margin-top: 2px;
+}
+#btn-bal-more.bal-more-open {
+  background: #e8eef8;
+  border-color: #0066cc;
+  color: #0066cc;
+}
+.bal-btn-stop {
+  background: #cc2200;
+  color: #fff;
+  border-color: #aa1100;
+}
+.bal-btn-stop:hover:not(:disabled) { background: #aa1100; }
 .bal-mode-toggle--locked,
 .bal-mode-toggle:disabled {
   opacity: 0.35;
@@ -555,28 +650,25 @@ body { display: flex; flex-direction: column; }
   pointer-events: none;
 }
 .bal-cmdbar {
-  display: flex;
-  align-items: center;
-  padding: 5px 8px;
-  background: #e8e8e8;
-  border-top: 1px solid #ccc;
-  flex-shrink: 0;
-  gap: 0;
+  flex-wrap: nowrap;
 }
 
 .bal-btn {
-  font-size: 12px;
-  padding: 6px 14px;
-  border: 1px solid #bbb;
-  border-radius: 3px;
-  background: #fff;
-  color: #333;
-  cursor: pointer;
   white-space: nowrap;
   transition: background .15s;
 }
-.bal-btn:hover:not(:disabled) { background: #e0e0e0; }
+.bal-btn:hover:not(:disabled):not(.bal-mode-toggle--active):not(.bal-btn-run):not(.bal-btn-stop) {
+  background: #e0e0e0;
+}
 .bal-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+/* Active doit gagner sur .bal-btn (ordre / spécificité) */
+.bal-btn.bal-mode-toggle--active,
+.bal-btn.bal-mode-toggle--active:hover:not(:disabled) {
+  background: #0066cc;
+  color: #fff;
+  border-color: #0055aa;
+}
 
 .bal-btn-run  { background: #0066cc; color: #fff; border-color: #0055aa; }
 .bal-btn-run:hover:not(:disabled) { background: #0055aa; }
@@ -592,7 +684,8 @@ body { display: flex; flex-direction: column; }
 @media (max-width: 600px) {
   .bal-layout      { flex-direction: column; }
   #bal-canvas-wrap,
-  .bal-rpm-box     { width: min(88vw, 300px); }
+  .bal-rpm-box,
+  .mod-rpm-box     { width: min(88vw, 300px); }
   #bal-canvas-wrap {
   position: relative; height: min(88vw, 300px); }
   .bal-chart-area  { align-self: center; }
@@ -914,6 +1007,11 @@ body { display: flex; flex-direction: column; }
 
 #page-harmonic {
   background: #f5f5f5;
+  padding: 0;
+  gap: 0;
+}
+#page-harmonic #harm-classic-view,
+#page-harmonic #harm-phase-view {
   padding: 8px;
   gap: 10px;
 }
@@ -955,33 +1053,6 @@ body { display: flex; flex-direction: column; }
   font-size: 14px;
 }
 
-.harm-rpm-indicator {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: #f0f0f0;
-  padding: 3px 10px;
-  border-radius: 20px;
-}
-
-#harm-rpm-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: #ccc;
-  transition: background 0.3s;
-}
-#harm-rpm-dot.ok {
-  background: #00b050;
-  box-shadow: 0 0 5px #00b05088;
-}
-
-#harm-rpm-val {
-  font-family: 'Courier New', monospace;
-  font-size: 18px;
-  font-weight: bold;
-  color: #1a1a2e;
-}
 
 #harm-polar-wrap {
   flex: 1;
@@ -1035,22 +1106,6 @@ body { display: flex; flex-direction: column; }
 .hm-order-label[data-o="3"] { color: #c45a00; }
 .hm-order-label[data-o="4"] { color: #8e24aa; }
 
-/* ── Barre sélection visage Harmonique / Suivi Phase ───── */
-.harm-view-bar {
-  display: flex; align-items: center; gap: 6px;
-  padding: 4px 8px; background: #f0f0f0;
-  border-radius: 8px; border: 1px solid #ddd;
-  margin-bottom: 6px;
-}
-.harm-view-bar .harm-rpm-indicator { margin-left: auto; }
-.harm-view-btn {
-  padding: 5px 12px; border: 1px solid #ccc; border-radius: 6px;
-  background: #fff; font-size: 13px; font-weight: bold; color: #555; cursor: pointer;
-}
-.harm-view-btn.harm-view-active {
-  background: #0066cc; color: #fff; border-color: #0055aa;
-}
-
 /* ── Suivi de phase ──────────────────────────────────────── */
 #harm-classic-view {
   flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 10px;
@@ -1095,7 +1150,7 @@ body { display: flex; flex-direction: column; }
 @media (max-width: 600px) {
   #page-harmonic { padding: 4px; gap: 6px; }
   .harm-polar-section, .harm-speed-section { padding: 6px; }
-  .harm-view-btn { font-size: 11px; padding: 4px 8px; }
+  .harm-cmdbar .bal-btn { font-size: 11px; padding: 4px 8px; }
 }
 /* ═══════════════════════════════════════════════════════════
    ÉQUILIBRAGE v14 — Mode sélection + 2P polaires côte à côte
@@ -1238,9 +1293,11 @@ body { display: flex; flex-direction: column; }
   min-height: 0;
 }
 
+/* Zone consignes centrale — même traitement 1P et 2P */
+#bal-layout-1p .bal-status,
 #bal-layout-2p .bal-status {
   flex: 1;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: bold;
   padding: 12px;
   background: #fff;
@@ -1250,6 +1307,8 @@ body { display: flex; flex-direction: column; }
   align-items: center;
   justify-content: center;
   text-align: center;
+  min-height: 64px;
+  line-height: 1.35;
 }
 
 .bal-params,
@@ -1257,6 +1316,7 @@ body { display: flex; flex-direction: column; }
   flex-shrink: 0;
 }
 
+#bal-layout-1p .bal-log,
 #bal-layout-2p .bal-log {
   flex-shrink: 0;
   height: 100px;
