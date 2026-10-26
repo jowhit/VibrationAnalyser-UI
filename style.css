@@ -170,6 +170,19 @@ body { display: flex; flex-direction: column; }
 }
 
 /* ── Analyse stats ── */
+.an-time-cursors {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: 'Courier New', monospace;
+  background: #f7f7f0;
+  border-bottom: 1px solid #ddd;
+  color: #333;
+  line-height: 1.35;
+}
+.an-time-cursors .tc1 { color: #cc0000; font-weight: bold; }
+.an-time-cursors .tc2 { color: #0055aa; font-weight: bold; }
+.an-time-cursors .tc-delta { color: #2a7a35; font-weight: bold; }
 #an-stats {
   display: flex; gap: 12px; padding: 4px 10px;
   background: #f8f8f8; border-bottom: 1px solid #ddd;
@@ -180,6 +193,36 @@ body { display: flex; flex-direction: column; }
 
 /* ── Progression acquisition temporelle ── */
 #an-canvas-wrap, #fft-canvas-wrap { position: relative; }
+
+/* Barre pan horizontal (desktop + tactile) — visible si zoomé */
+.graph-hscroll {
+  flex-shrink: 0;
+  height: 14px;
+  padding: 2px 8px 3px;
+  background: #ececec;
+  border-bottom: 1px solid #ccc;
+  box-sizing: border-box;
+}
+.graph-hscroll-track {
+  position: relative;
+  height: 8px;
+  margin-top: 1px;
+  background: #d0d0d0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.graph-hscroll-thumb {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 8px;
+  min-width: 28px;
+  background: #6a8aaa;
+  border-radius: 4px;
+  cursor: grab;
+  touch-action: none;
+}
+.graph-hscroll-thumb:active { cursor: grabbing; background: #4a6a8a; }
 .an-acq-overlay {
   position: absolute; inset: 0; z-index: 12;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -313,13 +356,16 @@ body { display: flex; flex-direction: column; }
   display: flex;
   align-items: center;
   gap: 10px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .calc-input-group label {
-  width: 130px;
+  width: 96px;
+  flex-shrink: 0;
   font-weight: bold;
   color: #333;
+  white-space: nowrap;
+  font-size: 13px;
 }
 
 .calc-input-group input {
@@ -565,6 +611,52 @@ body { display: flex; flex-direction: column; }
   font-family: 'Courier New', monospace;
 }
 .bal-pause-banner .bal-btn-run { flex-shrink: 0; }
+
+.bal-clip-warn {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  flex-shrink: 0;
+  background: #ffe8e0;
+  border-bottom: 1px solid #e0a090;
+  color: #6a2000;
+  font-size: 12px;
+  font-family: 'Courier New', monospace;
+}
+/* Chip SAT dans la bande RPM — pas de bande pleine largeur */
+.bal-meas-chip {
+  margin-left: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: bold;
+  letter-spacing: 0.06em;
+  border-radius: 3px;
+  background: #3d2a00;
+  color: #ffd080;
+  vertical-align: middle;
+}
+#bal-meas-clip.bal-mode-toggle--active {
+  border-color: #c45a00;
+  background: #fff4e8;
+  color: #8a3a00;
+}
+.bal-sat-result {
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px 10px;
+}
+.bal-sat-result .bal-sat-line {
+  margin: 4px 0;
+}
+.bal-sat-result .bal-sat-title {
+  font-weight: bold;
+  color: #8a3a00;
+  margin-bottom: 6px;
+}
+
 .bal-win-label {
   font-size: 11px;
   color: #666;
@@ -753,6 +845,45 @@ body { display: flex; flex-direction: column; }
   text-transform: uppercase;
   padding: 2px 0 0 2px;
 }
+.ham-cursor-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  padding: 4px 2px 2px;
+  align-items: flex-end;
+}
+.ham-field-col {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  min-width: 0;
+}
+.ham-field-col label {
+  width: auto;
+  font-size: 10px;
+  color: #aaa;
+  font-weight: normal;
+  letter-spacing: 0.02em;
+}
+.ham-field-col input {
+  flex: none;
+  width: 88px;
+  max-width: 100%;
+  text-align: center;
+  font-size: 13px;
+  padding: 6px 4px;
+}
+.ham-hint {
+  margin: 2px 0 4px;
+  font-size: 10px;
+  color: #888;
+  line-height: 1.3;
+}
+#btn-an-sel-mode.active {
+  background: #0066cc;
+  color: #fff;
+  border-color: #0055aa;
+}
 
 /* Champ label + input roulements */
 .ham-field {
@@ -764,10 +895,11 @@ body { display: flex; flex-direction: column; }
 .ham-field label {
   font-size: 11px;
   font-weight: bold;
-  width: 52px;
+  width: 64px;
   flex-shrink: 0;
   font-family: 'Courier New', monospace;
 }
+.ham-lbl-1x { color: #ffcc80; }
 
 .ham-field input {
   flex: 1;

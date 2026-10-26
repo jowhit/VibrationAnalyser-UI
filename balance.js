@@ -27,6 +27,18 @@ const BalanceModule = (() => {
   const BAL_LS_KEY = 'va_balance_v1';
   let _sessionPaused = false;
   let _espStateName = 'IDLE';
+  /** 'dft' | 'clip' — Normal ou Saturation (moniteur, pas de masse) */
+  let _measMode = 'dft';
+  let _clipWarnShown = false;
+  /** Runs moniteur Sat : [{phase,satPct,…}, …] index0 = Run 1 (réf) */
+  let _satRuns = [];
+  let _satPendingDummyR2 = false;
+  let _satPendingContinue = false;
+
+  const CLIP_THRESH = 30000;
+  const CLIP_WARN_FRAC = 0.02;
+  /** α min = 1° de plateau + pour basculer θ / branche 100–200 % */
+  const CLIP_MIN_ALPHA = 1 / 360;
 
   // ── Données 1P ───────────────────────────────────────────────
   let _run1=null, _run2=null, _runs1P=[];
@@ -88,10 +100,11 @@ const BalanceModule = (() => {
   const BAL_JUMP_THR = 0.45;        // distance phasor / amp_moy
   const BAL_JUMP_NEED = 2;          // 2 tours suspects d'affilée → reset
   let _winMax = 16;                 // 8 / 16 / 32 (opérateur)
-  let _winA = [];                   // {re,im}[]
+  let _winA = [];                   // {re,im,satPct}[]
   let _winB = [];
   let _avgRe=0, _avgIm=0, _tourCount=0;   // sommes / N fenêtre A
   let _avgReB=0, _avgImB=0, _tourCountB=0;
+  let _avgSatA=0, _avgSatB=0;
   let _warmA = 0, _warmB = 0;
   let _jumpA = 0, _jumpB = 0;
   let _suppressLiveTour = false;
@@ -140,6 +153,7 @@ const BalanceModule = (() => {
     return parseFloat(line.slice(i + key.length));
   }
   function _canSaveCoeff() {
+    if (_measMode === 'clip') return false; // moniteur Sat : pas d'ICM / masse
     if (_mode === '1P') return _influenceRatio > 0 && !!_run1 && !!_run2;
     // 2P : dès que la matrice est calculée (ne pas attendre _2pStep — ICM
     // est appelé AVANT _advanceStep sur la dernière capture)
@@ -271,6 +285,7 @@ const BalanceModule = (() => {
     _updateCoeffButtons();
     _updatePauseBanner();
     _updateWinButtons();
+    _updateMeasUi();
     sendFn('BAL_INIT\n');
   }
 
@@ -332,6 +347,7 @@ const BalanceModule = (() => {
     }
     if (!_sessionPaused) _startTachWatch();
     _updatePauseBanner();
+    _updateMeasUi();
     setTimeout(resize, 60);
   }
 
@@ -358,7 +374,7 @@ const BalanceModule = (() => {
 
   function _updateModeLock() {
     const lockTo1p = _is2PProcedureActive();
-    const lockTo2p = _is1PProcedureActive();
+    const lockTo2p = _is1PProcedureActive() || _measMode === 'clip';
     if (btnMode1p) {
       btnMode1p.disabled = lockTo1p;
       btnMode1p.classList.toggle('bal-mode-toggle--locked', lockTo1p);
@@ -369,13 +385,18 @@ const BalanceModule = (() => {
     if (btnMode2p) {
       btnMode2p.disabled = lockTo2p;
       btnMode2p.classList.toggle('bal-mode-toggle--locked', lockTo2p);
-      btnMode2p.title = lockTo2p
-        ? 'Procédure 1 plan en cours — Reset pour changer'
-        : 'Mode 2 plans';
+      btnMode2p.title = _measMode === 'clip'
+        ? 'Saturation = moniteur 1 plan uniquement'
+        : (lockTo2p
+          ? 'Procédure 1 plan en cours — Reset pour changer'
+          : 'Mode 2 plans');
     }
   }
 
   function setMode(mode) {
+    if (mode === '2P' && _measMode === 'clip') {
+      return; // Sat = 1P silencieux (toggles masqués)
+    }
     if (mode === '1P' && _is2PProcedureActive()) {
       setStatus('Procédure 2 plans en cours — Reset pour passer en 1 Plan', 'err');
       return;
@@ -403,10 +424,12 @@ const BalanceModule = (() => {
       setTimeout(() => { _resizeCnv('bal-canvas-wrap', _canvas1P); _drawPolar1P(); }, 60);
     }
     const duoLbl = _duo2P ? '2 Plans duo (A+B simultanés)' : '2 Plans (déplacement sonde)';
-    log('Mode: ' + (mode === '1P' ? '1 Plan' : duoLbl));
+    log('Mode: ' + (mode === '1P' ? '1 Plan' : duoLbl) +
+        (_measMode === 'clip' ? ' · SAT' : ''));
     _updateUI();
     _updateCoeffButtons();
     _updateModeLock();
+    _updateMeasUi();
   }
 
   function selectSensor() { /* réservé */ }
@@ -428,6 +451,175 @@ const BalanceModule = (() => {
     const amp=2*Math.sqrt(sc*sc+ss*ss);
     let ph=Math.atan2(ss,sc)*180/Math.PI; if(ph<0)ph+=360;
     return {amp,phase:ph};
+  }
+
+  /** Fraction samples saturés (|raw| >= CLIP_THRESH) — warning DFT. */
+  function _clipFrac(samples, N) {
+    let n = 0;
+    const lim = Math.min(N, samples.length);
+    for (let i = 0; i < lim; i++) {
+      if (Math.abs(samples[i]) >= CLIP_THRESH) n++;
+    }
+    return lim > 0 ? n / lim : 0;
+  }
+
+  /**
+   * Plateau positif (post-invert) : plus long îlot sample >= +CLIP_THRESH.
+   * Phase = milieu du plateau. α = bestLen/N.
+   */
+  function _clipPlateauPos(samples, N) {
+    let bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
+    const lim = Math.min(N, samples.length);
+    for (let i = 0; i < lim; i++) {
+      if (samples[i] >= CLIP_THRESH) {
+        if (curStart < 0) { curStart = i; curLen = 1; }
+        else curLen++;
+      } else {
+        if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+        curStart = -1; curLen = 0;
+      }
+    }
+    if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+    const alpha = lim > 0 ? bestLen / lim : 0;
+    if (bestStart < 0 || alpha < CLIP_MIN_ALPHA) {
+      return { ok: false, alpha: alpha, phase: 0 };
+    }
+    const mid = bestStart + bestLen / 2;
+    let phase = (mid / lim) * 360;
+    phase = ((phase % 360) + 360) % 360;
+    return { ok: true, alpha: alpha, phase: phase };
+  }
+
+  /** Plein échelle g pour branche non-sat : 16 g → 100 %. */
+  const SAT_G_FULL = 16;
+
+  /**
+   * Échelle moniteur unifiée (toujours comparable pour Δamp%) :
+   *   0…16 g     → 0…100 %   (DFT, pas de plateau)
+   *   1…180 °    → 100…200 % (durée angulaire plateau +)
+   */
+  function _ampPctHybrid(ampG, satDeg, plateauOk) {
+    if (plateauOk && satDeg >= 1) {
+      return Math.min(200, 100 + (Math.min(180, satDeg) / 180) * 100);
+    }
+    return Math.min(100, Math.max(0, (ampG / SAT_G_FULL) * 100));
+  }
+
+  /**
+   * Hybrid : plateau+ OK → θ mid+, ampPct 100–200 ; sinon DFT θ + ampPct 0–100.
+   * amp (polar) = toujours ampG DFT.
+   */
+  function _tourFromSamples(samples, range, n) {
+    const dft = _dft1X(samples, range, n);
+    if (_measMode !== 'clip') {
+      const frac = _clipFrac(samples, n);
+      if (frac >= CLIP_WARN_FRAC) _showClipWarn(frac);
+      return { amp: dft.amp, phase: dft.phase, satPct: 0, satDeg: 0, ampUnit: 'g', ampG: dft.amp };
+    }
+    const c = _clipPlateauPos(samples, n);
+    const satDeg = c.alpha * 360;
+    const satPct = _ampPctHybrid(dft.amp, satDeg, c.ok);
+    if (c.ok) {
+      return {
+        amp: dft.amp, phase: c.phase,
+        satPct: satPct, satDeg: satDeg,
+        ampUnit: 'pct', ampG: dft.amp
+      };
+    }
+    return {
+      amp: dft.amp, phase: dft.phase,
+      satPct: satPct, satDeg: satDeg,
+      ampUnit: 'pct', ampG: dft.amp
+    };
+  }
+
+  function _showBalMain() {
+    const sel = document.getElementById('bal-mode-select');
+    const main = document.getElementById('bal-main');
+    if (sel) sel.style.display = 'none';
+    if (main) main.style.display = 'flex';
+  }
+
+  function setMeasMode(mode) {
+    if (hasProgress() && !_sessionPaused) {
+      setStatus('Reset la procédure pour changer Normal/Saturation', 'err');
+      _updateMeasUi();
+      return;
+    }
+    _measMode = (mode === 'clip') ? 'clip' : 'dft';
+    _clipWarnShown = false;
+    _hideClipWarn();
+    _satRuns = [];
+    _satPendingDummyR2 = false;
+    _satPendingContinue = false;
+    // Sat = moniteur 1P direct — pas d'écran « 1 plan uniquement »
+    if (_measMode === 'clip') {
+      _showBalMain();
+      if (_mode !== '1P') setMode('1P');
+      setStatus('Moniteur Saturation — Run 1 (réf) puis runs', 'ok');
+    }
+    _updateMeasUi();
+    _updateSatLegend();
+    log('Mesure: ' + (_measMode === 'clip' ? 'Saturation (moniteur)' : 'Normal (DFT)'));
+  }
+
+  function _updateSatLegend() {
+    const leg = document.querySelector('#bal-layout-1p .bal-legend');
+    if (!leg) return;
+    leg.innerHTML =
+      '<span class="bal-leg-item"><span class="bal-leg-dot" style="background:#1a6fc4"></span>R1</span>' +
+      '<span class="bal-leg-item"><span class="bal-leg-dot" style="background:#2a8a3e"></span>R2</span>' +
+      '<span class="bal-leg-item"><span class="bal-leg-dot" style="background:#c45a00"></span>Rn</span>';
+  }
+
+  function _updateMeasUi() {
+    const dft = document.getElementById('bal-meas-dft');
+    const clip = document.getElementById('bal-meas-clip');
+    if (dft) dft.classList.toggle('bal-mode-toggle--active', _measMode === 'dft');
+    if (clip) clip.classList.toggle('bal-mode-toggle--active', _measMode === 'clip');
+    const badge = document.getElementById('bal-meas-badge');
+    if (badge) badge.style.display = (_measMode === 'clip') ? 'inline' : 'none';
+    const sat = (_measMode === 'clip');
+    // Cmdbar : pas de 1P/2P/Save en Sat (inutile / pollue)
+    if (btnMode1p) btnMode1p.style.display = sat ? 'none' : '';
+    if (btnMode2p) {
+      btnMode2p.style.display = sat ? 'none' : '';
+      btnMode2p.disabled = sat;
+      if (sat) btnMode2p.classList.remove('bal-mode-toggle--active');
+    }
+    if (btnSaveCoeff) btnSaveCoeff.style.display = sat ? 'none' : '';
+    const btn2p = document.getElementById('bal-mode-btn-2p');
+    if (btn2p) btn2p.style.display = sat ? 'none' : '';
+    _updateSatLegend();
+  }
+
+  function _showClipWarn(frac) {
+    if (_clipWarnShown || _measMode === 'clip') return;
+    _clipWarnShown = true;
+    const el = document.getElementById('bal-clip-warn');
+    const txt = document.getElementById('bal-clip-warn-txt');
+    if (txt) {
+      txt.textContent = 'Saturation ~' + Math.round(frac * 100) +
+        '% — quitter et relancer en mode Saturation (clip)';
+    }
+    if (el) {
+      el.style.display = 'flex';
+      el.setAttribute('aria-hidden', 'false');
+    }
+    log('⚠ Saturation détectée (DFT) — relancer en mode Saturation');
+    setStatus('Saturation sonde — mode Saturation requis', 'err');
+  }
+
+  function dismissClipWarn() {
+    _hideClipWarn();
+  }
+
+  function _hideClipWarn() {
+    const el = document.getElementById('bal-clip-warn');
+    if (el) {
+      el.style.display = 'none';
+      el.setAttribute('aria-hidden', 'true');
+    }
   }
 
   // ════════════════════════════════════════════════════════════
@@ -522,26 +714,37 @@ const BalanceModule = (() => {
     const win = isA ? _winA : _winB;
     while (win.length > _winMax) {
       const old = win.shift();
-      if (isA) { _avgRe -= old.re; _avgIm -= old.im; _tourCount = win.length; }
-      else { _avgReB -= old.re; _avgImB -= old.im; _tourCountB = win.length; }
+      if (isA) {
+        _avgRe -= old.re; _avgIm -= old.im; _avgSatA -= (old.satPct || 0);
+        _tourCount = win.length;
+      } else {
+        _avgReB -= old.re; _avgImB -= old.im; _avgSatB -= (old.satPct || 0);
+        _tourCountB = win.length;
+      }
     }
   }
 
   function _clearWindow(ch) {
     if (ch === 'A') {
-      _winA = []; _avgRe = 0; _avgIm = 0; _tourCount = 0; _jumpA = 0;
+      _winA = []; _avgRe = 0; _avgIm = 0; _avgSatA = 0; _tourCount = 0; _jumpA = 0;
     } else {
-      _winB = []; _avgReB = 0; _avgImB = 0; _tourCountB = 0; _jumpB = 0;
+      _winB = []; _avgReB = 0; _avgImB = 0; _avgSatB = 0; _tourCountB = 0; _jumpB = 0;
     }
+  }
+
+  function _fmtTourLine(amp, phase, satPct) {
+    let s = amp.toFixed(3) + 'g @' + Math.round(phase) + '°';
+    if (_measMode === 'clip') s += ' amp=' + (satPct || 0).toFixed(1) + '%';
+    return s;
   }
 
   /**
    * Ajoute un tour à la moyenne (fenêtre + chauffe + reset phasor).
-   * Reset phasor = distance complexe / amp — coût négligeable.
-   * @returns {{amp:number,phase:number}|null} moyenne courante
+   * amp = ampG (polar). satPct optionnel (mode Sat).
    */
-  function _pushTourAvg(ch, amp, phase) {
+  function _pushTourAvg(ch, amp, phase, satPct) {
     const isA = ch === 'A';
+    const sat = satPct || 0;
     const re = amp * Math.cos(phase * Math.PI / 180);
     const im = amp * Math.sin(phase * Math.PI / 180);
     const tag = isA ? (_isDuo2P() ? 'A' : '') : 'B';
@@ -550,7 +753,7 @@ const BalanceModule = (() => {
       if (isA) _warmA--; else _warmB--;
       const left = isA ? _warmA : _warmB;
       log('T' + tag + ' chauffe (' + (BAL_WARMUP - left) + '/' + BAL_WARMUP +
-          ')  ' + amp.toFixed(3) + 'g @' + Math.round(phase) + '°');
+          ')  ' + _fmtTourLine(amp, phase, sat));
       return isA ? _getLiveAvg() : _getLiveAvgB();
     }
 
@@ -578,21 +781,21 @@ const BalanceModule = (() => {
     const win = isA ? _winA : _winB;
     if (win.length >= _winMax) {
       const old = win.shift();
-      if (isA) { _avgRe -= old.re; _avgIm -= old.im; }
-      else { _avgReB -= old.re; _avgImB -= old.im; }
+      if (isA) { _avgRe -= old.re; _avgIm -= old.im; _avgSatA -= (old.satPct || 0); }
+      else { _avgReB -= old.re; _avgImB -= old.im; _avgSatB -= (old.satPct || 0); }
     }
-    win.push({ re: re, im: im });
+    win.push({ re: re, im: im, satPct: sat });
     if (isA) {
-      _avgRe += re; _avgIm += im; _tourCount = win.length;
+      _avgRe += re; _avgIm += im; _avgSatA += sat; _tourCount = win.length;
     } else {
-      _avgReB += re; _avgImB += im; _tourCountB = win.length;
+      _avgReB += re; _avgImB += im; _avgSatB += sat; _tourCountB = win.length;
     }
 
     const avg = isA ? _getLiveAvg() : _getLiveAvgB();
     if (avg) {
-      log('T' + tag + _tourCountFor(ch) + '  ' + amp.toFixed(3) + 'g @' + Math.round(phase) +
-          '°  →  Moy(' + _tourCountFor(ch) + '/' + _winMax + '): ' +
-          avg.amp.toFixed(3) + 'g @' + Math.round(avg.phase) + '°');
+      log('T' + tag + _tourCountFor(ch) + '  ' + _fmtTourLine(amp, phase, sat) +
+          '  →  Moy(' + _tourCountFor(ch) + '/' + _winMax + '): ' +
+          _fmtTourLine(avg.amp, avg.phase, avg.satPct));
     }
     return avg;
   }
@@ -602,8 +805,9 @@ const BalanceModule = (() => {
   function onTourBinary(rpm,range,n,samples) {
     if(![S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING].includes(state)) return;
     if (_suppressLiveTour) return;
-    const {amp,phase}=_dft1X(samples,range,n);
-    const avg=_pushTourAvg('A', amp, phase);
+    const ph=_tourFromSamples(samples,range,n);
+    if (!ph) return;
+    const avg=_pushTourAvg('A', ph.amp, ph.phase, ph.satPct);
     _updateRpm(rpm);
     if (!avg) {
       if (_mode==='1P') _drawPolar1P();
@@ -632,8 +836,9 @@ const BalanceModule = (() => {
     if (!_isDuo2P()) return;
     if(![S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING].includes(state)) return;
     if (_suppressLiveTour) return;
-    const {amp,phase}=_dft1X(samples,range,n);
-    const avg=_pushTourAvg('B', amp, phase);
+    const ph=_tourFromSamples(samples,range,n);
+    if (!ph) return;
+    const avg=_pushTourAvg('B', ph.amp, ph.phase, ph.satPct);
     _updateRpm(rpm);
     if (avg) _drawLivePolar(_ctxB,_canvasB,_polarPtsB,avg.amp,avg.phase,_tourCountB);
     else _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
@@ -653,23 +858,29 @@ const BalanceModule = (() => {
     return def?def.sensor:null;
   }
 
+  function _liveFromSums(re, im, satSum, count) {
+    if (count === 0) return null;
+    const amp = Math.sqrt(re * re + im * im) / count;
+    let ph = Math.atan2(im, re) * 180 / Math.PI; if (ph < 0) ph += 360;
+    const satPct = satSum / count;
+    // satDeg approximé depuis ampPct si ≥100 (branche plateau)
+    const satDeg = satPct >= 100 ? ((satPct - 100) / 100) * 180 : 0;
+    return {
+      amp: amp, phase: ph, satPct: satPct, satDeg: satDeg,
+      ampUnit: _measMode === 'clip' ? 'pct' : 'g', ampG: amp
+    };
+  }
   function _getLiveAvg() {
-    if (_tourCount===0) return null;
-    const amp=Math.sqrt(_avgRe*_avgRe+_avgIm*_avgIm)/_tourCount;
-    let ph=Math.atan2(_avgIm,_avgRe)*180/Math.PI; if(ph<0)ph+=360;
-    return {amp,phase:ph};
+    return _liveFromSums(_avgRe, _avgIm, _avgSatA, _tourCount);
   }
   function _getLiveAvgB() {
-    if (_tourCountB===0) return null;
-    const amp=Math.sqrt(_avgReB*_avgReB+_avgImB*_avgImB)/_tourCountB;
-    let ph=Math.atan2(_avgImB,_avgReB)*180/Math.PI; if(ph<0)ph+=360;
-    return {amp,phase:ph};
+    return _liveFromSums(_avgReB, _avgImB, _avgSatB, _tourCountB);
   }
 
   function _resetAvg() {
     _winA = []; _winB = [];
-    _avgRe=0; _avgIm=0; _tourCount=0;
-    _avgReB=0; _avgImB=0; _tourCountB=0;
+    _avgRe=0; _avgIm=0; _avgSatA=0; _tourCount=0;
+    _avgReB=0; _avgImB=0; _avgSatB=0; _tourCountB=0;
     _warmA = BAL_WARMUP; _warmB = BAL_WARMUP;
     _jumpA = 0; _jumpB = 0;
     if (_mode==='2P') _drawAll2P(); else _drawPolar1P();
@@ -751,6 +962,7 @@ const BalanceModule = (() => {
   // ── MODE 1P ─────────────────────────────────────────────────
   function _doRun1P() {
     if (state===S.R2_CONFIG) {
+      if (_measMode === 'clip') return; // auto BAL_R2 dummy
       const mass=parseFloat(inMass.value), ang=parseFloat(inAngle.value)||0;
       if (!mass||mass<=0){setStatus('Entrez une masse > 0','err');return;}
       _testMass1P=mass; _testAngle1P=ang;
@@ -762,14 +974,118 @@ const BalanceModule = (() => {
       return;
     }
     if ([S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING].includes(state)){_accept1P();return;}
-    if (state===S.CORRECTION){_resetAvg();_balSend('BAL_ACCEPT');return;}
+    if (state===S.CORRECTION){
+      if (_measMode === 'clip') return; // auto continue
+      _resetAvg();_balSend('BAL_ACCEPT');return;
+    }
     _suppressLiveTour = false;
     _resetAvg(); _balSend('BAL_RUN'); log('→ BAL_RUN');
+  }
+
+  function _snapFromAvg(avg) {
+    return {
+      phase: avg.phase,
+      satPct: avg.satPct || 0,
+      satDeg: avg.satDeg != null ? avg.satDeg : (avg.satPct || 0) * 1.8,
+      ampG: avg.ampG != null ? avg.ampG : avg.amp,
+      ampUnit: avg.ampUnit || 'g',
+      amp: avg.amp
+    };
+  }
+
+  function _deltaPhase(a, b) {
+    let d = a - b;
+    while (d > 180) d -= 360;
+    while (d < -180) d += 360;
+    return d;
+  }
+
+  /** Δamp% sur échelle unifiée ampPct (0–200). */
+  function _deltaAmpPct(cur, ref) {
+    if (!cur || !ref) return null;
+    const a = cur.satPct;
+    const b = ref.satPct;
+    if (b == null || Math.abs(b) < 1e-12) return null;
+    return ((a - b) / Math.abs(b)) * 100;
+  }
+
+  function _fmtSnapBrief(s) {
+    let t = 'θ=' + s.phase.toFixed(1) + '°  amp=' + s.satPct.toFixed(1) + '%';
+    if (s.satDeg >= 1) t += ' (plateau ' + s.satDeg.toFixed(1) + '°)';
+    else t += ' (g=' + s.ampG.toFixed(3) + ')';
+    return t;
+  }
+
+  function _fmtDeltaPart(label, cur, ref) {
+    if (!ref) return '';
+    const dTh = _deltaPhase(cur.phase, ref.phase);
+    const dAmp = _deltaAmpPct(cur, ref);
+    let t = label + ' Δθ=' + (dTh >= 0 ? '+' : '') + dTh.toFixed(1) + '°';
+    if (dAmp != null) t += ' Δamp=' + (dAmp >= 0 ? '+' : '') + dAmp.toFixed(1) + '%';
+    else t += ' Δamp=—';
+    return t;
+  }
+
+  function _satRunLabel(idx0) { return 'R' + (idx0 + 1); }
+
+  function _renderSatResults() {
+    if (!resultEl || !_satRuns.length) return;
+    let html = '<div class="bal-sat-result"><div class="bal-sat-title">Moniteur Saturation</div>';
+    for (let i = 0; i < _satRuns.length; i++) {
+      const s = _satRuns[i];
+      let line = _satRunLabel(i) + '  ' + _fmtSnapBrief(s);
+      if (i > 0) {
+        line += '  |  ' + _fmtDeltaPart('vs R1', s, _satRuns[0]);
+        if (i > 1) line += '  |  ' + _fmtDeltaPart('vs ' + _satRunLabel(i - 1), s, _satRuns[i - 1]);
+      }
+      html += '<div class="bal-sat-line">' + line + '</div>';
+    }
+    html += '</div>';
+    resultEl.innerHTML = html;
+  }
+
+  function _accept1PSat(avg) {
+    const snap = _snapFromAvg(avg);
+    if (state === S.RUN1_RUNNING) {
+      _satRuns = [snap];
+      _run1 = { amp: snap.ampG, phase: snap.phase };
+      _pushPts(_runs1P, 1, snap.ampG, snap.phase, '#1a6fc4');
+      log('✓ R1 (réf): ' + _fmtSnapBrief(snap));
+      setStatus('R1 capturée — Run suivant', 'ok');
+      _renderSatResults();
+      _drawPolar1P();
+      _hideMassInput();
+      _suppressLiveTour = true;
+      _satPendingDummyR2 = true;
+      _resetAvg();
+      _balSend('BAL_ACCEPT');
+      persistSession();
+    } else if (state === S.RUN2_RUNNING || state === S.RUNX_RUNNING) {
+      _satRuns.push(snap);
+      const n = _satRuns.length; // 1-based display = length after push
+      const col = n === 2 ? '#2a8a3e' : '#c45a00';
+      _pushPts(_runs1P, n, snap.ampG, snap.phase, col);
+      log('✓ ' + _satRunLabel(n - 1) + ': ' + _fmtSnapBrief(snap) +
+        '  |  ' + _fmtDeltaPart('vs R1', snap, _satRuns[0]) +
+        (n > 2 ? '  |  ' + _fmtDeltaPart('vs ' + _satRunLabel(n - 2), snap, _satRuns[n - 2]) : ''));
+      setStatus(_satRunLabel(n - 1) + ' capturée', 'ok');
+      _renderSatResults();
+      _drawPolar1P();
+      _hideMassInput();
+      _suppressLiveTour = true;
+      if (state === S.RUN2_RUNNING) _satPendingContinue = true;
+      _resetAvg();
+      _balSend('BAL_ACCEPT');
+      persistSession();
+    }
+    _updateUI();
+    _updateCoeffButtons();
   }
 
   function _accept1P() {
     const avg=_getLiveAvg();
     if (!avg||_tourCount<1){setStatus('Attendre au moins 1 tour','err');return;}
+    if (_measMode === 'clip') { _accept1PSat(avg); return; }
     if (state===S.RUN1_RUNNING) {
       _run1=avg; _pushPts(_runs1P,1,avg.amp,avg.phase,'#1a6fc4');
       log('✓ R1: '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°');
@@ -1176,23 +1492,53 @@ const BalanceModule = (() => {
     }
 
     if (_mode==='1P') {
-      const labels={
-        [S.IDLE]:'Prêt — cliquer Démarrer pour estimer le RPM',
-        [S.RPM_SCAN]:'Estimation RPM en cours — attendre le tach…',
-        [S.RUN1_READY]:'Run 1 (sans masse) — cliquer Run 1 ▶',
-        [S.RUN1_RUNNING]:'Run 1 — attendre stabilité puis Capturer',
-        [S.R2_CONFIG]:'⛔ Arrêter le rotor — saisir masse et angle d\'essai',
-        [S.RUN2_READY]:'Masse installée — cliquer Run 2 ▶',
-        [S.RUN2_RUNNING]:'Run 2 — attendre stabilité puis Capturer',
-        [S.CORRECTION]:'✓ Correction calculée — Continuer pour RunX',
-        [S.RUNX_READY]:'Run vérif — cliquer Run vérif ▶',
-        [S.RUNX_RUNNING]:'Run vérif — attendre stabilité puis Capturer'
-      };
-      const isWait=[S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING,S.RPM_SCAN,S.R2_CONFIG].includes(state);
-      const isOk=[S.IDLE,S.RUN1_READY,S.RUN2_READY,S.RUNX_READY,S.CORRECTION].includes(state);
-      setStatus(labels[state]||name,isWait?'wait':isOk?'ok':'');
-      if (state === S.R2_CONFIG) _showMassInput('Masse et angle essai');
-      else _hideMassInput();
+      if (_measMode === 'clip') {
+        if (state === S.R2_CONFIG && _satPendingDummyR2) {
+          _satPendingDummyR2 = false;
+          _hideMassInput();
+          setTimeout(function () { _balSend('BAL_R2 MASS=1 ANG=0'); }, 150);
+          setStatus('R1 OK — préparation Run suivant…', 'wait');
+        } else if (state === S.CORRECTION && _satPendingContinue) {
+          _satPendingContinue = false;
+          setTimeout(function () { _resetAvg(); _balSend('BAL_ACCEPT'); }, 150);
+          setStatus('Passage runs suivants…', 'wait');
+        } else {
+          const labelsSat = {
+            [S.IDLE]: 'Sat — Démarrer pour estimer le RPM',
+            [S.RPM_SCAN]: 'Estimation RPM…',
+            [S.RUN1_READY]: 'Run 1 (réf) — cliquer Run 1 ▶',
+            [S.RUN1_RUNNING]: 'Run 1 — stabilité puis Capturer',
+            [S.R2_CONFIG]: 'Passage Run suivant…',
+            [S.RUN2_READY]: 'Run suivant — cliquer Run ▶',
+            [S.RUN2_RUNNING]: 'Run — stabilité puis Capturer',
+            [S.CORRECTION]: 'Passage runs suivants…',
+            [S.RUNX_READY]: 'Run suivant — cliquer Run ▶',
+            [S.RUNX_RUNNING]: 'Run — stabilité puis Capturer'
+          };
+          const isWait = [S.RUN1_RUNNING, S.RUN2_RUNNING, S.RUNX_RUNNING, S.RPM_SCAN, S.R2_CONFIG, S.CORRECTION].includes(state);
+          const isOk = [S.IDLE, S.RUN1_READY, S.RUN2_READY, S.RUNX_READY].includes(state);
+          setStatus(labelsSat[state] || name, isWait ? 'wait' : isOk ? 'ok' : '');
+        }
+        _hideMassInput();
+      } else {
+        const labels={
+          [S.IDLE]:'Prêt — cliquer Démarrer pour estimer le RPM',
+          [S.RPM_SCAN]:'Estimation RPM en cours — attendre le tach…',
+          [S.RUN1_READY]:'Run 1 (sans masse) — cliquer Run 1 ▶',
+          [S.RUN1_RUNNING]:'Run 1 — attendre stabilité puis Capturer',
+          [S.R2_CONFIG]:'⛔ Arrêter le rotor — saisir masse et angle d\'essai',
+          [S.RUN2_READY]:'Masse installée — cliquer Run 2 ▶',
+          [S.RUN2_RUNNING]:'Run 2 — attendre stabilité puis Capturer',
+          [S.CORRECTION]:'✓ Correction calculée — Continuer pour RunX',
+          [S.RUNX_READY]:'Run vérif — cliquer Run vérif ▶',
+          [S.RUNX_RUNNING]:'Run vérif — attendre stabilité puis Capturer'
+        };
+        const isWait=[S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING,S.RPM_SCAN,S.R2_CONFIG].includes(state);
+        const isOk=[S.IDLE,S.RUN1_READY,S.RUN2_READY,S.RUNX_READY,S.CORRECTION].includes(state);
+        setStatus(labels[state]||name,isWait?'wait':isOk?'ok':'');
+        if (state === S.R2_CONFIG) _showMassInput('Masse et angle essai');
+        else _hideMassInput();
+      }
     } else {
       // Mode 2P — transitions ESP
       // Mono déplacement : dummy R2 après 1ʳᵉ paire. Duo : masse A réelle (sendR2).
@@ -1256,6 +1602,9 @@ const BalanceModule = (() => {
     _run1 = null; _run2 = null; _runs1P = []; _runXcount = 2;
     _testMass1P = 0; _testAngle1P = 0;
     _saveOfferedThisProc = false;
+    _satRuns = [];
+    _satPendingDummyR2 = false;
+    _satPendingContinue = false;
     if (!keepCoeff) {
       _influenceRatio = 0; _phaseShift = 0; _influence2P = null;
       _coeffLoaded = false;
@@ -1265,6 +1614,8 @@ const BalanceModule = (() => {
     _runXData = {};
     _2pStep = 0; _polarPtsA = []; _polarPtsB = [];
     _suppressLiveTour = false;
+    _clipWarnShown = false;
+    _hideClipWarn();
     _resetAvg();
     _zeroAllRpmDisplays();
     if (resultEl) resultEl.innerHTML = '';
@@ -1278,6 +1629,7 @@ const BalanceModule = (() => {
     _resetStatusBars();
     _setSensor2P(null);
     _pending2pCapt = null;
+    _updateMeasUi();
     if (_mode === '2P') _update2PStatus();
     _updateUI();
     _updateCoeffButtons();
@@ -1435,11 +1787,21 @@ const BalanceModule = (() => {
     if (_mode==='1P') {
       const running=[S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING];
       const ready=[S.IDLE,S.RUN1_READY,S.RUN2_READY,S.RUNX_READY];
-      btnRun.disabled=![...running,...ready,S.R2_CONFIG,S.CORRECTION].includes(state);
-      const lbl={[S.IDLE]:'Démarrer',[S.RUN1_READY]:'Run 1  ▶',[S.RUN1_RUNNING]:'✓ Capturer',
-        [S.R2_CONFIG]:'📦 Valider masse essai',[S.RUN2_READY]:'Run 2  ▶',[S.RUN2_RUNNING]:'✓ Capturer',
-        [S.CORRECTION]:'▶ Continuer',[S.RUNX_READY]:'Run vérif  ▶',[S.RUNX_RUNNING]:'✓ Capturer',[S.RPM_SCAN]:'Scan RPM…'};
-      btnRun.textContent=lbl[state]||'Run ▶';
+      if (_measMode === 'clip') {
+        btnRun.disabled = ![...running, ...ready].includes(state);
+        const lblSat = {
+          [S.IDLE]: 'Démarrer', [S.RUN1_READY]: 'Run 1  ▶', [S.RUN1_RUNNING]: '✓ Capturer',
+          [S.RUN2_READY]: 'Run  ▶', [S.RUN2_RUNNING]: '✓ Capturer',
+          [S.RUNX_READY]: 'Run  ▶', [S.RUNX_RUNNING]: '✓ Capturer', [S.RPM_SCAN]: 'Scan RPM…'
+        };
+        btnRun.textContent = lblSat[state] || 'Run ▶';
+      } else {
+        btnRun.disabled=![...running,...ready,S.R2_CONFIG,S.CORRECTION].includes(state);
+        const lbl={[S.IDLE]:'Démarrer',[S.RUN1_READY]:'Run 1  ▶',[S.RUN1_RUNNING]:'✓ Capturer',
+          [S.R2_CONFIG]:'📦 Valider masse essai',[S.RUN2_READY]:'Run 2  ▶',[S.RUN2_RUNNING]:'✓ Capturer',
+          [S.CORRECTION]:'▶ Continuer',[S.RUNX_READY]:'Run vérif  ▶',[S.RUNX_RUNNING]:'✓ Capturer',[S.RPM_SCAN]:'Scan RPM…'};
+        btnRun.textContent=lbl[state]||'Run ▶';
+      }
     } else {
       const def=_getStepDef(_2pStep);
       if (!def){btnRun.disabled=true;btnRun.textContent='Terminé ✓';return;}
@@ -1511,7 +1873,7 @@ const BalanceModule = (() => {
 
   function hasProgress() {
     if (_mode === '1P') {
-      return !!_run1 || !!_run2 || _influenceRatio > 0 ||
+      return !!_run1 || !!_run2 || _influenceRatio > 0 || _satRuns.length > 0 ||
         [S.RUN1_READY, S.RUN1_RUNNING, S.R2_CONFIG, S.RUN2_READY, S.RUN2_RUNNING,
          S.CORRECTION, S.RUNX_READY, S.RUNX_RUNNING, S.RPM_SCAN].includes(state);
     }
@@ -1530,6 +1892,8 @@ const BalanceModule = (() => {
       v: 1,
       paused: _sessionPaused,
       mode: _mode,
+      measMode: _measMode,
+      satRuns: _satRuns,
       duo: !!_duo2P,
       probe: (typeof ProbeMode !== 'undefined') ? ProbeMode.get() : null,
       espState: _normalizeEspStateName(_espStateName || state),
@@ -1581,6 +1945,8 @@ const BalanceModule = (() => {
   function _applySnapshot(o) {
     if (!o) return;
     _mode = o.mode === '2P' ? '2P' : '1P';
+    _measMode = o.measMode === 'clip' ? 'clip' : 'dft';
+    _satRuns = Array.isArray(o.satRuns) ? o.satRuns : [];
     _duo2P = !!o.duo;
     _sessionPaused = !!o.paused;
     _espStateName = o.espState || 'IDLE';
@@ -1611,6 +1977,7 @@ const BalanceModule = (() => {
     _updateUI();
     _updateCoeffButtons();
     _updatePauseBanner();
+    _updateMeasUi();
   }
 
   function _restoreFromStorageIfAny() {
@@ -1742,9 +2109,11 @@ const BalanceModule = (() => {
 
   return {
     init, enterBalance, onData, onTourBinary, onTourBinaryB, onRpmB,
-    setMode, selectMode, resize, clearSession, selectSensor,
+    setMode, selectMode, setMeasMode, dismissClipWarn,
+    resize, clearSession, selectSensor,
     hasProgress, persistSession, pauseForLeave, resumeSession,
     discardSession, prepareNewFromMenu, setWinMax, copyLog,
     isPaused: function () { return !!_sessionPaused; },
+    getMeasMode: function () { return _measMode; },
   };
 })();

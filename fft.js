@@ -383,6 +383,7 @@ function fftDraw() {
     ctx.fillStyle = _fftPrimaryColor();
     ctx.fillText(tag, P.l + 6, P.t + 12);
   }
+  if (typeof _fftSyncHScroll === 'function') _fftSyncHScroll();
 }
 
 // ── Touch FFT ────────────────────────────────────────────────
@@ -527,43 +528,67 @@ function _fftDrawLongArc() {
 // ── Placement curseur ─────────────────────────────────────────
 function _fftDrawHarmonics(ctx, mag, bin1, rpmPB, zMin, span,
                             pW, pH, P, W, aS, minB, maxB) {
-  const harmonics = [
-    { mult: 1, color: '#cc0000', dash: [3,2], label: '1x' },
-    { mult: 2, color: '#7700cc', dash: [5,2], label: '2x' },
-    { mult: 3, color: '#cc5500', dash: [5,2], label: '3x' },
-  ];
-
-  harmonics.forEach(({ mult, color, dash, label }) => {
-    const bin = bin1 * mult;
-    if (bin < 1 || bin > maxB) return;
-    const rpm = bin * rpmPB;
+  // Réutilise les prefs hamburger Analyse si présentes
+  let nHarm = (typeof anHarmN === 'number') ? anHarmN : 3;
+  let nSb = (typeof anSbN === 'number') ? anSbN : 0;
+  let dSb = (typeof anSbDelta === 'number') ? anSbDelta : 60;
+  if (typeof _anReadCursorPrefs === 'function') _anReadCursorPrefs();
+  nHarm = (typeof anHarmN === 'number') ? Math.min(10, anHarmN) : nHarm;
+  nSb = (typeof anSbN === 'number') ? Math.min(5, anSbN) : nSb;
+  dSb = (typeof anSbDelta === 'number') ? anSbDelta : dSb;
+  const cols = (typeof AN_HARM_COLS !== 'undefined') ? AN_HARM_COLS
+    : ['#cc0000','#7700cc','#cc5500','#0066aa','#2a8a3e','#aa8800','#8e24aa','#555','#c62828','#1565c0'];
+  const sbCol = (typeof AN_SB_COL !== 'undefined') ? AN_SB_COL : '#008877';
+  const rpm1 = bin1 * rpmPB;
+  const kind = (typeof anCursorKind === 'string') ? anCursorKind : 'harm';
+  const marks = [];
+  if (kind !== 'sb') {
+    for (let m = 1; m <= nHarm; m++) {
+      marks.push({ rpm: rpm1 * m, color: cols[(m - 1) % cols.length], dash: m === 1 ? [3, 2] : [5, 2], label: m + 'x', bold: m === 1, sb: false });
+    }
+  } else {
+    marks.push({ rpm: rpm1, color: cols[0], dash: [3, 2], label: '1x', bold: true, sb: false });
+    for (let k = 1; k <= nSb; k++) {
+      marks.push({ rpm: rpm1 - dSb * k, color: sbCol, dash: [2, 3], label: '−' + k + 'Δ', bold: false, sb: true });
+      marks.push({ rpm: rpm1 + dSb * k, color: sbCol, dash: [2, 3], label: '+' + k + 'Δ', bold: false, sb: true });
+    }
+  }
+  let slot = 0;
+  marks.forEach(({ rpm, color, dash, label, bold, sb }) => {
     if (rpm < zMin || rpm > zMin + span) return;
-
-    const x  = P.l + (rpm - zMin) / span * pW;
-    const y  = P.t + pH - mag[bin] * aS;
-
-    ctx.strokeStyle = color; ctx.lineWidth = 1;
+    const bin = Math.round(rpm / rpmPB);
+    if (bin < 1 || bin > maxB || bin >= mag.length) return;
+    const x = P.l + (rpm - zMin) / span * pW;
+    const y = P.t + pH - mag[bin] * aS;
+    ctx.strokeStyle = color; ctx.lineWidth = bold ? 1.4 : 1;
     ctx.setLineDash(dash);
     ctx.beginPath(); ctx.moveTo(x, P.t); ctx.lineTo(x, P.t + pH); ctx.stroke();
     ctx.setLineDash([]);
-
     ctx.fillStyle = color;
-    ctx.beginPath(); ctx.arc(x, y, mult === 1 ? 4 : 3, 0, 2*Math.PI); ctx.fill();
-
-    const amp   = mag[bin].toFixed(mult === 1 ? 4 : 3);
-    const lines = [label + ' ' + rpm.toFixed(0) + ' RPM', amp];
-    ctx.font = (mult === 1 ? 'bold ' : '') + '9px Arial';
-    const tw = Math.max(...lines.map(l => ctx.measureText(l).width));
-    const bw = tw + 6, bh = lines.length * 12 + 3;
-    const yOff = mult === 1 ? P.t + 16 : mult === 2 ? P.t + 40 : P.t + 64;
-    const bx   = (x + bw + 4 > W - P.r) ? x - bw - 4 : x + 3;
-
-    ctx.fillStyle = 'rgba(255,255,220,0.92)';
-    ctx.fillRect(bx, yOff, bw, bh);
-    ctx.strokeStyle = color; ctx.lineWidth = 0.7;
-    ctx.strokeRect(bx, yOff, bw, bh);
-    ctx.fillStyle = color; ctx.textAlign = 'left';
-    lines.forEach((l, i) => ctx.fillText(l, bx + 3, yOff + 10 + i * 12));
+    ctx.beginPath(); ctx.arc(x, y, bold ? 4 : 3, 0, 2 * Math.PI); ctx.fill();
+    if (label === '1x' || label === '−1Δ' || label === '+1Δ') {
+      const amp = mag[bin].toFixed(bold ? 4 : 3);
+      let line1;
+      if (sb) {
+        const dRpm = rpm - rpm1;
+        line1 = (dRpm >= 0 ? '+' : '') + dRpm.toFixed(0) + ' RPM';
+      } else {
+        line1 = label + ' ' + rpm.toFixed(0) + ' RPM';
+      }
+      const lines = [line1, amp];
+      ctx.font = (bold ? 'bold ' : '') + '9px Arial';
+      const tw = Math.max(...lines.map(l => ctx.measureText(l).width));
+      const bw = tw + 6, bh = lines.length * 12 + 3;
+      const yOff = P.t + 16 + slot * 28;
+      slot++;
+      const bx = (x + bw + 4 > W - P.r) ? x - bw - 4 : x + 3;
+      ctx.fillStyle = 'rgba(255,255,220,0.92)';
+      ctx.fillRect(bx, yOff, bw, bh);
+      ctx.strokeStyle = color; ctx.lineWidth = 0.7;
+      ctx.strokeRect(bx, yOff, bw, bh);
+      ctx.fillStyle = color; ctx.textAlign = 'left';
+      lines.forEach((l, i) => ctx.fillText(l, bx + 3, yOff + 10 + i * 12));
+    }
   });
 }
 
@@ -602,6 +627,243 @@ function fftDist(e) {
   const dy = e.touches[0].clientY - e.touches[1].clientY;
   return Math.sqrt(dx*dx + dy*dy);
 }
+
+// ── Souris desktop (coexiste avec touch*) ─────────────────────
+const FFT_MOUSE_DRAG_PX = 8;
+const FFT_WHEEL_FACTOR  = 1.15;
+let _fftMouse = { down: false, mode: 'none', x0: 0, panMin0: 0, panMax0: 0 };
+let _fftScrollDrag = null;
+
+function _fftMaxRpmNow() {
+  return fftUnit === 'mm/s' ? fftMaxRpmVel(fftP.fs) : fftMaxRpmG(fftP.fs);
+}
+
+function _fftClampZoom(nMin, nMax) {
+  const maxRpm = _fftMaxRpmNow();
+  let a = Math.max(HP_RPM_MIN, nMin);
+  let b = Math.min(maxRpm, nMax);
+  if (b - a < 100) {
+    const c = (a + b) / 2;
+    a = Math.max(HP_RPM_MIN, c - 50);
+    b = Math.min(maxRpm, a + 100);
+    a = Math.max(HP_RPM_MIN, b - 100);
+  }
+  fftZMin = a;
+  fftZMax = b;
+  fftAutoScale = false;
+}
+
+function _fftZoomAt(clientX, factor) {
+  if (!fftMag) return;
+  const canvas = document.getElementById('fft-canvas');
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const pW = canvas.width - FPAD.l - FPAD.r;
+  if (pW <= 0) return;
+  const scaleX = canvas.width / Math.max(rect.width, 1);
+  const px = (clientX - rect.left) * scaleX;
+  const zMin = Math.max(fftZMin, HP_RPM_MIN);
+  const zMax = Math.min(fftZMax, _fftMaxRpmNow());
+  const span = zMax - zMin;
+  const frac = Math.max(0, Math.min(1, (px - FPAD.l) / pW));
+  const anchor = zMin + frac * span;
+  const newSpan = span * factor;
+  _fftClampZoom(anchor - frac * newSpan, anchor + (1 - frac) * newSpan);
+  fftDraw();
+}
+
+function _fftPanByDeltaX(dx, panMin0, panMax0) {
+  const canvas = document.getElementById('fft-canvas');
+  if (!canvas) return;
+  const pW = canvas.width - FPAD.l - FPAD.r;
+  if (pW <= 0) return;
+  const maxRpm = _fftMaxRpmNow();
+  const span = panMax0 - panMin0;
+  const dRpm = -(dx / pW) * span;
+  let nMin = Math.max(HP_RPM_MIN, panMin0 + dRpm);
+  let nMax = nMin + span;
+  if (nMax > maxRpm) {
+    nMax = maxRpm;
+    nMin = Math.max(HP_RPM_MIN, nMax - span);
+  }
+  fftZMin = nMin;
+  fftZMax = nMax;
+  fftAutoScale = false;
+}
+
+function _fftPlaceCursorSnap(clientX) {
+  if (!fftMag) return;
+  fftSetCursor(clientX);
+  const mag = (fftUnit === 'mm/s' && fftMagVel) ? fftMagVel : fftMag;
+  if (!mag || fftCursorBin < 1) { fftDraw(); return; }
+  const maxRpm = _fftMaxRpmNow();
+  const zMin = Math.max(fftZMin, HP_RPM_MIN);
+  const zMax = Math.min(fftZMax, maxRpm);
+  const span = zMax - zMin;
+  const nFFT = nextPow2(fftP.n);
+  const rpmPB = (fftP.fs / nFFT) * 60;
+  const win = Math.max(8, Math.round((span / rpmPB) * 0.02));
+  let best = fftCursorBin, bestA = -1;
+  const lo = Math.max(1, fftCursorBin - win);
+  const hi = Math.min(mag.length - 1, Math.floor(nFFT / 2) - 1, fftCursorBin + win);
+  for (let i = lo; i <= hi; i++) {
+    if (mag[i] > bestA) { bestA = mag[i]; best = i; }
+  }
+  // Reposition via fake clientX at snapped bin
+  const canvas = document.getElementById('fft-canvas');
+  if (canvas) {
+    const rect = canvas.getBoundingClientRect();
+    const pW = canvas.width - FPAD.l - FPAD.r;
+    const scaleX = canvas.width / Math.max(rect.width, 1);
+    const snapRpm = best * rpmPB;
+    const px = FPAD.l + ((snapRpm - zMin) / span) * pW;
+    const clientSnap = rect.left + px / scaleX;
+    fftSetCursor(clientSnap);
+  }
+  fftDraw();
+}
+
+function _fftResetZoom() {
+  if (!fftMag) return;
+  const maxRpm = _fftMaxRpmNow();
+  fftZMin = HP_RPM_MIN;
+  fftZMax = maxRpm;
+  fftCursorBin = -1;
+  fftAutoScale = false;
+  const info = document.getElementById('fft-cursor-info');
+  if (info) info.textContent = 'Toucher le spectre pour lire une valeur';
+  fftDraw();
+}
+
+function _fftSyncHScroll() {
+  const bar = document.getElementById('fft-hscroll');
+  const thumb = document.getElementById('fft-hscroll-thumb');
+  if (!bar || !thumb) return;
+  if (!fftMag) {
+    bar.style.display = 'none';
+    bar.setAttribute('aria-hidden', 'true');
+    return;
+  }
+  const maxRpm = _fftMaxRpmNow();
+  const full = Math.max(maxRpm - HP_RPM_MIN, 1);
+  const zMin = Math.max(fftZMin, HP_RPM_MIN);
+  const zMax = Math.min(fftZMax, maxRpm);
+  const span = Math.max(zMax - zMin, 1);
+  const zoomed = span < full * 0.985;
+  bar.style.display = zoomed ? 'block' : 'none';
+  bar.setAttribute('aria-hidden', zoomed ? 'false' : 'true');
+  if (!zoomed) return;
+  const track = bar.querySelector('.graph-hscroll-track');
+  const tw = (track && track.clientWidth) || 1;
+  const thumbW = Math.max(28, (span / full) * tw);
+  const maxLeft = Math.max(0, tw - thumbW);
+  const left = Math.max(0, Math.min(maxLeft, ((zMin - HP_RPM_MIN) / full) * tw));
+  thumb.style.width = thumbW + 'px';
+  thumb.style.transform = 'translateX(' + left + 'px)';
+}
+
+if (fftWrap) {
+  fftWrap.addEventListener('wheel', (e) => {
+    if (!fftMag) return;
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? FFT_WHEEL_FACTOR : (1 / FFT_WHEEL_FACTOR);
+    _fftZoomAt(e.clientX, factor);
+  }, { passive: false });
+
+  fftWrap.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'touch') return;
+    if (e.button !== 0 || !fftMag) return;
+    _fftMouse.down = true;
+    _fftMouse.mode = 'pending';
+    _fftMouse.x0 = e.clientX;
+    _fftMouse.panMin0 = fftZMin;
+    _fftMouse.panMax0 = fftZMax;
+  });
+
+  fftWrap.addEventListener('dblclick', (e) => {
+    if (e.pointerType === 'touch') return;
+    if (!fftMag) return;
+    e.preventDefault();
+    _fftResetZoom();
+  });
+}
+
+window.addEventListener('pointermove', (e) => {
+  if (_fftScrollDrag) {
+    const maxRpm = _fftMaxRpmNow();
+    const full = Math.max(maxRpm - HP_RPM_MIN, 1);
+    const track = document.querySelector('#fft-hscroll .graph-hscroll-track');
+    if (!track) return;
+    const tw = track.clientWidth || 1;
+    const dx = e.clientX - _fftScrollDrag.x0;
+    const dVal = (dx / tw) * full;
+    _fftClampZoom(_fftScrollDrag.z0 + dVal, _fftScrollDrag.z0 + dVal + _fftScrollDrag.span);
+    fftDraw();
+    return;
+  }
+  if (!_fftMouse.down || e.pointerType === 'touch') return;
+  const dx = e.clientX - _fftMouse.x0;
+  if (_fftMouse.mode === 'pending' && Math.abs(dx) > FFT_MOUSE_DRAG_PX) {
+    _fftMouse.mode = 'pan';
+    fftCursorBin = -1;
+  }
+  if (_fftMouse.mode === 'pan') {
+    _fftPanByDeltaX(dx, _fftMouse.panMin0, _fftMouse.panMax0);
+    fftDraw();
+  }
+});
+
+window.addEventListener('pointerup', (e) => {
+  if (_fftScrollDrag) {
+    _fftScrollDrag = null;
+    return;
+  }
+  if (!_fftMouse.down) return;
+  if (_fftMouse.mode === 'pending' && e.pointerType !== 'touch') {
+    _fftPlaceCursorSnap(e.clientX);
+  }
+  _fftMouse.down = false;
+  _fftMouse.mode = 'none';
+});
+
+window.addEventListener('pointercancel', () => {
+  _fftScrollDrag = null;
+  _fftMouse.down = false;
+  _fftMouse.mode = 'none';
+});
+
+(function _fftBindHScroll() {
+  const bar = document.getElementById('fft-hscroll');
+  const thumb = document.getElementById('fft-hscroll-thumb');
+  if (!bar || !thumb) return;
+  const track = bar.querySelector('.graph-hscroll-track');
+  thumb.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const zMin = Math.max(fftZMin, HP_RPM_MIN);
+    const zMax = Math.min(fftZMax, _fftMaxRpmNow());
+    _fftScrollDrag = { x0: e.clientX, z0: zMin, span: zMax - zMin };
+    try { thumb.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  if (track) {
+    track.addEventListener('pointerdown', (e) => {
+      if (e.target === thumb) return;
+      e.preventDefault();
+      if (!fftMag) return;
+      const maxRpm = _fftMaxRpmNow();
+      const full = Math.max(maxRpm - HP_RPM_MIN, 1);
+      const span = Math.max(Math.min(fftZMax, maxRpm) - Math.max(fftZMin, HP_RPM_MIN), 100);
+      const rect = track.getBoundingClientRect();
+      const tw = rect.width || 1;
+      const thumbW = Math.max(28, (span / full) * tw);
+      let left = e.clientX - rect.left - thumbW / 2;
+      left = Math.max(0, Math.min(tw - thumbW, left));
+      const nMin = HP_RPM_MIN + (left / tw) * full;
+      _fftClampZoom(nMin, nMin + span);
+      fftDraw();
+    });
+  }
+})();
 
 // ── Helpers spectres ──────────────────────────────────────────
 // minStart optionnel : bin de départ pour chercher le pic (défaut 1)

@@ -20,7 +20,7 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=67">
+<link rel="stylesheet" href="style.css?v=80">
 <link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   function showPwaInstallUi() {
@@ -40,7 +40,7 @@
 
   if ('serviceWorker' in navigator) {
     // ?v= force la récupération du SW (sinon Android garde l'ancien cache)
-    navigator.serviceWorker.register('service-worker.js?v=67', { scope: './' })
+    navigator.serviceWorker.register('service-worker.js?v=80', { scope: './' })
       .then(function (reg) {
         if (reg && reg.update) reg.update();
         if (reg && reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
@@ -174,11 +174,14 @@
         <span id="fft-wait-label">Live FFT…</span>
       </div>
     </div>
+    <div id="fft-hscroll" class="graph-hscroll" style="display:none" aria-hidden="true" title="Déplacement horizontal">
+      <div class="graph-hscroll-track">
+        <div id="fft-hscroll-thumb" class="graph-hscroll-thumb"></div>
+      </div>
+    </div>
     <div class="ctrl-bar mod-cmdbar">
       <button type="button" id="btn-fft-g" class="bal-btn bal-mode-toggle bal-mode-toggle--active" onclick="fftSetUnit('g')">g</button>
       <button type="button" id="btn-fft-vel" class="bal-btn bal-mode-toggle" onclick="fftSetUnit('mm/s')">mm/s</button>
-      <button type="button" class="bal-btn" onclick="fftManualZoom(2)">&#8722;</button>
-      <button type="button" class="bal-btn" onclick="fftManualZoom(0.5)">+</button>
       <button type="button" id="btn-fft-start" class="bal-btn bal-btn-run mod-start-btn" onclick="fftToggle()">&#9654; Démarrer</button>
     </div>
   </div>
@@ -194,11 +197,17 @@
       <span>Crest: <b id="an-crest">—</b></span>
       <span id="an-filter-label" style="display:none"></span>
     </div>
+    <div id="an-time-cursors" class="an-time-cursors" style="display:none;" aria-live="polite"></div>
     <div id="an-canvas-wrap" class="canvas-wrap">
       <canvas id="an-canvas"></canvas>
       <div id="an-acq-overlay" class="an-acq-overlay" style="display:none" aria-hidden="true">
         <canvas id="an-acq-ring" width="120" height="120"></canvas>
         <span id="an-acq-label">Acquisition…</span>
+      </div>
+    </div>
+    <div id="an-hscroll" class="graph-hscroll" style="display:none" aria-hidden="true" title="Déplacement horizontal">
+      <div class="graph-hscroll-track">
+        <div id="an-hscroll-thumb" class="graph-hscroll-thumb"></div>
       </div>
     </div>
     <div id="an-bump-panel" style="display:none;">
@@ -210,14 +219,11 @@
     </div>
     <div style="position:relative; flex-shrink:0;">
       <div id="an-ham-panel" class="ham-panel" style="display:none;">
-        <div class="ham-row">
-          <button onclick="analyseZoomIn()">＋ Zoom</button>
-          <button onclick="analyseZoomOut()">－ Zoom</button>
+        <div class="ham-row" id="an-ham-vis-row">
           <button id="btn-an-play" onclick="analysePlay()">▶ Play</button>
           <button onclick="analyseExportWAV()">💾 WAV</button>
           <button onclick="analyseExportCSV()">CSV</button>
-        </div>
-        <div class="ham-row" id="an-ham-vis-row">
+          <button id="btn-an-sel-mode" class="ham-vis-btn" onclick="analyseToggleSelMode()" title="Souris: glisser=sélection, Ctrl+glisser=pan. Android: appui long=sélection.">⬚ Sél</button>
           <button id="btn-an-vis-a" class="ham-vis-btn active" onclick="analyseToggleVis('A')">👁 A</button>
           <button id="btn-an-vis-b" class="ham-vis-btn active" onclick="analyseToggleVis('B')">👁 B</button>
           <button onclick="analyseFilter()">🎸 Filtre</button>
@@ -225,6 +231,31 @@
           <button id="btn-an-fft-sel" onclick="analyseFFTSel()" style="display:none">FFT Sél</button>
           <button id="btn-an-sel-clear" onclick="analyseSelClear()" style="display:none">✗ Sél</button>
         </div>
+        <div class="ham-divider"></div>
+        <div class="ham-title">CURSEURS FFT</div>
+        <div class="ham-row" style="gap:0;">
+          <button type="button" id="btn-an-cur-harm" class="ham-band-toggle active"
+                  onclick="anSetCursorKind('harm')">Harmoniques</button>
+          <button type="button" id="btn-an-cur-sb" class="ham-band-toggle"
+                  onclick="anSetCursorKind('sb')">Sidebands</button>
+        </div>
+        <div id="an-cur-harm-fields" class="ham-cursor-fields">
+          <div class="ham-field ham-field-col">
+            <label for="an-harm-n">Nombre (1–10)</label>
+            <input id="an-harm-n" type="number" min="1" max="10" value="3" step="1">
+          </div>
+        </div>
+        <div id="an-cur-sb-fields" class="ham-cursor-fields" style="display:none;">
+          <div class="ham-field ham-field-col">
+            <label for="an-sb-n">Paires (±)</label>
+            <input id="an-sb-n" type="number" min="0" max="5" value="2" step="1">
+          </div>
+          <div class="ham-field ham-field-col">
+            <label for="an-sb-delta">Écart 1re paire (RPM)</label>
+            <input id="an-sb-delta" type="number" min="1" value="60" step="1">
+          </div>
+        </div>
+        <p class="ham-hint">Harm : 1×…N×. Sidebands : glisser une raie ±Δ (ou champ Écart). Appui long = poser / bouger la porteuse.</p>
         <div class="ham-divider"></div>
         <div class="ham-title">BANDE DE DÉMODULATION</div>
         <div class="ham-row" style="gap:0;">
@@ -237,7 +268,7 @@
         </div>
         <div class="ham-divider"></div>
         <div class="ham-title">FRÉQUENCES ROULEMENTS</div>
-        <div class="ham-field"><label>RPM</label><input id="demod-rpm" type="number" placeholder="optionnel" step="1" min="0"></div>
+        <div class="ham-field"><label class="ham-lbl-1x">1× RPM</label><input id="demod-rpm" type="number" placeholder="vitesse arbre" step="1" min="0"></div>
         <div class="ham-field"><label class="ham-lbl-bpfi">BPFi ×</label><input id="demod-bpfi" type="number" placeholder="ex: 5.6" step="0.01" min="0"></div>
         <div class="ham-field"><label class="ham-lbl-bpfo">BPFo ×</label><input id="demod-bpfo" type="number" placeholder="ex: 4.2" step="0.01" min="0"></div>
         <div class="ham-field"><label class="ham-lbl-bsf">BSF ×</label><input id="demod-bsf" type="number" placeholder="ex: 3.1" step="0.01" min="0"></div>
@@ -265,11 +296,11 @@
         <input type="number" id="calc-essai-rpm" value="3000" step="100">
       </div>
       <div class="calc-input-group">
-        <label>Masse rotor (kg)</label>
+        <label>Rotor (kg)</label>
         <input type="number" id="calc-essai-masse" value="10" step="0.1">
       </div>
       <div class="calc-input-group">
-        <label>Rayon correction (mm)</label>
+        <label>Rayon (mm)</label>
         <input type="number" id="calc-essai-rayon" value="200" step="10">
       </div>
       <button id="calc-essai-btn" class="calc-btn">Calculer</button>
@@ -514,7 +545,7 @@
   ══════════════════════════════════════════════════════════ -->
   <div id="page-balance" style="display:none;">
 
-    <!-- Sélection mode 1P / 2P -->
+    <!-- Sélection mode 1P / 2P (Normal/Sat via ☰ ; Sat = 1P auto, pas d'écran) -->
     <div id="bal-mode-select" style="display:none;">
       <div class="bal-mode-title">Mode d'équilibrage</div>
       <div class="bal-mode-btns">
@@ -523,7 +554,7 @@
           <span class="bal-mode-lbl">1 Plan</span>
           <span class="bal-mode-sub">Sonde fixe</span>
         </button>
-        <button class="bal-mode-btn" onclick="BalanceModule.selectMode('2P')">
+        <button type="button" id="bal-mode-btn-2p" class="bal-mode-btn" onclick="BalanceModule.selectMode('2P')">
           <span class="bal-mode-icon">⊕</span>
           <span class="bal-mode-lbl">2 Plans</span>
           <span class="bal-mode-sub">Sonde déplacée</span>
@@ -545,12 +576,18 @@
         <button type="button" id="btn-bal-resume" class="bal-btn bal-btn-run">Reprendre</button>
       </div>
 
+      <div id="bal-clip-warn" class="bal-clip-warn" style="display:none;" aria-hidden="true">
+        <span id="bal-clip-warn-txt">Saturation détectée — quitter et relancer en mode Saturation</span>
+        <button type="button" class="bal-btn" onclick="BalanceModule.dismissClipWarn()">OK</button>
+      </div>
+
       <!-- RPM en haut (comme Harmonic) -->
       <div class="mod-rpm-strip">
         <div id="bal-rpm" class="mod-rpm-box">
           <span id="bal-rpm-dot" class="bal-rpm-dot bal-rpm-dot--lost"></span>
           <span class="bal-rpm-label">RPM</span>
           <span id="bal-rpm-val" class="bal-rpm-val">0</span>
+          <span id="bal-meas-badge" class="bal-meas-chip" style="display:none;">SAT</span>
         </div>
         <div id="bal-rpm-2p" class="mod-rpm-box" style="display:none;">
           <span id="bal-rpm-dot-2p" class="bal-rpm-dot bal-rpm-dot--lost"></span>
@@ -660,13 +697,20 @@
             <button type="button" id="btn-bal-reset-top" class="bal-btn bal-btn-reset" role="menuitem">Reset</button>
             <button type="button" id="btn-bal-copy-log" class="bal-btn" title="Copier le journal" role="menuitem">📋 Log</button>
             <div class="bal-more-divider"></div>
+            <div class="bal-more-row" role="group" aria-label="Méthode de mesure">
+              <button type="button" id="bal-meas-dft" class="bal-btn bal-mode-toggle bal-mode-toggle--active"
+                      onclick="BalanceModule.setMeasMode('dft')" role="menuitem">Normal</button>
+              <button type="button" id="bal-meas-clip" class="bal-btn bal-mode-toggle"
+                      onclick="BalanceModule.setMeasMode('clip')" role="menuitem">Saturation</button>
+            </div>
+            <div class="bal-more-divider"></div>
             <div class="bal-more-row">
               <span class="bal-win-label">Moy</span>
               <button type="button" class="bal-btn bal-mode-toggle" data-bal-win="8">8</button>
               <button type="button" class="bal-btn bal-mode-toggle bal-mode-toggle--active" data-bal-win="16">16</button>
               <button type="button" class="bal-btn bal-mode-toggle" data-bal-win="32">32</button>
             </div>
-            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v52</div>
+            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v74</div>
           </div>
         </div>
         <button id="btn-bal-run" class="bal-btn bal-btn-run" disabled>&#9654; Démarrer</button>
@@ -734,18 +778,18 @@
 </div><!-- #main -->
 
 <script src="terminal.js?v=56"></script>
-<script src="fft.js?v=67"></script>
-<script src="fft-session.js?v=67"></script>
+<script src="fft.js?v=79"></script>
+<script src="fft-session.js?v=70"></script>
 <script src="demod.js?v=16"></script>
-<script src="analyse.js?v=67"></script>
-<script src="anal-session.js?v=67"></script>
-<script src="bump-session.js?v=67"></script>
-<script src="calc.js?v=67"></script>
-<script src="balance.js?v=67"></script>
-<script src="balance-session.js?v=67"></script>
-<script src="harmonic.js?v=67"></script>
-<script src="phase-session.js?v=67"></script>
-<script src="menu.js?v=67"></script>
-<script src="app.js?v=67"></script>
+<script src="analyse.js?v=80"></script>
+<script src="anal-session.js?v=70"></script>
+<script src="bump-session.js?v=70"></script>
+<script src="calc.js?v=70"></script>
+<script src="balance.js?v=74"></script>
+<script src="balance-session.js?v=70"></script>
+<script src="harmonic.js?v=70"></script>
+<script src="phase-session.js?v=70"></script>
+<script src="menu.js?v=70"></script>
+<script src="app.js?v=70"></script>
 </body>
 </html>

@@ -194,6 +194,9 @@ let anMode = 'time'; // 'time' | 'fft' | 'demod' | 'bump_wait' | 'bump_ready'
 let anMag  = null;
 let anZMin = 0, anZMax = 1;
 let anCursorX = -1;
+/** Curseurs temporels : {t, amp} | null — clic1 puis clic2 → Δt / RPM */
+let anTimeC1 = null;
+let anTimeC2 = null;
 let _bumpStatusLines = ['Mode pret - appuyez DEMARRER', ''];
 let bumpLiveG = 2;
 let bumpLiveRunning = false;
@@ -724,6 +727,7 @@ function _analyseAfterReceive(t, fromB) {
   if (_wavSource) analysePause();
   anMode = 'time'; anZMin = 0; anZMax = t;
   anMag = null; anMagVel = null; anMagB = null; anMagVelB = null; anCursorX = -1;
+  _anClearTimeCursors();
   anUnit = 'g'; anDataDisplay = null; anDataDisplayB = null; anFilterInfo = '';
   anDemodResult = null; anDemodResultB = null;
   anSelStart = -1; anSelEnd = -1; _anUpdateSelBtn();
@@ -946,6 +950,7 @@ function analyseDraw() {
   if (anMode === 'bump_wait' || anMode === 'bump_stream') {
     anApplyLayoutByMode();
     anDrawBumpLive();
+    if (typeof _anSyncHScroll === 'function') _anSyncHScroll();
     return;
   }
   if (!anData) return;
@@ -954,6 +959,7 @@ function analyseDraw() {
   else if (anMode === 'fft')   anDrawFFT();
   else if (anMode === 'demod') anDrawDemod();
   anUpdateStats();
+  if (typeof _anSyncHScroll === 'function') _anSyncHScroll();
 }
 function _anDrawOnly() {
   if (!anData) return;
@@ -963,54 +969,249 @@ function _anDrawOnly() {
 }
 
 // ─────────────────────────────────────────────────────────
-// CURSEUR TEMPOREL
+// CURSEUR TEMPOREL (1 ou 2 points → Δt / RPM)
 // ─────────────────────────────────────────────────────────
-function anDrawCursor(ctx, xPx, val, amp, unit, pH, W) {
+function anDrawCursor(ctx, xPx, val, amp, unit, pH, W, color, tag) {
+  color = color || '#cc0000';
   ctx.save();
-  ctx.strokeStyle='#cc0000'; ctx.lineWidth=1; ctx.setLineDash([4,3]);
-  ctx.beginPath(); ctx.moveTo(xPx,APAD.t); ctx.lineTo(xPx,APAD.t+pH); ctx.stroke();
+  ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.setLineDash([4, 3]);
+  ctx.beginPath(); ctx.moveTo(xPx, APAD.t); ctx.lineTo(xPx, APAD.t + pH); ctx.stroke();
   ctx.setLineDash([]);
-  const label=val.toFixed(unit==='s'?4:1)+' '+unit+'  '+amp.toFixed(4)+' g';
-  ctx.font='bold 10px Arial';
-  const tw=ctx.measureText(label).width;
-  const lx=(xPx+tw+6>W-APAD.r)?xPx-tw-6:xPx+4;
-  ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.fillRect(lx-2,APAD.t+2,tw+4,14);
-  ctx.fillStyle='#cc0000'; ctx.fillText(label,lx,APAD.t+13);
+  const prefix = tag ? (tag + ' ') : '';
+  const label = prefix + val.toFixed(unit === 's' ? 4 : 1) + ' ' + unit + '  ' + amp.toFixed(4) + ' g';
+  ctx.font = 'bold 10px Arial';
+  const tw = ctx.measureText(label).width;
+  const lx = (xPx + tw + 6 > W - APAD.r) ? xPx - tw - 6 : xPx + 4;
+  const ly = APAD.t + 2 + (tag === 'C2' ? 16 : 0);
+  ctx.fillStyle = 'rgba(255,255,255,0.9)'; ctx.fillRect(lx - 2, ly, tw + 4, 14);
+  ctx.fillStyle = color; ctx.fillText(label, lx, ly + 11);
   ctx.restore();
 }
 
+function _anClearTimeCursors() {
+  anTimeC1 = null;
+  anTimeC2 = null;
+  _anUpdateTimeCursorBar();
+}
+
+function _anUpdateTimeCursorBar() {
+  const el = document.getElementById('an-time-cursors');
+  if (!el) return;
+  if (anMode !== 'time' || (!anTimeC1 && !anTimeC2)) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+  el.style.display = 'block';
+  let html = '';
+  if (anTimeC1) {
+    html += '<span class="tc1">C1</span> t=' + anTimeC1.t.toFixed(4) + ' s  ' +
+      anTimeC1.amp.toFixed(4) + ' g';
+  }
+  if (anTimeC2) {
+    html += ' &nbsp;|&nbsp; <span class="tc2">C2</span> t=' + anTimeC2.t.toFixed(4) + ' s  ' +
+      anTimeC2.amp.toFixed(4) + ' g';
+    const dt = Math.abs(anTimeC2.t - anTimeC1.t);
+    if (dt > 1e-9) {
+      const rpm = 60 / dt;
+      const hz = 1 / dt;
+      html += ' &nbsp;|&nbsp; <span class="tc-delta">Δt=' + dt.toFixed(4) + ' s → ' +
+        rpm.toFixed(1) + ' RPM</span> (' + hz.toFixed(2) + ' Hz)';
+    }
+  } else {
+    html += ' <span style="color:#888">— clic 2ᵉ point pour Δt / RPM</span>';
+  }
+  el.innerHTML = html;
+}
+
+/** Snap au pic local (|amp| max) autour du clic. */
+function _anSnapTimePeak(tClick) {
+  const sig = anDataDisplay || anData;
+  if (!sig || !anP.fs) return { t: tClick, amp: 0 };
+  const fs = anP.fs;
+  const n = Math.min(anP.n, sig.length);
+  let idx = Math.round(tClick * fs);
+  idx = Math.max(0, Math.min(n - 1, idx));
+  // fenêtre ~2 % de la vue, min 3 samples, max ~20 ms
+  const span = Math.max(anZMax - anZMin, 1e-6);
+  let win = Math.round(span * 0.02 * fs);
+  win = Math.max(3, Math.min(win, Math.round(0.02 * fs)));
+  const lo = Math.max(0, idx - win);
+  const hi = Math.min(n - 1, idx + win);
+  let best = idx, bestA = Math.abs(sig[idx]);
+  for (let i = lo; i <= hi; i++) {
+    const a = Math.abs(sig[i]);
+    if (a > bestA) { bestA = a; best = i; }
+  }
+  return { t: best / fs, amp: sig[best], ampAbs: bestA };
+}
+
+function _anPlaceTimeCursor(clientX) {
+  if (!anData || anMode !== 'time') return;
+  const tRaw = _anTouchToTime(clientX);
+  const pt = _anSnapTimePeak(tRaw);
+  const snap = { t: pt.t, amp: pt.ampAbs };
+  if (!anTimeC1 || anTimeC2) {
+    // 1ʳᵉ pose, ou 3ᵉ clic → recommence à C1
+    anTimeC1 = snap;
+    anTimeC2 = null;
+  } else {
+    anTimeC2 = snap;
+  }
+  anCursorX = -1;
+  _anUpdateTimeCursorBar();
+  analyseDraw();
+}
+
 // ─────────────────────────────────────────────────────────
-// CURSEUR FFT + harmoniques 1x/2x/3x
+// CURSEUR FFT — N harmoniques + sidebands (réglages hamburger)
 // ─────────────────────────────────────────────────────────
+let anHarmN = 3;       // 1…10
+let anSbN = 2;         // 0…5 paires
+let anSbDelta = 60;    // RPM = écart porteuse → 1re sideband
+/** 'harm' | 'sb' — toggle hamburger (Harm par défaut) */
+let anCursorKind = 'harm';
+let anSelMode = false; // drag = sélection (sans Shift)
+const AN_HARM_COLS = ['#cc0000','#7700cc','#cc5500','#0066aa','#2a8a3e','#aa8800','#8e24aa','#555555','#c62828','#1565c0'];
+const AN_SB_COL = '#008877';
+
+function _anReadCursorPrefs() {
+  const hn = document.getElementById('an-harm-n');
+  const sn = document.getElementById('an-sb-n');
+  const sd = document.getElementById('an-sb-delta');
+  if (hn) {
+    let v = parseInt(hn.value, 10);
+    if (!Number.isFinite(v)) v = 3;
+    anHarmN = Math.max(1, Math.min(10, v));
+    hn.value = String(anHarmN);
+  }
+  if (sn) {
+    let v = parseInt(sn.value, 10);
+    if (!Number.isFinite(v)) v = 2;
+    anSbN = Math.max(0, Math.min(5, v));
+    sn.value = String(anSbN);
+  }
+  if (sd) {
+    let v = parseFloat(sd.value);
+    if (!Number.isFinite(v) || v < 1) v = 60;
+    anSbDelta = v;
+    sd.value = String(anSbDelta);
+  }
+}
+
+function anSetCursorKind(kind) {
+  anCursorKind = (kind === 'sb') ? 'sb' : 'harm';
+  const bh = document.getElementById('btn-an-cur-harm');
+  const bs = document.getElementById('btn-an-cur-sb');
+  if (bh) bh.classList.toggle('active', anCursorKind === 'harm');
+  if (bs) bs.classList.toggle('active', anCursorKind === 'sb');
+  const fh = document.getElementById('an-cur-harm-fields');
+  const fs = document.getElementById('an-cur-sb-fields');
+  if (fh) fh.style.display = anCursorKind === 'harm' ? 'flex' : 'none';
+  if (fs) fs.style.display = anCursorKind === 'sb' ? 'flex' : 'none';
+  if (anCursorKind === 'sb') {
+    _anReadCursorPrefs();
+    if (anSbN < 1) {
+      anSbN = 2;
+      const sn = document.getElementById('an-sb-n');
+      if (sn) sn.value = '2';
+    }
+  }
+  if (anData && (anMode === 'fft' || anMode === 'demod')) analyseDraw();
+}
+window.anSetCursorKind = anSetCursorKind;
+
+function analyseToggleSelMode() {
+  anSelMode = !anSelMode;
+  const btn = document.getElementById('btn-an-sel-mode');
+  if (btn) btn.classList.toggle('active', anSelMode);
+}
+window.analyseToggleSelMode = analyseToggleSelMode;
+
 function anDrawCursorFFT(ctx, xPx, rpm, amp, unit, pH, W, mag, rpmPB, zMin, span, pW) {
-  const harmonics=[
-    {mult:1,color:'#cc0000',dash:[4,3],bold:true},
-    {mult:2,color:'#7700cc',dash:[5,2],bold:false},
-    {mult:3,color:'#cc5500',dash:[5,2],bold:false},
-  ];
+  _anReadCursorPrefs();
+  const lines = [];
+  if (anCursorKind === 'harm') {
+    for (let m = 1; m <= anHarmN; m++) {
+      lines.push({
+        rpm: rpm * m,
+        color: AN_HARM_COLS[(m - 1) % AN_HARM_COLS.length],
+        dash: m === 1 ? [4, 3] : [5, 2],
+        bold: m === 1,
+        label: m + 'x',
+        kind: 'harm',
+      });
+    }
+  } else {
+    // Sidebands : porteuse 1× + paires ±k·écart
+    lines.push({
+      rpm: rpm, color: AN_HARM_COLS[0], dash: [4, 3], bold: true,
+      label: '1x', kind: 'harm',
+    });
+    for (let k = 1; k <= anSbN; k++) {
+      const d = anSbDelta * k;
+      lines.push({ rpm: rpm - d, color: AN_SB_COL, dash: [2, 3], bold: false, label: '−' + k + 'Δ', kind: 'sb' });
+      lines.push({ rpm: rpm + d, color: AN_SB_COL, dash: [2, 3], bold: false, label: '+' + k + 'Δ', kind: 'sb' });
+    }
+  }
   ctx.save();
-  harmonics.forEach(({mult,color,dash,bold}) => {
-    const hRpm=rpm*mult;
-    if (hRpm<zMin||hRpm>zMin+span) return;
-    const hX=APAD.l+(hRpm-zMin)/span*pW;
-    const bin=Math.round(hRpm/rpmPB);
-    const hAmp=(mag&&bin>=1&&bin<mag.length)?mag[bin]:amp*(1/mult);
-    ctx.strokeStyle=color; ctx.lineWidth=1; ctx.setLineDash(dash);
-    ctx.beginPath(); ctx.moveTo(hX,APAD.t); ctx.lineTo(hX,APAD.t+pH); ctx.stroke();
+  let labelSlot = 0;
+  lines.forEach((L) => {
+    if (L.rpm < zMin || L.rpm > zMin + span) return;
+    const hX = APAD.l + (L.rpm - zMin) / span * pW;
+    const bin = Math.round(L.rpm / rpmPB);
+    const hAmp = (mag && bin >= 1 && bin < mag.length) ? mag[bin] : amp;
+    ctx.strokeStyle = L.color;
+    ctx.lineWidth = L.kind === 'harm' && L.bold ? 1.4 : 1;
+    ctx.setLineDash(L.dash);
+    ctx.beginPath(); ctx.moveTo(hX, APAD.t); ctx.lineTo(hX, APAD.t + pH); ctx.stroke();
     ctx.setLineDash([]);
-    const label=(mult===1?'1x':mult===2?'2x':'3x');
-    const lines=[label+' '+hRpm.toFixed(0)+' RPM', hAmp.toFixed(mult===1?4:3)+' '+unit];
-    ctx.font=(bold?'bold ':'')+' 9px Arial';
-    const tw=Math.max(...lines.map(l=>ctx.measureText(l).width));
-    const bw=tw+6,bh=lines.length*12+3;
-    const yOff=APAD.t+(mult===1?6:mult===2?34:62);
-    const bx=(hX+bw+4>W-APAD.r)?hX-bw-4:hX+3;
-    ctx.fillStyle='rgba(255,255,220,0.92)'; ctx.fillRect(bx,yOff,bw,bh);
-    ctx.strokeStyle=color; ctx.lineWidth=0.7; ctx.strokeRect(bx,yOff,bw,bh);
-    ctx.fillStyle=color; ctx.textAlign='left';
-    lines.forEach((l,i)=>ctx.fillText(l,bx+3,yOff+10+i*12));
+    // Labels : 1x (absolu) ; SB = écart ±RPM vs porteuse
+    if (L.label === '1x' || L.label === '−1Δ' || L.label === '+1Δ') {
+      let line1;
+      if (L.kind === 'sb') {
+        const dRpm = L.rpm - rpm;
+        line1 = (dRpm >= 0 ? '+' : '') + dRpm.toFixed(0) + ' RPM';
+      } else {
+        line1 = L.label + ' ' + L.rpm.toFixed(0) + ' RPM';
+      }
+      const txt = [line1, hAmp.toFixed(L.label === '1x' ? 4 : 3) + ' ' + unit];
+      ctx.font = (L.bold ? 'bold ' : '') + '9px Arial';
+      const tw = Math.max(...txt.map(t => ctx.measureText(t).width));
+      const bw = tw + 6, bh = txt.length * 12 + 3;
+      const yOff = APAD.t + 6 + labelSlot * 28;
+      labelSlot++;
+      const bx = (hX + bw + 4 > W - APAD.r) ? hX - bw - 4 : hX + 3;
+      ctx.fillStyle = 'rgba(255,255,220,0.92)'; ctx.fillRect(bx, yOff, bw, bh);
+      ctx.strokeStyle = L.color; ctx.lineWidth = 0.7; ctx.strokeRect(bx, yOff, bw, bh);
+      ctx.fillStyle = L.color; ctx.textAlign = 'left';
+      txt.forEach((t, i) => ctx.fillText(t, bx + 3, yOff + 10 + i * 12));
+    }
   });
   ctx.restore();
+}
+
+/** Hit-test curseur : 'carrier' | 'sb' | null (px canvas). */
+function _anHitCursorFeature(px, rpmCarrier, zMin, span, pW) {
+  if (anCursorX < 0 || span <= 0 || pW <= 0) return null;
+  const HIT = 14;
+  const carX = APAD.l + (rpmCarrier - zMin) / span * pW;
+  if (Math.abs(px - carX) <= HIT) return 'carrier';
+  if (anCursorKind !== 'sb') return null;
+  _anReadCursorPrefs();
+  for (let k = 1; k <= anSbN; k++) {
+    const d = anSbDelta * k;
+    const xL = APAD.l + (rpmCarrier - d - zMin) / span * pW;
+    const xR = APAD.l + (rpmCarrier + d - zMin) / span * pW;
+    if (Math.abs(px - xL) <= HIT || Math.abs(px - xR) <= HIT) return 'sb';
+  }
+  return null;
+}
+
+/** Vue FFT / démod : spectre entier (pas de zoom auto sur le pic). */
+function _anZoomFullSpectrum() {
+  anZMin = 0;
+  anZMax = _anMaxVal();
 }
 
 // ─────────────────────────────────────────────────────────
@@ -1111,37 +1312,60 @@ function anDrawTime() {
       ctx.restore();
     }
   }
-  if(anCursorX>=P.l&&anCursorX<=P.l+pW){
-    const ts=anZMin+((anCursorX-P.l)/pW)*span;
-    const idx=Math.round(ts*fs);
-    if(idx>=0&&idx<n) anDrawCursor(ctx,anCursorX,ts,Math.abs(_sig[idx]),'s',pH,W);
+  function _drawTimeCur(c, color, tag) {
+    if (!c) return;
+    if (c.t < anZMin || c.t > anZMax) return;
+    const x = P.l + (c.t - anZMin) / span * pW;
+    anDrawCursor(ctx, x, c.t, c.amp, 's', pH, W, color, tag);
   }
+  _drawTimeCur(anTimeC1, '#cc0000', 'C1');
+  _drawTimeCur(anTimeC2, '#0055aa', 'C2');
+  if (anTimeC1 && anTimeC2) {
+    const t0 = Math.min(anTimeC1.t, anTimeC2.t);
+    const t1 = Math.max(anTimeC1.t, anTimeC2.t);
+    const x0 = P.l + (Math.max(t0, anZMin) - anZMin) / span * pW;
+    const x1 = P.l + (Math.min(t1, anZMax) - anZMin) / span * pW;
+    if (x1 > x0) {
+      const dt = t1 - t0;
+      const rpm = dt > 1e-9 ? (60 / dt) : 0;
+      ctx.save();
+      ctx.fillStyle = 'rgba(42,122,53,0.12)';
+      ctx.fillRect(x0, P.t, x1 - x0, pH);
+      ctx.fillStyle = '#2a7a35';
+      ctx.font = 'bold 11px Arial';
+      ctx.textAlign = 'center';
+      ctx.fillText('Δt=' + dt.toFixed(4) + 's  ' + rpm.toFixed(1) + ' RPM', (x0 + x1) / 2, P.t + pH - 6);
+      ctx.restore();
+    }
+  }
+  _anUpdateTimeCursorBar();
 }
 
 // ─────────────────────────────────────────────────────────
 // DESSIN FFT (A bleu / B orange — g et mm/s)
 // ─────────────────────────────────────────────────────────
 function _anEnsureFftA() {
-  const _sig = anDataDisplay || anData;
+  const chunk = _anTimeChunk(anDataDisplay || anData);
+  if (!chunk || chunk.length < 64) return;
+  const n = chunk.length;
   if (!anMag) {
-    anMag = computeFFT(_sig.slice(0, anP.n), anP.n, anP.fs);
-    const rpmPB = (anP.fs / nextPow2(anP.n)) * 60;
-    const minBinHP = Math.max(1, Math.ceil(HP_RPM_MIN / rpmPB));
-    const pk = fftPeakBin(anMag, Math.floor(anP.n / 2) - 1, minBinHP);
-    anZMin = HP_RPM_MIN; anZMax = Math.max(600, pk * rpmPB * 4);
+    anMag = computeFFT(chunk, n, anP.fs);
+    _anZoomFullSpectrum();
   }
   if (anUnit === 'mm/s' && !anMagVel) {
-    anMagVel = computeVelFFT(_sig.slice(0, anP.n), anP.fs, anP.n);
+    anMagVel = computeVelFFT(chunk, anP.fs, n);
   }
 }
 
 function _anEnsureFftB() {
   const _sigB = anDataDisplayB || anDataB;
   if (!_sigB || !_sigB.length) { anMagB = null; anMagVelB = null; return; }
-  const nB = Math.min(anP.n, _sigB.length);
-  if (!anMagB) anMagB = computeFFT(_sigB.slice(0, nB), nB, anP.fs);
+  const chunkB = _anTimeChunk(_sigB);
+  if (!chunkB || chunkB.length < 64) { anMagB = null; anMagVelB = null; return; }
+  const nB = chunkB.length;
+  if (!anMagB) anMagB = computeFFT(chunkB, nB, anP.fs);
   if (anUnit === 'mm/s' && !anMagVelB) {
-    anMagVelB = computeVelFFT(_sigB.slice(0, nB), anP.fs, nB);
+    anMagVelB = computeVelFFT(chunkB, anP.fs, nB);
   }
 }
 
@@ -1495,6 +1719,31 @@ const AN_PAN_THRESHOLD  = 10;
 const AN_LONG_PRESS_MS  = 600;
 const AN_LONG_PRESS_PX  = 15;
 
+/** RPM sous le doigt (FFT/démod). */
+function _anTouchToRpm(clientX) {
+  const canvas = document.getElementById('an-canvas');
+  if (!canvas) return 0;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / Math.max(rect.width, 1);
+  const px = (clientX - rect.left) * scaleX;
+  const pW = canvas.width - APAD.l - APAD.r;
+  if (pW <= 0) return 0;
+  return anZMin + ((px - APAD.l) / pW) * (anZMax - anZMin);
+}
+
+function _anTouchHitFftFeature(clientX) {
+  if (anCursorX < 0 || (anMode !== 'fft' && anMode !== 'demod')) return null;
+  const canvas = document.getElementById('an-canvas');
+  if (!canvas) return null;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / Math.max(rect.width, 1);
+  const px = (clientX - rect.left) * scaleX;
+  const pW = canvas.width - APAD.l - APAD.r;
+  const span = anZMax - anZMin;
+  const rpmCarrier = anZMin + ((anCursorX - APAD.l) / pW) * span;
+  return _anHitCursorFeature(px, rpmCarrier, anZMin, span, pW);
+}
+
 anWrap.addEventListener('touchstart', (e) => {
   if (!anData) return;
   // Fermer le hamburger si ouvert
@@ -1516,7 +1765,28 @@ anWrap.addEventListener('touchstart', (e) => {
       _anLongAnimId=requestAnimationFrame(_anDrawLongPressArc);
       anTouchMode='cursor'; anSetCursorFromTouch(e.touches[0].clientX); analyseDraw();
     } else {
-      // FFT ou Demod : long press → verrouiller curseur
+      // FFT/démod : si curseur déjà là + mode Sidebands → grab SB ou porteuse
+      const hit = _anTouchHitFftFeature(anTouchX0);
+      if (hit === 'sb' && anCursorKind === 'sb') {
+        _anCancelLong();
+        const span = anZMax - anZMin;
+        const pW = (document.getElementById('an-canvas') || {}).width
+          ? document.getElementById('an-canvas').width - APAD.l - APAD.r : 1;
+        const rpmCarrier = anZMin + ((anCursorX - APAD.l) / Math.max(pW, 1)) * span;
+        anTouchMode = 'drag_sb';
+        _anMouse.carrierRpm0 = rpmCarrier;
+        _anMouse.sbDelta0 = anSbDelta;
+        if (navigator.vibrate) navigator.vibrate(20);
+        return;
+      }
+      if (hit === 'carrier') {
+        _anCancelLong();
+        anTouchMode = 'cursor_locked';
+        anSetCursorFromTouch(anTouchX0);
+        analyseDraw();
+        return;
+      }
+      // sinon : long press → verrouiller curseur ; glisser → pan
       _anLongActive=true;
       _anLongTimer=setTimeout(()=>{
         _anLongTimer=null;_anLongActive=false;_anCancelLongAnim();
@@ -1549,6 +1819,15 @@ anWrap.addEventListener('touchmove', (e) => {
     if(anTouchMode==='wait'){
       if(Math.abs(dx)>AN_PAN_THRESHOLD){_anCancelLong();anTouchMode='pan';}
       else return;
+    }
+    if (anTouchMode === 'drag_sb') {
+      const rpmAt = _anTouchToRpm(e.touches[0].clientX);
+      const delta = Math.abs(rpmAt - _anMouse.carrierRpm0);
+      anSbDelta = Math.max(1, Math.round(delta));
+      const sd = document.getElementById('an-sb-delta');
+      if (sd) sd.value = String(anSbDelta);
+      analyseDraw();
+      return;
     }
     if(anTouchMode==='cursor_locked'){
       anSetCursorFromTouch(e.touches[0].clientX); analyseDraw(); return;
@@ -1589,9 +1868,14 @@ anWrap.addEventListener('touchend',()=>{
   if(anTouchMode==='wait'&&(anMode==='fft'||anMode==='demod')){
     anSetCursorFromTouch(anTouchX0); analyseDraw();
   }
+  // Tap temporel (sans pan / sans long-press sel) → curseur C1/C2
+  if (anTouchMode === 'cursor' && anMode === 'time') {
+    _anPlaceTimeCursor(anTouchX0);
+  }
   if(anTouchMode==='sel'){
     anSelecting=false;
     if(anSelEnd-anSelStart<0.01){anSelStart=-1;anSelEnd=-1;}
+    _anInvalidateFft();
     _anUpdateSelBtn(); analyseDraw();
   }
   anTouchMode='none';
@@ -1640,11 +1924,31 @@ function anDist(e){
 }
 function _anTouchToTime(clientX){
   const canvas=document.getElementById('an-canvas');
+  if (!canvas) return 0;
   const rect=canvas.getBoundingClientRect();
-  const px=clientX-rect.left;
-  const pW=canvas.width-APAD.l-APAD.r;
-  const t=anZMin+((px-APAD.l)/pW)*(anZMax-anZMin);
-  return Math.max(0,Math.min(anP.t,t));
+  // CSS px → buffer canvas (critique Windows / DPR)
+  const scaleX = canvas.width / Math.max(rect.width, 1);
+  const px = (clientX - rect.left) * scaleX;
+  const pW = canvas.width - APAD.l - APAD.r;
+  if (pW <= 0) return 0;
+  const t = anZMin + ((px - APAD.l) / pW) * (anZMax - anZMin);
+  return Math.max(0, Math.min(anP.t, t));
+}
+
+/** Tranche temporelle pour FFT/démod : sélection si présente, sinon tout. */
+function _anTimeChunk(sig) {
+  if (!sig || !sig.length) return sig;
+  const nFull = Math.min(anP.n, sig.length);
+  if (anSelStart >= 0 && anSelEnd > anSelStart) {
+    const i0 = Math.max(0, Math.round(anSelStart * anP.fs));
+    const i1 = Math.min(sig.length - 1, Math.round(anSelEnd * anP.fs));
+    if (i1 - i0 >= 63) return sig.slice(i0, i1 + 1);
+  }
+  return sig.slice(0, nFull);
+}
+
+function _anInvalidateFft() {
+  anMag = null; anMagVel = null; anMagB = null; anMagVelB = null;
 }
 function _anUpdateSelBtn(){
   const hasSel=anSelStart>=0&&anSelEnd>anSelStart;
@@ -1653,6 +1957,392 @@ function _anUpdateSelBtn(){
   if(btnFFT) btnFFT.style.display=hasSel?'inline-block':'none';
   if(btnClr) btnClr.style.display=hasSel?'inline-block':'none';
 }
+
+// ============================================================
+// SOURIS desktop — coexiste avec touch* (Android inchangé)
+// Molette zoom · drag pan · clic peak · double-clic reset · barre
+// ============================================================
+const AN_MOUSE_DRAG_PX = 8;
+const AN_WHEEL_FACTOR  = 1.15;
+let _anMouse = {
+  down: false, mode: 'none', x0: 0, panMin0: 0, panMax0: 0,
+  carrierRpm0: 0, sbDelta0: 60,
+};
+let _anScrollDrag = null;
+
+function _anMinSpan() {
+  return anMode === 'time' ? 0.01 : 50;
+}
+
+function _anClampZoom(nMin, nMax) {
+  const maxVal = _anMaxVal();
+  const minSpan = _anMinSpan();
+  let a = Math.max(0, nMin);
+  let b = Math.min(maxVal, nMax);
+  if (b - a < minSpan) {
+    const c = (a + b) / 2;
+    a = Math.max(0, c - minSpan / 2);
+    b = Math.min(maxVal, a + minSpan);
+    a = Math.max(0, b - minSpan);
+  }
+  anZMin = a;
+  anZMax = b;
+}
+
+function _anZoomAt(clientX, factor) {
+  if (!anData) return;
+  const canvas = document.getElementById('an-canvas');
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const pW = canvas.width - APAD.l - APAD.r;
+  if (pW <= 0) return;
+  const scaleX = canvas.width / Math.max(rect.width, 1);
+  const px = (clientX - rect.left) * scaleX;
+  const frac = Math.max(0, Math.min(1, (px - APAD.l) / pW));
+  const anchor = anZMin + frac * (anZMax - anZMin);
+  const newSpan = (anZMax - anZMin) * factor;
+  _anClampZoom(anchor - frac * newSpan, anchor + (1 - frac) * newSpan);
+  analyseDraw();
+}
+
+function _anPanByDeltaX(dx, panMin0, panMax0) {
+  const canvas = document.getElementById('an-canvas');
+  if (!canvas) return;
+  const pW = canvas.width - APAD.l - APAD.r;
+  if (pW <= 0) return;
+  const maxVal = _anMaxVal();
+  const span0 = panMax0 - panMin0;
+  const dVal = -(dx / pW) * span0;
+  let nMin = panMin0 + dVal;
+  let nMax = panMax0 + dVal;
+  if (nMin < 0) { nMax -= nMin; nMin = 0; }
+  if (nMax > maxVal) { nMin -= (nMax - maxVal); nMax = maxVal; }
+  anZMin = Math.max(0, nMin);
+  anZMax = Math.min(maxVal, nMax);
+}
+
+function _anSnapCursorToPeak() {
+  if (anMode === 'time' || anCursorX < 0) return;
+  const canvas = document.getElementById('an-canvas');
+  if (!canvas) return;
+  const P = APAD;
+  const pW = canvas.width - P.l - P.r;
+  const span = anZMax - anZMin;
+  if (pW <= 0 || span <= 0) return;
+
+  if (anMode === 'fft') {
+    _anEnsureFftA();
+    _anEnsureFftB();
+    const isVel = (anUnit === 'mm/s');
+    const mag = (_anVisA() && (isVel ? anMagVel : anMag))
+      ? (isVel ? anMagVel : anMag)
+      : (_anVisB() ? (isVel ? anMagVelB : anMagB) : null);
+    if (!mag) return;
+    const fs = anP.fs;
+    const nFFT = nextPow2(anP.n);
+    const rpmPB = (fs / nFFT) * 60;
+    const rpm = anZMin + ((anCursorX - P.l) / pW) * span;
+    let bin = Math.round(rpm / rpmPB);
+    const win = Math.max(8, Math.round((span / rpmPB) * 0.02));
+    let best = bin, bestA = -1;
+    const lo = Math.max(1, bin - win);
+    const hi = Math.min(mag.length - 1, bin + win);
+    for (let i = lo; i <= hi; i++) {
+      if (mag[i] > bestA) { bestA = mag[i]; best = i; }
+    }
+    const snapRpm = best * rpmPB;
+    anCursorX = P.l + (snapRpm - anZMin) / span * pW;
+    anCursorX = Math.max(P.l, Math.min(P.l + pW, anCursorX));
+    return;
+  }
+
+  if (anMode === 'demod' && anDemodResult && anDemodResult.freqsRpm) {
+    const freqs = anDemodResult.freqsRpm;
+    const amps = anDemodResult.amps || anDemodResult.envAmp;
+    if (!freqs.length) return;
+    const rpmPerBin = freqs.length > 1 ? (freqs[1] - freqs[0]) : 1;
+    const curRpm = anZMin + ((anCursorX - P.l) / pW) * span;
+    let idx = Math.round(curRpm / rpmPerBin);
+    const win = Math.max(4, Math.round((span / rpmPerBin) * 0.02));
+    let best = idx, bestA = -1;
+    const lo = Math.max(0, idx - win);
+    const hi = Math.min(freqs.length - 1, idx + win);
+    const ampArr = amps && amps.length ? amps : null;
+    for (let i = lo; i <= hi; i++) {
+      const a = ampArr ? ampArr[i] : 0;
+      if (a > bestA) { bestA = a; best = i; }
+    }
+    anCursorX = P.l + (freqs[best] - anZMin) / span * pW;
+    anCursorX = Math.max(P.l, Math.min(P.l + pW, anCursorX));
+  }
+}
+
+function _anPlaceCursorClick(clientX) {
+  if (anMode === 'time') {
+    _anPlaceTimeCursor(clientX);
+    return;
+  }
+  anSetCursorFromTouch(clientX);
+  _anSnapCursorToPeak();
+  analyseDraw();
+}
+
+function _anResetZoom() {
+  if (!anData) return;
+  anZMin = 0;
+  anZMax = _anMaxVal();
+  anCursorX = -1;
+  if (anMode === 'time') _anClearTimeCursors();
+  analyseDraw();
+}
+
+function _anSyncHScroll() {
+  const bar = document.getElementById('an-hscroll');
+  const thumb = document.getElementById('an-hscroll-thumb');
+  if (!bar || !thumb) return;
+  const hide = !anData || anMode === 'bump_wait' || anMode === 'bump_stream';
+  if (hide) {
+    bar.style.display = 'none';
+    bar.setAttribute('aria-hidden', 'true');
+    return;
+  }
+  const maxVal = _anMaxVal();
+  const span = Math.max(anZMax - anZMin, 1e-9);
+  const zoomed = maxVal > 0 && span < maxVal * 0.985;
+  bar.style.display = zoomed ? 'block' : 'none';
+  bar.setAttribute('aria-hidden', zoomed ? 'false' : 'true');
+  if (!zoomed) return;
+  const track = bar.querySelector('.graph-hscroll-track');
+  const tw = (track && track.clientWidth) || 1;
+  const thumbW = Math.max(28, (span / maxVal) * tw);
+  const maxLeft = Math.max(0, tw - thumbW);
+  const left = Math.max(0, Math.min(maxLeft, (anZMin / maxVal) * tw));
+  thumb.style.width = thumbW + 'px';
+  thumb.style.transform = 'translateX(' + left + 'px)';
+}
+
+function _anHScrollSetFromClientX(clientX, thumbW) {
+  const track = document.querySelector('#an-hscroll .graph-hscroll-track');
+  if (!track) return;
+  const rect = track.getBoundingClientRect();
+  const tw = rect.width || 1;
+  const maxVal = _anMaxVal();
+  const span = anZMax - anZMin;
+  const twThumb = thumbW || Math.max(28, (span / maxVal) * tw);
+  const maxLeft = Math.max(0, tw - twThumb);
+  let left = clientX - rect.left - twThumb / 2;
+  left = Math.max(0, Math.min(maxLeft, left));
+  const nMin = (left / tw) * maxVal;
+  _anClampZoom(nMin, nMin + span);
+  analyseDraw();
+}
+
+if (anWrap) {
+  anWrap.addEventListener('wheel', (e) => {
+    if (!anData) return;
+    if (anMode === 'bump_wait' || anMode === 'bump_stream') return;
+    e.preventDefault();
+    const factor = e.deltaY > 0 ? AN_WHEEL_FACTOR : (1 / AN_WHEEL_FACTOR);
+    _anZoomAt(e.clientX, factor);
+  }, { passive: false });
+
+  anWrap.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'touch') return;
+    if (e.button !== 0 || !anData) return;
+    if (anMode === 'bump_wait' || anMode === 'bump_stream') return;
+    if (anHamOpen) { anToggleHam(); return; }
+    e.preventDefault();
+    _anMouse.down = true;
+    _anMouse.x0 = e.clientX;
+    _anMouse.panMin0 = anZMin;
+    _anMouse.panMax0 = anZMax;
+    try { anWrap.setPointerCapture(e.pointerId); } catch (err) {}
+
+    // Mode temps (souris) :
+    //   clic             → curseur C1/C2 (Δt / RPM)
+    //   glisser          → sélection fenêtre FFT
+    //   Ctrl+glisser     → pan
+    //   Sél / Alt        → sélection dès le départ
+    if (anMode === 'time') {
+      const wantPan = (e.ctrlKey || e.metaKey) && !anSelMode;
+      if (wantPan) {
+        /* pending → pan ci-dessous */
+      } else if (anSelMode || e.altKey) {
+        _anMouse.mode = 'sel';
+        anSelStart = _anTouchToTime(e.clientX);
+        anSelEnd = anSelStart;
+        anSelecting = true;
+        anCursorX = -1;
+        analyseDraw();
+        return;
+      } else {
+        _anMouse.mode = 'pending_time';
+        return;
+      }
+    }
+
+    // FFT/demod : drag porteuse / sideband si curseur déjà posé
+    if ((anMode === 'fft' || anMode === 'demod') && anCursorX >= 0) {
+      const canvas = document.getElementById('an-canvas');
+      if (canvas) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / Math.max(rect.width, 1);
+        const px = (e.clientX - rect.left) * scaleX;
+        const pW = canvas.width - APAD.l - APAD.r;
+        const span = anZMax - anZMin;
+        const rpmCarrier = anZMin + ((anCursorX - APAD.l) / pW) * span;
+        const hit = _anHitCursorFeature(px, rpmCarrier, anZMin, span, pW);
+        if (hit === 'carrier') {
+          _anMouse.mode = 'drag_carrier';
+          return;
+        }
+        if (hit === 'sb') {
+          _anMouse.mode = 'drag_sb';
+          _anMouse.carrierRpm0 = rpmCarrier;
+          _anMouse.sbDelta0 = anSbDelta;
+          return;
+        }
+      }
+    }
+
+    _anMouse.mode = 'pending';
+  });
+
+  anWrap.addEventListener('dblclick', (e) => {
+    if (e.pointerType === 'touch') return;
+    if (!anData) return;
+    e.preventDefault();
+    _anResetZoom();
+  });
+}
+
+window.addEventListener('pointermove', (e) => {
+  if (_anScrollDrag) {
+    const maxVal = _anMaxVal();
+    const span = _anScrollDrag.span;
+    const track = document.querySelector('#an-hscroll .graph-hscroll-track');
+    if (!track) return;
+    const tw = track.clientWidth || 1;
+    const dx = e.clientX - _anScrollDrag.x0;
+    const dVal = (dx / tw) * maxVal;
+    _anClampZoom(_anScrollDrag.z0 + dVal, _anScrollDrag.z0 + dVal + span);
+    analyseDraw();
+    return;
+  }
+  if (!_anMouse.down || e.pointerType === 'touch') return;
+  const dx = e.clientX - _anMouse.x0;
+
+  if (_anMouse.mode === 'pending_time' && Math.abs(dx) > AN_MOUSE_DRAG_PX) {
+    _anMouse.mode = 'sel';
+    anSelecting = true;
+    anCursorX = -1;
+    const t0 = _anTouchToTime(_anMouse.x0);
+    const t = _anTouchToTime(e.clientX);
+    anSelStart = Math.max(0, Math.min(t, t0));
+    anSelEnd = Math.min(anP.t, Math.max(t, t0));
+    analyseDraw();
+    return;
+  }
+
+  if (_anMouse.mode === 'sel') {
+    const t = _anTouchToTime(e.clientX);
+    const t0 = _anTouchToTime(_anMouse.x0);
+    anSelStart = Math.max(0, Math.min(t, t0));
+    anSelEnd = Math.min(anP.t, Math.max(t, t0));
+    analyseDraw();
+    return;
+  }
+
+  if (_anMouse.mode === 'drag_carrier') {
+    anSetCursorFromTouch(e.clientX);
+    if (anMode === 'fft') _anSnapCursorToPeak();
+    analyseDraw();
+    return;
+  }
+
+  if (_anMouse.mode === 'drag_sb') {
+    const canvas = document.getElementById('an-canvas');
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / Math.max(rect.width, 1);
+    const px = (e.clientX - rect.left) * scaleX;
+    const pW = canvas.width - APAD.l - APAD.r;
+    const span = anZMax - anZMin;
+    if (pW <= 0 || span <= 0) return;
+    const rpmAt = anZMin + ((px - APAD.l) / pW) * span;
+    const delta = Math.abs(rpmAt - _anMouse.carrierRpm0);
+    anSbDelta = Math.max(1, Math.round(delta));
+    const sd = document.getElementById('an-sb-delta');
+    if (sd) sd.value = String(anSbDelta);
+    analyseDraw();
+    return;
+  }
+
+  if (_anMouse.mode === 'pending' && Math.abs(dx) > AN_MOUSE_DRAG_PX) {
+    _anMouse.mode = 'pan';
+    anCursorX = -1;
+  }
+  if (_anMouse.mode === 'pan') {
+    _anPanByDeltaX(dx, _anMouse.panMin0, _anMouse.panMax0);
+    analyseDraw();
+  }
+});
+
+window.addEventListener('pointerup', (e) => {
+  if (_anScrollDrag) {
+    _anScrollDrag = null;
+    return;
+  }
+  if (!_anMouse.down) return;
+  if (_anMouse.mode === 'pending_time') {
+    _anPlaceTimeCursor(e.clientX);
+  } else if (_anMouse.mode === 'sel') {
+    anSelecting = false;
+    if (anSelEnd - anSelStart < 0.01) { anSelStart = -1; anSelEnd = -1; }
+    _anInvalidateFft();
+    _anUpdateSelBtn();
+    analyseDraw();
+  } else if (_anMouse.mode === 'pending' && e.pointerType !== 'touch') {
+    _anPlaceCursorClick(e.clientX);
+  }
+  _anMouse.down = false;
+  _anMouse.mode = 'none';
+});
+
+window.addEventListener('pointercancel', () => {
+  _anScrollDrag = null;
+  _anMouse.down = false;
+  _anMouse.mode = 'none';
+});
+
+(function _anBindHScroll() {
+  const bar = document.getElementById('an-hscroll');
+  const thumb = document.getElementById('an-hscroll-thumb');
+  if (!bar || !thumb) return;
+  const track = bar.querySelector('.graph-hscroll-track');
+  thumb.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    _anScrollDrag = { x0: e.clientX, z0: anZMin, span: anZMax - anZMin };
+    try { thumb.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  if (track) {
+    track.addEventListener('pointerdown', (e) => {
+      if (e.target === thumb) return;
+      e.preventDefault();
+      _anHScrollSetFromClientX(e.clientX);
+    });
+  }
+})();
+
+['an-harm-n', 'an-sb-n', 'an-sb-delta'].forEach(function (id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener('change', function () {
+    _anReadCursorPrefs();
+    if (anData && (anMode === 'fft' || anMode === 'demod')) analyseDraw();
+  });
+});
 
 
 // ============================================================
@@ -1663,16 +2353,24 @@ function _anUpdateSelBtn(){
 function analyseToggleFFT() {
   if (!anData) return;
   if (anMode === 'time') {
-    anMode='fft'; anZMin=0; anZMax=3000;
-    anMag=null; anMagVel=null; anMagB=null; anMagVelB=null;
+    // Sélection active → FFT sur la portion (même logique que FFT Sél)
+    if (anSelStart >= 0 && anSelEnd > anSelStart) {
+      analyseFFTSel();
+      return;
+    }
+    anMode='fft';
+    _anInvalidateFft();
     anUnit='g'; anCursorX=-1;
+    _anClearTimeCursors();
+    _anZoomFullSpectrum();
   } else if (anMode === 'demod') {
     // Quitter démod → FFT standard
     anMode='fft'; anCursorX=-1;
-    if (!anMag) { anZMin=0; anZMax=3000; }
+    _anZoomFullSpectrum();
   } else {
     // FFT → temporel
     anMode='time'; anZMin=0; anZMax=anP.t||1; anCursorX=-1;
+    _anClearTimeCursors();
   }
   anUpdateBtnStates();
   analyseDraw();
@@ -1683,34 +2381,27 @@ function anSetUnit(unit) {
   if (!anData) return;
   anUnit = unit;
   if (anMode !== 'fft') {
-    anMode='fft'; anZMin=0; anZMax=3000;
-    anMag=null; anMagVel=null; anMagB=null; anMagVelB=null; anCursorX=-1;
+    anMode='fft';
+    _anInvalidateFft();
+    anCursorX=-1;
+    _anZoomFullSpectrum();
     anUpdateBtnStates(); analyseDraw(); return;
   }
   anCursorX=-1;
   if (unit === 'mm/s') {
     if (!anMagVel && anData) {
-      const _s=anDataDisplay||anData;
-      const chunk=(anSelStart>=0&&anSelEnd>anSelStart)
-        ? _s.slice(Math.round(anSelStart*anP.fs),Math.round(anSelEnd*anP.fs)+1)
-        : _s.slice(0,anP.n);
-      anMagVel=computeVelFFT(chunk,anP.fs,chunk.length);
+      const chunk = _anTimeChunk(anDataDisplay || anData);
+      if (chunk && chunk.length >= 64)
+        anMagVel = computeVelFFT(chunk, anP.fs, chunk.length);
     }
-    // B en mm/s si présent
     const _sB = anDataDisplayB || anDataB;
     if (_sB && _sB.length && !anMagVelB) {
-      const nB = Math.min(anP.n, _sB.length);
-      anMagVelB = computeVelFFT(_sB.slice(0, nB), anP.fs, nB);
+      const chunkB = _anTimeChunk(_sB);
+      if (chunkB && chunkB.length >= 64)
+        anMagVelB = computeVelFFT(chunkB, anP.fs, chunkB.length);
     }
-    if (anMagVel) {
-      const rpmPB=(anP.fs/nextPow2(anP.n))*60;
-      const maxBin=Math.min(anP.n/2-1,Math.floor(fftMaxRpmVel(anP.fs)/rpmPB));
-      const pk=fftPeakBin(anMagVel,maxBin);
-      anZMin=0; anZMax=Math.min(Math.max(600,pk*rpmPB*4),fftMaxRpmVel(anP.fs));
-    }
-  } else {
-    anZMax=Math.min(anZMax,fftMaxRpmG(anP.fs));
   }
+  _anZoomFullSpectrum();
   anUpdateBtnStates(); analyseDraw();
 }
 
@@ -1777,7 +2468,7 @@ function analyseRunDemod() {
 
   setTimeout(() => {
     try {
-      const sig = anDataDisplay || anData;
+      const sig = _anTimeChunk(anDataDisplay || anData);
       const fs  = anP.fs;
       // demodCompute() est défini dans demod.js
       // Si mode manuel, on passe la bande directement (bypass kurtogram)
@@ -1786,9 +2477,10 @@ function analyseRunDemod() {
       const sigB = anDataDisplayB || anDataB;
       if (sigB && sigB.length) {
         try {
+          const chunkB = _anTimeChunk(sigB);
           // Même bande que A (fLow/fHigh du résultat A) pour comparaison
           const flo = anDemodResult.fLow, fhi = anDemodResult.fHigh;
-          anDemodResultB = demodCompute(sigB, fs, flo, fhi);
+          anDemodResultB = demodCompute(chunkB, fs, flo, fhi);
         } catch (eB) {
           console.warn('[demod B]', eB);
           anDemodResultB = null;
@@ -1846,12 +2538,8 @@ function analyseFFTSel() {
       anMagVelB=computeVelFFT(chunkB,fs,chunkB.length);
     }
   }
-  const nFFT=nextPow2(n);
-  const rpmPB=(fs/nFFT)*60;
-  const minBinHP=Math.max(1,Math.ceil(HP_RPM_MIN/rpmPB));
-  const pk=fftPeakBin(anMag,Math.floor(nFFT/2)-1,minBinHP);
-  anZMin=HP_RPM_MIN; anZMax=Math.max(600,pk*rpmPB*4);
   anMode='fft'; anUnit='g'; anCursorX=-1;
+  _anZoomFullSpectrum();
   anUpdateBtnStates();
   const dur=(anSelEnd-anSelStart).toFixed(3);
   document.getElementById('an-fs').textContent +=
@@ -1861,6 +2549,7 @@ function analyseFFTSel() {
 
 function analyseSelClear(){
   anSelStart=-1;anSelEnd=-1;anSelecting=false;
+  _anInvalidateFft();
   _anUpdateSelBtn(); analyseDraw();
 }
 
@@ -1903,7 +2592,12 @@ function _anDownloadCSV(sig, baseNom, tag) {
   const n = Math.min(anP.n, sig.length);
   const dt = 1.0 / anP.fs;
   const lines = [];
-  lines.push('# VibrationAnalyser — Export CSV');
+  // Lignes G=/F=/T= → rechargeables aussi par le parseur natif
+  lines.push('G=' + anP.g);
+  lines.push('F=' + (anP.fsOrig || anP.fs));
+  lines.push('T=' + anP.t.toFixed(6));
+  lines.push('PROBE=' + tag);
+  lines.push('# VibrationAnalyser — Export CSV (rechargeable)');
   lines.push('# Probe: ' + tag);
   lines.push('# Date: ' + new Date().toISOString());
   lines.push('# Fs: ' + anP.fs + ' Hz');
@@ -1939,55 +2633,176 @@ function analyseExportCSV() {
   _anDownloadCSV(p.sig, nom, p.tag);
 }
 
-function analyseLoad() {
-  const inp=document.createElement('input');
-  inp.type='file';inp.accept='.txt,.csv';
-  inp.onchange=(e)=>{
-    const file=e.target.files[0];if(!file) return;
-    const reader=new FileReader();
-    reader.onload=(ev)=>{
-      const text=ev.target.result,lines=text.split('\n');
-      const h={};let dataLine=null;
-      for(let i=0;i<lines.length;i++){
-        const l=lines[i].trim();if(!l) continue;
-        if(l.startsWith('G='))   {h.g =parseFloat(l.slice(2));continue;}
-        if(l.startsWith('F='))   {h.fs=parseFloat(l.slice(2));continue;}
-        if(l.startsWith('T='))   {h.t =parseFloat(l.slice(2));continue;}
-        if(l.startsWith('N='))   {h.n =parseInt(l.slice(2));  continue;}
-        if(l.startsWith('['))    {dataLine=l;break;}
-        if(!isNaN(parseFloat(l))){dataLine=l;break;}
-      }
-      if(!h.g||!h.fs){alert('Format invalide');return;}
-      let rawArr=[];
-      if(dataLine&&dataLine.startsWith('[')){
-        try{rawArr=JSON.parse(dataLine);}catch(e){alert('Erreur données');return;}
-      }else{
-        for(let i=0;i<lines.length;i++){
-          const l=lines[i].trim(),v=parseFloat(l);
-          if(!isNaN(v)&&!l.includes('=')) rawArr.push(v);
+/**
+ * Parse capture native (G=/F=/T= + JSON int16) ou export CSV
+ * (# Fs / # Range + Time_s,Accel_g).
+ * @returns {{ g, fs, t, samples: Float64Array }|null}
+ */
+function _anParseCaptureText(text) {
+  const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/);
+  const h = {};
+  let dataLine = null;
+  let csvMode = false;
+  const csvAccel = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i].trim();
+    if (!l) continue;
+
+    // ── En-tête natif ──
+    if (l.startsWith('G=')) { h.g = parseFloat(l.slice(2)); continue; }
+    if (l.startsWith('F=')) { h.fs = parseFloat(l.slice(2)); continue; }
+    if (l.startsWith('T=')) { h.t = parseFloat(l.slice(2)); continue; }
+    if (l.startsWith('N=')) { h.n = parseInt(l.slice(2), 10); continue; }
+    if (l.startsWith('PROBE=')) continue;
+
+    // ── En-tête export CSV (commentaires #) ──
+    if (l.charAt(0) === '#') {
+      const fsM = l.match(/#\s*Fs\s*:\s*([\d.]+)/i);
+      if (fsM) h.fs = parseFloat(fsM[1]);
+      const gM = l.match(/#\s*Range\s*:\s*\+\/?-?\s*([\d.]+)/i);
+      if (gM) h.g = parseFloat(gM[1]);
+      const tM = l.match(/#\s*Duration\s*:\s*([\d.]+)/i);
+      if (tM) h.t = parseFloat(tM[1]);
+      const nM = l.match(/#\s*Samples\s*:\s*(\d+)/i);
+      if (nM) h.n = parseInt(nM[1], 10);
+      continue;
+    }
+
+    // Ligne titre CSV
+    if (/^Time_s\s*,/i.test(l) || /^time\s*,/i.test(l)) {
+      csvMode = true;
+      continue;
+    }
+
+    // Données natives : tableau JSON int16
+    if (l.startsWith('[')) {
+      dataLine = l;
+      break;
+    }
+
+    // Ligne CSV time,accel
+    if (csvMode || (l.indexOf(',') >= 0 && /^[-+]?\d/.test(l))) {
+      const parts = l.split(',');
+      if (parts.length >= 2) {
+        const ag = parseFloat(parts[1]);
+        if (Number.isFinite(ag)) {
+          csvMode = true;
+          csvAccel.push(ag);
+          continue;
         }
       }
-      if(rawArr.length===0){alert('Aucune donnée');return;}
-      const n=rawArr.length,scale=h.g/32768.0;
-      const isInt16=Math.abs(rawArr[0])>10;
-      anData=new Float64Array(n);
-      for(let i=0;i<n;i++) anData[i]=isInt16?rawArr[i]*scale:rawArr[i];
-      let mean=0;
-      for(let i=0;i<n;i++) mean+=anData[i];mean/=n;
-      for(let i=0;i<n;i++) anData[i]-=mean;
-      const _fsReal=fsCorrected(h.fs);
-      anP={g:h.g,fs:_fsReal,fsOrig:h.fs,t:h.t||(n/_fsReal),n};
-      anUpdateStats();
-      if(_wavSource) analysePause();
-      analyseResetDualSession();
-      anMode='time';anZMin=0;anZMax=anP.t;anMag=null;anMagVel=null;anCursorX=-1;
-      anUnit='g';anDataDisplay=null;anFilterInfo='';
-      anDemodResult=null;
-      anSelStart=-1;anSelEnd=-1;_anUpdateSelBtn();
-      anUpdateBtnStates();
-      showTab('analyse');analyseDraw();
-      _anPersistSave();
+    }
+
+    // Ancien format : une valeur float/int par ligne
+    if (!csvMode && !dataLine && !l.includes('=')) {
+      const v = parseFloat(l);
+      if (!isNaN(v)) {
+        // peut être début d'une liste mono-colonne — collecté plus bas
+        dataLine = 'mono';
+      }
+    }
+  }
+
+  if (!h.g || !h.fs) return null;
+
+  let samples = null;
+
+  if (csvMode && csvAccel.length > 0) {
+    // Export CSV : déjà en g
+    samples = new Float64Array(csvAccel.length);
+    for (let i = 0; i < csvAccel.length; i++) samples[i] = csvAccel[i];
+  } else if (dataLine && dataLine.startsWith('[')) {
+    let rawArr;
+    try { rawArr = JSON.parse(dataLine); }
+    catch (e) { return null; }
+    if (!rawArr || !rawArr.length) return null;
+    const scale = h.g / 32768.0;
+    const isInt16 = Math.abs(rawArr[0]) > 10 || Math.abs(rawArr[Math.min(10, rawArr.length - 1)]) > 10;
+    samples = new Float64Array(rawArr.length);
+    for (let i = 0; i < rawArr.length; i++) {
+      samples[i] = isInt16 ? rawArr[i] * scale : rawArr[i];
+    }
+  } else {
+    // Une valeur par ligne (hors en-têtes)
+    const rawArr = [];
+    for (let i = 0; i < lines.length; i++) {
+      const l = lines[i].trim();
+      if (!l || l.includes('=') || l.charAt(0) === '#' || l.indexOf(',') >= 0) continue;
+      const v = parseFloat(l);
+      if (!isNaN(v)) rawArr.push(v);
+    }
+    if (!rawArr.length) return null;
+    const scale = h.g / 32768.0;
+    const isInt16 = Math.abs(rawArr[0]) > 10;
+    samples = new Float64Array(rawArr.length);
+    for (let i = 0; i < rawArr.length; i++) {
+      samples[i] = isInt16 ? rawArr[i] * scale : rawArr[i];
+    }
+  }
+
+  if (!samples || !samples.length) return null;
+
+  // Retrait DC
+  let mean = 0;
+  for (let i = 0; i < samples.length; i++) mean += samples[i];
+  mean /= samples.length;
+  for (let i = 0; i < samples.length; i++) samples[i] -= mean;
+
+  return { g: h.g, fs: h.fs, t: h.t, samples: samples };
+}
+
+function _anApplyLoadedCapture(parsed, fileName) {
+  const n = parsed.samples.length;
+  const _fsReal = (typeof fsCorrected === 'function') ? fsCorrected(parsed.fs) : parsed.fs;
+  anData = parsed.samples;
+  anP = {
+    g: parsed.g,
+    fs: _fsReal,
+    fsOrig: parsed.fs,
+    t: parsed.t || (n / _fsReal),
+    n: n
+  };
+  anUpdateStats();
+  if (_wavSource) analysePause();
+  analyseResetDualSession();
+  anMode = 'time'; anZMin = 0; anZMax = anP.t;
+  anMag = null; anMagVel = null; anCursorX = -1;
+  if (typeof _anClearTimeCursors === 'function') _anClearTimeCursors();
+  anUnit = 'g'; anDataDisplay = null; anFilterInfo = '';
+  anDemodResult = null;
+  anSelStart = -1; anSelEnd = -1; _anUpdateSelBtn();
+  anUpdateBtnStates();
+  if (typeof showTab === 'function') showTab('analyse');
+  analyseDraw();
+  if (typeof _anPersistSave === 'function') _anPersistSave();
+  if (typeof termAddLine === 'function') {
+    termAddLine('[analyse] chargé ' + (fileName || '') + ' N=' + n + ' Fs=' + parsed.fs, 'sys');
+  }
+}
+
+function analyseLoad() {
+  const inp = document.createElement('input');
+  inp.type = 'file';
+  inp.accept = '.txt,.csv,text/plain,text/csv';
+  inp.onchange = function (e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function (ev) {
+      const parsed = _anParseCaptureText(ev.target.result);
+      if (!parsed) {
+        alert(
+          'Format non reconnu.\n\n' +
+          '• Recharge : fichier .txt de « Sauv » (G=/F=/ + données)\n' +
+          '• Ou CSV de « CSV » (# Fs / # Range + Time_s,Accel_g)\n\n' +
+          'Renommer .csv → .txt ne change pas le contenu.'
+        );
+        return;
+      }
+      _anApplyLoadedCapture(parsed, file.name);
     };
+    reader.onerror = function () { alert('Lecture fichier impossible'); };
     reader.readAsText(file);
   };
   inp.click();
