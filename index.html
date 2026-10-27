@@ -20,11 +20,11 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=89">
+<link rel="stylesheet" href="style.css?v=90">
 <link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
-  // Bump à chaque release UI — invalide l'ancien « Compris » (sinon bandeau invisible à jamais)
-  var PWA_UI_VER = '89';
+  // Bump à chaque release UI — invalide l'ancien « Compris »
+  var PWA_UI_VER = '90';
   var PWA_URL = 'https://jowhit.github.io/VibrationAnalyser-UI/';
 
   function _pwaT(key) {
@@ -37,39 +37,44 @@
         window.navigator.standalone === true;
     } catch (e) { return false; }
   }
-  function _pwaClearStaleDismiss() {
+  function _pwaIsHttpsOk() {
+    var h = location.hostname || '';
+    return location.protocol === 'https:' ||
+      h === 'localhost' || h === '127.0.0.1';
+  }
+  function _pwaClearAllDismiss() {
     try {
-      localStorage.removeItem('pwaInstallDismissed'); // ancien flag global
-      var keep = _pwaDismissKey();
+      localStorage.removeItem('pwaInstallDismissed');
       Object.keys(localStorage).forEach(function (k) {
-        if (k.indexOf('pwaInstallDismissed_v') === 0 && k !== keep) localStorage.removeItem(k);
+        if (k.indexOf('pwaInstallDismissed') === 0) localStorage.removeItem(k);
       });
     } catch (e) {}
   }
 
   function showPwaInstallUi() {
-    _pwaClearStaleDismiss();
     var dismissed = false;
     try { dismissed = localStorage.getItem(_pwaDismissKey()) === '1'; } catch (e) {}
     var box = document.getElementById('pwa-install');
     var btn = document.getElementById('pwa-install-btn');
     var hint = document.getElementById('pwa-install-hint');
     var standalone = _pwaIsStandalone();
-    // Prompt dispo → toujours réafficher (même après « Compris »)
-    var forceShow = !!window._pwaPrompt || standalone;
+    var httpsOk = _pwaIsHttpsOk();
+    var forceShow = !!window._pwaPrompt || standalone || !httpsOk;
     if (box) box.style.display = (!dismissed || forceShow) ? 'block' : 'none';
     if (btn) {
       btn.style.display = (window._pwaPrompt && !standalone) ? 'inline-block' : 'none';
     }
     if (hint) {
       if (standalone) hint.textContent = _pwaT('pwa.hintInstalled');
+      else if (!httpsOk) hint.textContent = _pwaT('pwa.hintHttp');
       else if (window._pwaPrompt) hint.textContent = _pwaT('pwa.hintInstall');
       else hint.textContent = _pwaT('pwa.hintClear');
     }
   }
 
   if ('serviceWorker' in navigator) {
-    navigator.serviceWorker.register('service-worker.js?v=89', { scope: './' })
+    // Pas de ?v= sur le script SW : une seule registration stable (Chrome / install)
+    navigator.serviceWorker.register('./service-worker.js', { scope: './' })
       .then(function (reg) {
         if (reg && reg.update) reg.update();
         if (reg && reg.waiting) reg.waiting.postMessage({ type: 'SKIP_WAITING' });
@@ -88,7 +93,7 @@
   window.addEventListener('beforeinstallprompt', function (e) {
     e.preventDefault();
     window._pwaPrompt = e;
-    try { localStorage.removeItem(_pwaDismissKey()); } catch (err) {}
+    _pwaClearAllDismiss();
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', showPwaInstallUi);
     } else {
@@ -109,15 +114,30 @@
     if (box) box.style.display = 'none';
   }
 
+  /** Reset fort : flags + caches + unregister SW → reload (sinon « Reset » ne change rien). */
   function resetPwaInstall() {
-    try {
-      localStorage.removeItem('pwaInstallDismissed');
-      localStorage.removeItem(_pwaDismissKey());
-    } catch (e) {}
-    showPwaInstallUi();
+    _pwaClearAllDismiss();
+    window._pwaPrompt = null;
     if (typeof termAddLine === 'function') {
       termAddLine(_pwaT('pwa.resetHint'), 'sys');
+      if (!_pwaIsHttpsOk()) termAddLine(_pwaT('pwa.hintHttp'), 'sys');
     }
+    var jobs = [];
+    if (window.caches && caches.keys) {
+      jobs.push(caches.keys().then(function (keys) {
+        return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+      }));
+    }
+    if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+      jobs.push(navigator.serviceWorker.getRegistrations().then(function (regs) {
+        return Promise.all(regs.map(function (r) { return r.unregister(); }));
+      }));
+    }
+    Promise.all(jobs).then(function () {
+      setTimeout(function () { location.reload(); }, 200);
+    }).catch(function () {
+      location.reload();
+    });
   }
   window.resetPwaInstall = resetPwaInstall;
 
@@ -125,16 +145,18 @@
     var p = window._pwaPrompt;
     if (!p) {
       showPwaInstallUi();
+      if (typeof termAddLine === 'function') {
+        termAddLine(_pwaIsHttpsOk() ? _pwaT('pwa.hintClear') : _pwaT('pwa.hintHttp'), 'sys');
+      }
       return;
     }
     p.prompt();
     p.userChoice.then(function (choice) {
       window._pwaPrompt = null;
-      // Ne masquer QUE si accepté — un refus ne doit pas bloquer l'install à jamais
       if (choice && choice.outcome === 'accepted') {
         try { localStorage.setItem(_pwaDismissKey(), '1'); } catch (e) {}
       } else {
-        try { localStorage.removeItem(_pwaDismissKey()); } catch (e) {}
+        _pwaClearAllDismiss();
         showPwaInstallUi();
       }
     }).catch(function () {
@@ -775,7 +797,7 @@
               <button type="button" class="bal-btn bal-mode-toggle bal-mode-toggle--active" data-bal-win="16">16</button>
               <button type="button" class="bal-btn bal-mode-toggle" data-bal-win="32">32</button>
             </div>
-            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v89</div>
+            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v90</div>
           </div>
         </div>
         <button id="btn-bal-run" class="bal-btn bal-btn-run" disabled>&#9654; Démarrer</button>
@@ -853,20 +875,20 @@
 
 </div><!-- #main -->
 
-<script src="i18n.js?v=89"></script>
-<script src="terminal.js?v=89"></script>
-<script src="fft.js?v=89"></script>
-<script src="fft-session.js?v=89"></script>
+<script src="i18n.js?v=90"></script>
+<script src="terminal.js?v=90"></script>
+<script src="fft.js?v=90"></script>
+<script src="fft-session.js?v=90"></script>
 <script src="demod.js?v=16"></script>
-<script src="analyse.js?v=89"></script>
+<script src="analyse.js?v=90"></script>
 <script src="anal-session.js?v=70"></script>
-<script src="bump-session.js?v=89"></script>
-<script src="calc.js?v=89"></script>
-<script src="balance.js?v=89"></script>
+<script src="bump-session.js?v=90"></script>
+<script src="calc.js?v=90"></script>
+<script src="balance.js?v=90"></script>
 <script src="balance-session.js?v=70"></script>
-<script src="harmonic.js?v=89"></script>
-<script src="phase-session.js?v=89"></script>
-<script src="menu.js?v=89"></script>
-<script src="app.js?v=89"></script>
+<script src="harmonic.js?v=90"></script>
+<script src="phase-session.js?v=90"></script>
+<script src="menu.js?v=90"></script>
+<script src="app.js?v=90"></script>
 </body>
 </html>

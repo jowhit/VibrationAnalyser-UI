@@ -38,9 +38,10 @@
   "pwa.copied": "Copied!",
   "pwa.dismiss": "Got it",
   "pwa.hintInstall": "Tap Install, or Chrome menu ⋮ → Install app.",
-  "pwa.hintClear": "No Install button: open this link in Chrome (not GitHub), or uninstall the old Analyser app, or Probe → Connection → Reset PWA.",
-  "pwa.hintInstalled": "Already installed (standalone). To reinstall: uninstall Analyser, then reopen this link in Chrome.",
-  "pwa.resetHint": "Install banner shown again — reload in Chrome if needed.",
+  "pwa.hintClear": "No Install button: open https://jowhit.github.io/VibrationAnalyser-UI/ in Chrome, uninstall old Analyser app, then Reset PWA.",
+  "pwa.hintHttp": "Cannot install from ESP IP (HTTP). Open only https://jowhit.github.io/VibrationAnalyser-UI/ in Chrome.",
+  "pwa.hintInstalled": "Already installed (standalone). To reinstall: uninstall Analyser, then reopen the GitHub Pages link in Chrome.",
+  "pwa.resetHint": "PWA reset: caches + service worker cleared — reloading…",
   "pwa.reset": "Reset PWA",
   "pwa.reset.sub": "Show Install again",
 

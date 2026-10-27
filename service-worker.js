@@ -1,12 +1,13 @@
 // Shell PWA — chemins relatifs au dossier du service worker
 // (fonctionne a la racine ESP32 et sous /VibrationAnalyser-UI/ sur GitHub Pages).
+//
+// lang/*.json volontairement ABSENTS du précache : chargés à la demande par i18n.js
+// (évite qu'un 404/JSON casse l'installabilité PWA perçue / cache SW).
 
-const CACHE_NAME = 'vibanalyser-v89';
+const CACHE_NAME = 'vibanalyser-v90';
 const FILES = [
   './index.html',
   './i18n.js',
-  './lang/fr.json',
-  './lang/en.json',
   './app.js',
   './analyse.js',
   './anal-session.js',
@@ -36,6 +37,7 @@ function _url(name) {
 self.addEventListener('install', function (event) {
   event.waitUntil(
     caches.open(CACHE_NAME).then(function (cache) {
+      // cache.addAll échoue tout le lot si 1 fichier manque — on tolère les trous
       return Promise.all(FILES.map(function (name) {
         return fetch(_url(name), { cache: 'no-cache' }).then(function (response) {
           if (response && response.ok) return cache.put(_url(name), response);

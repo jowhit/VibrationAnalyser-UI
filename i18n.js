@@ -2,7 +2,7 @@
 const I18n = (() => {
   const LS_KEY = 'va_lang';
   const SUPPORTED = ['fr', 'en'];
-  const CACHE_VER = '89';
+  const CACHE_VER = '90';
 
   let _lang = 'fr';
   let _dicts = {};
