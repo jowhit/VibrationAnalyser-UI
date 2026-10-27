@@ -28,11 +28,11 @@ const FftSession = (() => {
     const btn = document.getElementById('btn-fft-start');
     if (!btn) return;
     if (on) {
-      btn.textContent = '◼ Arrêter';
+      btn.textContent = (typeof t === 'function') ? t('common.stop') : '◼ Arrêter';
       btn.classList.add('bal-btn-stop');
       btn.classList.remove('bal-btn-run', 'running');
     } else {
-      btn.textContent = '▶ Démarrer';
+      btn.textContent = (typeof t === 'function') ? t('common.start') : '▶ Démarrer';
       btn.classList.remove('bal-btn-stop');
       btn.classList.add('bal-btn-run');
     }

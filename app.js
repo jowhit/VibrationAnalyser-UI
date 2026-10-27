@@ -223,8 +223,128 @@ async function pingEspHost(host, timeoutMs) {
 }
 
 /**
- * Trouve l'hôte joignable : IP mémorisée d'abord (Android), puis mDNS (iOS).
- * Sur Android, vibanalyseur.local ne résout souvent pas — l'IP est prioritaire.
+ * IPv4 locales du téléphone (WebRTC) — pour scanner le même /24 que le hotspot.
+ */
+function _rtcLocalIpv4s() {
+  return new Promise(function (resolve) {
+    const found = [];
+    const seen = {};
+    let done = false;
+    function finish() {
+      if (done) return;
+      done = true;
+      try { pc.close(); } catch (e) {}
+      resolve(found);
+    }
+    let pc;
+    try {
+      pc = new RTCPeerConnection({ iceServers: [] });
+    } catch (e) {
+      resolve([]);
+      return;
+    }
+    const t = setTimeout(finish, 1500);
+    pc.createDataChannel('x');
+    pc.onicecandidate = function (ev) {
+      if (!ev || !ev.candidate || !ev.candidate.candidate) {
+        if (ev && !ev.candidate) {
+          clearTimeout(t);
+          finish();
+        }
+        return;
+      }
+      const m = /([0-9]{1,3}(?:\.[0-9]{1,3}){3})/.exec(ev.candidate.candidate);
+      if (!m) return;
+      const ip = m[1];
+      if (seen[ip]) return;
+      if (ip.indexOf('127.') === 0) return;
+      seen[ip] = true;
+      found.push(ip);
+    };
+    pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }).catch(finish);
+  });
+}
+
+function _subnetBase(ip) {
+  const p = String(ip || '').split('.');
+  if (p.length !== 4) return null;
+  return p[0] + '.' + p[1] + '.' + p[2];
+}
+
+/**
+ * Scan parallèle /ping sur un /24 (ou plage autour d'une IP connue).
+ * @returns {Promise<string[]>} IPs qui répondent
+ */
+/** Annulation scan IP manuel (menu Connexion). */
+let _espScanAbort = null;
+
+function isEspScanBusy() { return !!_espScanAbort; }
+function cancelEspScan() {
+  if (_espScanAbort) _espScanAbort.aborted = true;
+}
+
+async function scanEspSubnet(opts) {
+  opts = opts || {};
+  const timeoutMs = opts.timeoutMs || 900;
+  const concurrency = opts.concurrency || 24;
+  const isAborted = typeof opts.isAborted === 'function'
+    ? opts.isAborted
+    : function () { return !!(opts.signal && opts.signal.aborted); };
+  const bases = {};
+  const hosts = [];
+  const seenH = {};
+
+  function addHost(h) {
+    if (!h || !_isEspIpv4(h) || seenH[h]) return;
+    seenH[h] = true;
+    hosts.push(h);
+  }
+  function addBase(b) {
+    if (!b || bases[b]) return;
+    bases[b] = true;
+  }
+
+  // Bases : IP locales WebRTC + IP mémorisée + hôtes connus
+  const rtc = await _rtcLocalIpv4s();
+  if (isAborted()) return [];
+  rtc.forEach(function (ip) { addBase(_subnetBase(ip)); });
+  const stored = (localStorage.getItem('esp32ip') || '').trim();
+  if (_isEspIpv4(stored)) {
+    addBase(_subnetBase(stored));
+    const last = parseInt(stored.split('.')[3], 10);
+    // Priorité : voisinage de l'ancienne IP (DHCP ±30)
+    for (let d = 0; d <= 30; d++) {
+      if (last + d <= 254) addHost(_subnetBase(stored) + '.' + (last + d));
+      if (d > 0 && last - d >= 1) addHost(_subnetBase(stored) + '.' + (last - d));
+    }
+  }
+  if (_isEspIpv4(ESP32_HOST)) addBase(_subnetBase(ESP32_HOST));
+  // Hotspots Android / Windows fréquents
+  ['192.168.43', '192.168.137', '10.42.0', '192.168.173', '192.168.1'].forEach(addBase);
+
+  Object.keys(bases).forEach(function (b) {
+    for (let i = 1; i <= 254; i++) addHost(b + '.' + i);
+  });
+
+  const found = [];
+  let idx = 0;
+  async function worker() {
+    while (idx < hosts.length) {
+      if (isAborted()) return;
+      const i = idx++;
+      const h = hosts[i];
+      if (await pingEspHost(h, timeoutMs)) found.push(h);
+    }
+  }
+  const nW = Math.min(concurrency, hosts.length);
+  const jobs = [];
+  for (let w = 0; w < nW; w++) jobs.push(worker());
+  await Promise.all(jobs);
+  return found;
+}
+
+/**
+ * Trouve l'hôte joignable : IP mémorisée, mDNS, puis scan subnet hotspot.
  */
 async function discoverEspHost() {
   const pageIp = resolveEspIp();
@@ -254,10 +374,85 @@ async function discoverEspHost() {
     }
   }
 
+  // Scan réseau local (hotspot Android : IP DHCP a changé)
+  if (typeof termAddLine === 'function') {
+    termAddLine(t('app.scanNet'), 'sys');
+  }
+  try {
+    const found = await scanEspSubnet({ timeoutMs: 700, concurrency: 28 });
+    if (found.length) {
+      const h = found[0];
+      ESP32_IP = h;
+      localStorage.setItem('esp32ip', h);
+      if (typeof termAddLine === 'function') {
+        termAddLine(t('app.espFound', { list: found.join(', ') }), 'ok');
+      }
+      return h;
+    }
+  } catch (e) {
+    if (typeof termAddLine === 'function') {
+      termAddLine(t('app.scanFail', { err: (e && e.message ? e.message : e) }), 'sys');
+    }
+  }
+
   if (storedIp && _isEspIpv4(storedIp)) return storedIp;
   if (pageIp) return pageIp;
   return ESP_MDNS_HOST;
 }
+
+/** Menu Connexion — scan manuel ; résultats dans le terminal (copier-coller). */
+async function findEspAndPrompt() {
+  function line(msg, kind) {
+    if (typeof termAddLine === 'function') termAddLine(msg, kind || 'sys');
+  }
+  if (_espScanAbort) {
+    line(t('app.searchBusy'), 'sys');
+    return { busy: true };
+  }
+  const abort = { aborted: false };
+  _espScanAbort = abort;
+  line(t('app.searchEsp'), 'sys');
+  let found = [];
+  try {
+    found = await scanEspSubnet({
+      timeoutMs: 800,
+      concurrency: 28,
+      isAborted: function () { return !!abort.aborted; }
+    });
+  } catch (e) {
+    line(t('app.scanImpossible', { err: (e && e.message ? e.message : e) }), 'sys');
+    return { error: true };
+  } finally {
+    if (_espScanAbort === abort) _espScanAbort = null;
+  }
+  if (abort.aborted) {
+    line(t('app.searchCancel'), 'sys');
+    return { cancelled: true };
+  }
+  if (!found.length) {
+    line(t('app.noneFound'), 'sys');
+    return { empty: true };
+  }
+  line(t('app.foundList', { n: found.length }), 'ok');
+  for (let i = 0; i < found.length; i++) {
+    line('  ' + found[i], 'ok');
+  }
+  const host = found[0];
+  if (typeof applyEspIp === 'function') applyEspIp(host, true);
+  else {
+    ESP32_IP = host;
+    localStorage.setItem('esp32ip', host);
+    _wsConnectTo(host);
+  }
+  line(found.length > 1
+    ? t('app.connectedAMore', { host: host })
+    : t('app.connectedA', { host: host }), 'ok');
+  return { ok: true, host: host, found: found };
+}
+window.findEspAndPrompt = findEspAndPrompt;
+window.scanEspSubnet = scanEspSubnet;
+window.isEspScanBusy = isEspScanBusy;
+window.cancelEspScan = cancelEspScan;
 
 (function _initEspFromUrl() {
   const host = resolveEspHost();
@@ -1814,20 +2009,31 @@ window.clearVaSession = clearVaSession;
 window.addEventListener('resize', () => { fftDraw(); analyseDraw(); });
 
 document.addEventListener('DOMContentLoaded', () => {
-  syncHostFromPage();
-  updateConnStatus();
-  var lastTab = localStorage.getItem('lastTab') || 'term';
-  if (typeof _anPersistRestore === 'function' && _anPersistRestore()) {
-    anUpdateStats();
-    anApplyLayoutByMode();
-    anUpdateBtnStates();
-    if (lastTab === 'analyse') setTimeout(analyseDraw, 60);
+  const boot = function () {
+    syncHostFromPage();
+    updateConnStatus();
+    var lastTab = localStorage.getItem('lastTab') || 'term';
+    if (typeof _anPersistRestore === 'function' && _anPersistRestore()) {
+      anUpdateStats();
+      anApplyLayoutByMode();
+      anUpdateBtnStates();
+      if (lastTab === 'analyse') setTimeout(analyseDraw, 60);
+    }
+    showTab(lastTab);
+    if (typeof MenuModule     !== 'undefined') MenuModule.init(wsSend, showTab, wsGoto);
+    if (typeof HarmonicModule !== 'undefined') HarmonicModule.init();
+    // Restaure snapshot équilibrage même avant WS (pause / refresh)
+    if (typeof BalanceModule !== 'undefined') BalanceModule.init(wsSend);
+    if (typeof showPwaInstallUi === 'function') showPwaInstallUi();
+  };
+  if (typeof I18n !== 'undefined' && I18n.init) {
+    I18n.init().then(boot).catch(function (e) {
+      console.warn('i18n init failed', e);
+      boot();
+    });
+  } else {
+    boot();
   }
-  showTab(lastTab);
-  if (typeof MenuModule     !== 'undefined') MenuModule.init(wsSend, showTab, wsGoto);
-  if (typeof HarmonicModule !== 'undefined') HarmonicModule.init();
-  // Restaure snapshot équilibrage même avant WS (pause / refresh)
-  if (typeof BalanceModule !== 'undefined') BalanceModule.init(wsSend);
 });
 
 /** Demande confirmation avant refresh (Android : parfois sans dialogue — localStorage sauve quand même). */

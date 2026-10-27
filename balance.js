@@ -34,6 +34,8 @@ const BalanceModule = (() => {
   let _satRuns = [];
   let _satPendingDummyR2 = false;
   let _satPendingContinue = false;
+  /** Historique résultats (1P / 2P / Sat) — accessible via ☰ */
+  let _resultHist = [];
 
   const CLIP_THRESH = 30000;
   const CLIP_WARN_FRAC = 0.02;
@@ -100,11 +102,12 @@ const BalanceModule = (() => {
   const BAL_JUMP_THR = 0.45;        // distance phasor / amp_moy
   const BAL_JUMP_NEED = 2;          // 2 tours suspects d'affilée → reset
   let _winMax = 16;                 // 8 / 16 / 32 (opérateur)
-  let _winA = [];                   // {re,im,satPct}[]
+  let _winA = [];                   // {re,im,satPct,ampG}[] — re/im = mm/s
   let _winB = [];
-  let _avgRe=0, _avgIm=0, _tourCount=0;   // sommes / N fenêtre A
+  let _avgRe=0, _avgIm=0, _tourCount=0;   // sommes / N fenêtre A (mm/s)
   let _avgReB=0, _avgImB=0, _tourCountB=0;
   let _avgSatA=0, _avgSatB=0;
+  let _avgAmpGA=0, _avgAmpGB=0;         // somme amp g (moniteur sat)
   let _warmA = 0, _warmB = 0;
   let _jumpA = 0, _jumpB = 0;
   let _suppressLiveTour = false;
@@ -243,6 +246,19 @@ const BalanceModule = (() => {
     }
     const btnCopyLog = document.getElementById('btn-bal-copy-log');
     if (btnCopyLog) btnCopyLog.addEventListener('click', copyLog);
+    const btnHist = document.getElementById('btn-bal-result-hist');
+    if (btnHist) btnHist.addEventListener('click', function (e) {
+      e.stopPropagation();
+      showResultHist();
+    });
+    const btnHistClose = document.getElementById('btn-bal-hist-close');
+    if (btnHistClose) btnHistClose.addEventListener('click', hideResultHist);
+    const histOv = document.getElementById('bal-result-hist-ov');
+    if (histOv) {
+      histOv.addEventListener('click', function (e) {
+        if (e.target === histOv) hideResultHist();
+      });
+    }
     const btnMore = document.getElementById('btn-bal-more');
     const morePanel = document.getElementById('bal-more-panel');
     if (btnMore && morePanel) {
@@ -274,7 +290,14 @@ const BalanceModule = (() => {
       if (w === 8 || w === 16 || w === 32) _winMax = w;
     } catch (e) {}
 
-    log('Module équilibrage prêt');
+    if (typeof I18n !== 'undefined' && I18n.onChange) {
+      I18n.onChange(function () {
+        _updateUI();
+        _updateMeasUi();
+        if (typeof I18n.applyDom === 'function') I18n.applyDom();
+      });
+    }
+    log(typeof t === 'function' ? t('bal.moduleReady') : 'Module équilibrage prêt');
     state = S.IDLE;
     if (!_mode) setMode('1P');
     _restoreFromStorageIfAny();
@@ -435,8 +458,15 @@ const BalanceModule = (() => {
   function selectSensor() { /* réservé */ }
 
   // ════════════════════════════════════════════════════════════
-  // DFT 1X
+  // DFT 1X — phase en g (accélération) ; amplitude affichée / vecteurs en mm/s
   // ════════════════════════════════════════════════════════════
+  /** amp_g → mm/s à 1X : V = A·g·1000 / (2πf), f = rpm/60. Phase inchangée (DFT g). */
+  function _gToMmS(ampG, rpm) {
+    if (!(rpm > 1) || !Number.isFinite(ampG)) return 0;
+    const f = rpm / 60;
+    return (ampG * 9.80665 * 1000) / (2 * Math.PI * f);
+  }
+
   function _dft1X(samples, gRange, N) {
     const lsbPerG=16384/gRange;
     let mean=0; for(let i=0;i<N;i++) mean+=samples[i]; mean/=N;
@@ -450,7 +480,7 @@ const BalanceModule = (() => {
     sc/=N; ss/=N;
     const amp=2*Math.sqrt(sc*sc+ss*ss);
     let ph=Math.atan2(ss,sc)*180/Math.PI; if(ph<0)ph+=360;
-    return {amp,phase:ph};
+    return {amp,phase:ph}; // amp = g
   }
 
   /** Fraction samples saturés (|raw| >= CLIP_THRESH) — warning DFT. */
@@ -507,27 +537,31 @@ const BalanceModule = (() => {
 
   /**
    * Hybrid : plateau+ OK → θ mid+, ampPct 100–200 ; sinon DFT θ + ampPct 0–100.
-   * amp (polar) = toujours ampG DFT.
+   * amp (polar / ICM) = mm/s ; phase = DFT g (ou plateau) ; ampG = g (sat %).
    */
-  function _tourFromSamples(samples, range, n) {
+  function _tourFromSamples(samples, range, n, rpm) {
     const dft = _dft1X(samples, range, n);
+    const ampMms = _gToMmS(dft.amp, rpm || _lastRpm || 0);
     if (_measMode !== 'clip') {
       const frac = _clipFrac(samples, n);
       if (frac >= CLIP_WARN_FRAC) _showClipWarn(frac);
-      return { amp: dft.amp, phase: dft.phase, satPct: 0, satDeg: 0, ampUnit: 'g', ampG: dft.amp };
+      return {
+        amp: ampMms, phase: dft.phase, satPct: 0, satDeg: 0,
+        ampUnit: 'mm/s', ampG: dft.amp
+      };
     }
     const c = _clipPlateauPos(samples, n);
     const satDeg = c.alpha * 360;
     const satPct = _ampPctHybrid(dft.amp, satDeg, c.ok);
     if (c.ok) {
       return {
-        amp: dft.amp, phase: c.phase,
+        amp: ampMms, phase: c.phase,
         satPct: satPct, satDeg: satDeg,
         ampUnit: 'pct', ampG: dft.amp
       };
     }
     return {
-      amp: dft.amp, phase: dft.phase,
+      amp: ampMms, phase: dft.phase,
       satPct: satPct, satDeg: satDeg,
       ampUnit: 'pct', ampG: dft.amp
     };
@@ -716,9 +750,11 @@ const BalanceModule = (() => {
       const old = win.shift();
       if (isA) {
         _avgRe -= old.re; _avgIm -= old.im; _avgSatA -= (old.satPct || 0);
+        _avgAmpGA -= (old.ampG || 0);
         _tourCount = win.length;
       } else {
         _avgReB -= old.re; _avgImB -= old.im; _avgSatB -= (old.satPct || 0);
+        _avgAmpGB -= (old.ampG || 0);
         _tourCountB = win.length;
       }
     }
@@ -726,25 +762,26 @@ const BalanceModule = (() => {
 
   function _clearWindow(ch) {
     if (ch === 'A') {
-      _winA = []; _avgRe = 0; _avgIm = 0; _avgSatA = 0; _tourCount = 0; _jumpA = 0;
+      _winA = []; _avgRe = 0; _avgIm = 0; _avgSatA = 0; _avgAmpGA = 0; _tourCount = 0; _jumpA = 0;
     } else {
-      _winB = []; _avgReB = 0; _avgImB = 0; _avgSatB = 0; _tourCountB = 0; _jumpB = 0;
+      _winB = []; _avgReB = 0; _avgImB = 0; _avgSatB = 0; _avgAmpGB = 0; _tourCountB = 0; _jumpB = 0;
     }
   }
 
   function _fmtTourLine(amp, phase, satPct) {
-    let s = amp.toFixed(3) + 'g @' + Math.round(phase) + '°';
+    let s = amp.toFixed(3) + ' mm/s @' + Math.round(phase) + '°';
     if (_measMode === 'clip') s += ' amp=' + (satPct || 0).toFixed(1) + '%';
     return s;
   }
 
   /**
    * Ajoute un tour à la moyenne (fenêtre + chauffe + reset phasor).
-   * amp = ampG (polar). satPct optionnel (mode Sat).
+   * amp = mm/s (polar). ampG = g (sat). satPct optionnel (mode Sat).
    */
-  function _pushTourAvg(ch, amp, phase, satPct) {
+  function _pushTourAvg(ch, amp, phase, satPct, ampG) {
     const isA = ch === 'A';
     const sat = satPct || 0;
+    const aG = (ampG != null && Number.isFinite(ampG)) ? ampG : 0;
     const re = amp * Math.cos(phase * Math.PI / 180);
     const im = amp * Math.sin(phase * Math.PI / 180);
     const tag = isA ? (_isDuo2P() ? 'A' : '') : 'B';
@@ -781,14 +818,19 @@ const BalanceModule = (() => {
     const win = isA ? _winA : _winB;
     if (win.length >= _winMax) {
       const old = win.shift();
-      if (isA) { _avgRe -= old.re; _avgIm -= old.im; _avgSatA -= (old.satPct || 0); }
-      else { _avgReB -= old.re; _avgImB -= old.im; _avgSatB -= (old.satPct || 0); }
+      if (isA) {
+        _avgRe -= old.re; _avgIm -= old.im; _avgSatA -= (old.satPct || 0);
+        _avgAmpGA -= (old.ampG || 0);
+      } else {
+        _avgReB -= old.re; _avgImB -= old.im; _avgSatB -= (old.satPct || 0);
+        _avgAmpGB -= (old.ampG || 0);
+      }
     }
-    win.push({ re: re, im: im, satPct: sat });
+    win.push({ re: re, im: im, satPct: sat, ampG: aG });
     if (isA) {
-      _avgRe += re; _avgIm += im; _avgSatA += sat; _tourCount = win.length;
+      _avgRe += re; _avgIm += im; _avgSatA += sat; _avgAmpGA += aG; _tourCount = win.length;
     } else {
-      _avgReB += re; _avgImB += im; _avgSatB += sat; _tourCountB = win.length;
+      _avgReB += re; _avgImB += im; _avgSatB += sat; _avgAmpGB += aG; _tourCountB = win.length;
     }
 
     const avg = isA ? _getLiveAvg() : _getLiveAvgB();
@@ -805,9 +847,9 @@ const BalanceModule = (() => {
   function onTourBinary(rpm,range,n,samples) {
     if(![S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING].includes(state)) return;
     if (_suppressLiveTour) return;
-    const ph=_tourFromSamples(samples,range,n);
+    const ph=_tourFromSamples(samples,range,n,rpm);
     if (!ph) return;
-    const avg=_pushTourAvg('A', ph.amp, ph.phase, ph.satPct);
+    const avg=_pushTourAvg('A', ph.amp, ph.phase, ph.satPct, ph.ampG);
     _updateRpm(rpm);
     if (!avg) {
       if (_mode==='1P') _drawPolar1P();
@@ -836,9 +878,9 @@ const BalanceModule = (() => {
     if (!_isDuo2P()) return;
     if(![S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING].includes(state)) return;
     if (_suppressLiveTour) return;
-    const ph=_tourFromSamples(samples,range,n);
+    const ph=_tourFromSamples(samples,range,n,rpm);
     if (!ph) return;
-    const avg=_pushTourAvg('B', ph.amp, ph.phase, ph.satPct);
+    const avg=_pushTourAvg('B', ph.amp, ph.phase, ph.satPct, ph.ampG);
     _updateRpm(rpm);
     if (avg) _drawLivePolar(_ctxB,_canvasB,_polarPtsB,avg.amp,avg.phase,_tourCountB);
     else _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
@@ -858,29 +900,29 @@ const BalanceModule = (() => {
     return def?def.sensor:null;
   }
 
-  function _liveFromSums(re, im, satSum, count) {
+  function _liveFromSums(re, im, satSum, ampGSum, count) {
     if (count === 0) return null;
-    const amp = Math.sqrt(re * re + im * im) / count;
+    const amp = Math.sqrt(re * re + im * im) / count; // mm/s
     let ph = Math.atan2(im, re) * 180 / Math.PI; if (ph < 0) ph += 360;
     const satPct = satSum / count;
-    // satDeg approximé depuis ampPct si ≥100 (branche plateau)
+    const ampG = ampGSum / count;
     const satDeg = satPct >= 100 ? ((satPct - 100) / 100) * 180 : 0;
     return {
       amp: amp, phase: ph, satPct: satPct, satDeg: satDeg,
-      ampUnit: _measMode === 'clip' ? 'pct' : 'g', ampG: amp
+      ampUnit: _measMode === 'clip' ? 'pct' : 'mm/s', ampG: ampG
     };
   }
   function _getLiveAvg() {
-    return _liveFromSums(_avgRe, _avgIm, _avgSatA, _tourCount);
+    return _liveFromSums(_avgRe, _avgIm, _avgSatA, _avgAmpGA, _tourCount);
   }
   function _getLiveAvgB() {
-    return _liveFromSums(_avgReB, _avgImB, _avgSatB, _tourCountB);
+    return _liveFromSums(_avgReB, _avgImB, _avgSatB, _avgAmpGB, _tourCountB);
   }
 
   function _resetAvg() {
     _winA = []; _winB = [];
-    _avgRe=0; _avgIm=0; _avgSatA=0; _tourCount=0;
-    _avgReB=0; _avgImB=0; _avgSatB=0; _tourCountB=0;
+    _avgRe=0; _avgIm=0; _avgSatA=0; _avgAmpGA=0; _tourCount=0;
+    _avgReB=0; _avgImB=0; _avgSatB=0; _avgAmpGB=0; _tourCountB=0;
     _warmA = BAL_WARMUP; _warmB = BAL_WARMUP;
     _jumpA = 0; _jumpB = 0;
     if (_mode==='2P') _drawAll2P(); else _drawPolar1P();
@@ -988,7 +1030,7 @@ const BalanceModule = (() => {
       satPct: avg.satPct || 0,
       satDeg: avg.satDeg != null ? avg.satDeg : (avg.satPct || 0) * 1.8,
       ampG: avg.ampG != null ? avg.ampG : avg.amp,
-      ampUnit: avg.ampUnit || 'g',
+      ampUnit: avg.ampUnit || 'mm/s',
       amp: avg.amp
     };
   }
@@ -1012,7 +1054,7 @@ const BalanceModule = (() => {
   function _fmtSnapBrief(s) {
     let t = 'θ=' + s.phase.toFixed(1) + '°  amp=' + s.satPct.toFixed(1) + '%';
     if (s.satDeg >= 1) t += ' (plateau ' + s.satDeg.toFixed(1) + '°)';
-    else t += ' (g=' + s.ampG.toFixed(3) + ')';
+    else t += ' (' + (s.amp != null ? s.amp.toFixed(3) : '0') + ' mm/s)';
     return t;
   }
 
@@ -1028,31 +1070,116 @@ const BalanceModule = (() => {
 
   function _satRunLabel(idx0) { return 'R' + (idx0 + 1); }
 
+  function _fmtSigned(n, digits) {
+    if (n == null || !Number.isFinite(n)) return '—';
+    const d = digits != null ? digits : 1;
+    return (n >= 0 ? '+' : '') + n.toFixed(d);
+  }
+
   function _renderSatResults() {
     if (!resultEl || !_satRuns.length) return;
-    let html = '<div class="bal-sat-result"><div class="bal-sat-title">Moniteur Saturation</div>';
+    const satTitle = (typeof t === 'function') ? t('bal.satMonitor') : 'Moniteur Saturation';
+    let html = '<div class="bal-sat-result"><div class="bal-sat-title">' + satTitle + '</div>';
+    html += '<table class="bal-sat-table"><thead><tr>' +
+      '<th>Run</th><th>θ°</th><th>amp%</th><th>plat°</th>' +
+      '<th>Δθ₁</th><th>Δ%₁</th><th>Δθ₋</th><th>Δ%₋</th>' +
+      '</tr></thead><tbody>';
     for (let i = 0; i < _satRuns.length; i++) {
       const s = _satRuns[i];
-      let line = _satRunLabel(i) + '  ' + _fmtSnapBrief(s);
+      const plat = (s.satDeg >= 1) ? s.satDeg.toFixed(1) : '—';
+      let dTh1 = '—', dAmp1 = '—', dThP = '—', dAmpP = '—';
       if (i > 0) {
-        line += '  |  ' + _fmtDeltaPart('vs R1', s, _satRuns[0]);
-        if (i > 1) line += '  |  ' + _fmtDeltaPart('vs ' + _satRunLabel(i - 1), s, _satRuns[i - 1]);
+        dTh1 = _fmtSigned(_deltaPhase(s.phase, _satRuns[0].phase));
+        dAmp1 = _fmtSigned(_deltaAmpPct(s, _satRuns[0]));
+        if (i > 1) {
+          dThP = _fmtSigned(_deltaPhase(s.phase, _satRuns[i - 1].phase));
+          dAmpP = _fmtSigned(_deltaAmpPct(s, _satRuns[i - 1]));
+        }
       }
-      html += '<div class="bal-sat-line">' + line + '</div>';
+      html += '<tr>' +
+        '<td>' + _satRunLabel(i) + '</td>' +
+        '<td class="bal-sat-num">' + s.phase.toFixed(1) + '</td>' +
+        '<td class="bal-sat-num">' + s.satPct.toFixed(1) + '</td>' +
+        '<td class="bal-sat-num">' + plat + '</td>' +
+        '<td class="bal-sat-num">' + dTh1 + '</td>' +
+        '<td class="bal-sat-num">' + dAmp1 + '</td>' +
+        '<td class="bal-sat-num">' + dThP + '</td>' +
+        '<td class="bal-sat-num">' + dAmpP + '</td>' +
+        '</tr>';
     }
-    html += '</div>';
+    html += '</tbody></table></div>';
     resultEl.innerHTML = html;
+  }
+
+  function _pushResultHist(title, html, text) {
+    const entry = {
+      ts: Date.now(),
+      mode: _mode + (_measMode === 'clip' ? '-sat' : ''),
+      title: title || 'Résultat',
+      html: html || '',
+      text: text || ''
+    };
+    _resultHist.push(entry);
+    if (_resultHist.length > 60) _resultHist.shift();
+  }
+
+  function _histModeLabel(m) {
+    if (m === '1P-sat') return '1P Sat';
+    if (m === '1P') return '1 Plan';
+    if (m === '2P') return '2 Plans';
+    return m || '';
+  }
+
+  function showResultHist() {
+    const ov = document.getElementById('bal-result-hist-ov');
+    const body = document.getElementById('bal-result-hist-body');
+    const morePanel = document.getElementById('bal-more-panel');
+    const btnMore = document.getElementById('btn-bal-more');
+    if (morePanel) morePanel.style.display = 'none';
+    if (btnMore) {
+      btnMore.classList.remove('bal-more-open');
+      btnMore.setAttribute('aria-expanded', 'false');
+    }
+    if (!ov || !body) return;
+    if (!_resultHist.length) {
+      const empty = (typeof t === 'function') ? t('bal.histEmpty') : 'Aucun résultat encore';
+      body.innerHTML = '<div class="bal-hist-empty">' + empty + '</div>';
+    } else {
+      let html = '';
+      for (let i = _resultHist.length - 1; i >= 0; i--) {
+        const e = _resultHist[i];
+        const t = new Date(e.ts);
+        const clock = t.toTimeString().slice(0, 8);
+        html += '<div class="bal-hist-entry">';
+        html += '<div class="bal-hist-meta">[' + clock + '] ' + _histModeLabel(e.mode) +
+          ' — ' + (e.title || '') + '</div>';
+        if (e.html) html += '<div class="bal-hist-content">' + e.html + '</div>';
+        else if (e.text) html += '<div class="bal-hist-content">' + e.text.replace(/</g, '&lt;') + '</div>';
+        html += '</div>';
+      }
+      body.innerHTML = html;
+    }
+    ov.style.display = 'flex';
+    ov.setAttribute('aria-hidden', 'false');
+  }
+
+  function hideResultHist() {
+    const ov = document.getElementById('bal-result-hist-ov');
+    if (!ov) return;
+    ov.style.display = 'none';
+    ov.setAttribute('aria-hidden', 'true');
   }
 
   function _accept1PSat(avg) {
     const snap = _snapFromAvg(avg);
     if (state === S.RUN1_RUNNING) {
       _satRuns = [snap];
-      _run1 = { amp: snap.ampG, phase: snap.phase };
-      _pushPts(_runs1P, 1, snap.ampG, snap.phase, '#1a6fc4');
+      _run1 = { amp: snap.amp, phase: snap.phase };
+      _pushPts(_runs1P, 1, snap.amp, snap.phase, '#1a6fc4');
       log('✓ R1 (réf): ' + _fmtSnapBrief(snap));
       setStatus('R1 capturée — Run suivant', 'ok');
       _renderSatResults();
+      _pushResultHist('R1 (réf)', '', _fmtSnapBrief(snap));
       _drawPolar1P();
       _hideMassInput();
       _suppressLiveTour = true;
@@ -1064,12 +1191,14 @@ const BalanceModule = (() => {
       _satRuns.push(snap);
       const n = _satRuns.length; // 1-based display = length after push
       const col = n === 2 ? '#2a8a3e' : '#c45a00';
-      _pushPts(_runs1P, n, snap.ampG, snap.phase, col);
-      log('✓ ' + _satRunLabel(n - 1) + ': ' + _fmtSnapBrief(snap) +
+      _pushPts(_runs1P, n, snap.amp, snap.phase, col);
+      const brief = _fmtSnapBrief(snap) +
         '  |  ' + _fmtDeltaPart('vs R1', snap, _satRuns[0]) +
-        (n > 2 ? '  |  ' + _fmtDeltaPart('vs ' + _satRunLabel(n - 2), snap, _satRuns[n - 2]) : ''));
+        (n > 2 ? '  |  ' + _fmtDeltaPart('vs ' + _satRunLabel(n - 2), snap, _satRuns[n - 2]) : '');
+      log('✓ ' + _satRunLabel(n - 1) + ': ' + brief);
       setStatus(_satRunLabel(n - 1) + ' capturée', 'ok');
       _renderSatResults();
+      _pushResultHist(_satRunLabel(n - 1), '', brief);
       _drawPolar1P();
       _hideMassInput();
       _suppressLiveTour = true;
@@ -1088,19 +1217,22 @@ const BalanceModule = (() => {
     if (_measMode === 'clip') { _accept1PSat(avg); return; }
     if (state===S.RUN1_RUNNING) {
       _run1=avg; _pushPts(_runs1P,1,avg.amp,avg.phase,'#1a6fc4');
-      log('✓ R1: '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°');
+      log('✓ R1: '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
       _suppressLiveTour = true;
       _resetAvg(); _balSend('BAL_ACCEPT'); _showMassInput('Masse et angle essai');
       persistSession();
     } else if (state===S.RUN2_RUNNING) {
       _run2=avg; _pushPts(_runs1P,2,avg.amp,avg.phase,'#2a8a3e');
-      log('✓ R2: '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°');
+      log('✓ R2: '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
       const icm=_icm1P(_run1,_run2,_testMass1P,_testAngle1P);
       _influenceRatio=icm.ratio; _phaseShift=icm.pSh;
       log('✓ Correction: '+icm.corrMass.toFixed(1)+'g @ '+icm.corrAngle.toFixed(1)+'°');
       setStatus('Correction: '+icm.corrMass.toFixed(1)+'g @ '+icm.corrAngle.toFixed(1)+'°','ok');
-      if (resultEl) resultEl.innerHTML=_html1PCorrResult('Correction 1 Plan',icm.corrMass,icm.corrAngle,
-        'R1: '+_run1.amp.toFixed(3)+'g @'+_run1.phase.toFixed(1)+'°  |  R2: '+_run2.amp.toFixed(3)+'g @'+_run2.phase.toFixed(1)+'°');
+      const detR12='R1: '+_run1.amp.toFixed(3)+' mm/s @'+_run1.phase.toFixed(1)+'°  |  R2: '+_run2.amp.toFixed(3)+' mm/s @'+_run2.phase.toFixed(1)+'°';
+      const htmlR12=_html1PCorrResult('Correction 1 Plan',icm.corrMass,icm.corrAngle,detR12);
+      if (resultEl) resultEl.innerHTML=htmlR12;
+      _pushResultHist('Correction 1 Plan', htmlR12,
+        icm.corrMass.toFixed(1)+'g @ '+icm.corrAngle.toFixed(1)+'°  |  '+detR12);
       _drawPolar1P(); _hideMassInput(); _suppressLiveTour = true; _resetAvg(); _balSend('BAL_ACCEPT');
       persistSession();
       _maybeOfferSave();
@@ -1109,10 +1241,14 @@ const BalanceModule = (() => {
       const corrMass=_influenceRatio>0?avg.amp/_influenceRatio:0;
       let corrAngle=avg.phase+180-_phaseShift; corrAngle=((corrAngle%360)+360)%360;
       const red=_run1?((_run1.amp-avg.amp)/_run1.amp*100):0;
-      log('Run '+_runXcount+': '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°  '+(red>=0?'▼':'▲')+Math.abs(red).toFixed(1)+'%');
-      if (resultEl) resultEl.innerHTML=_html1PCorrResult('Run '+_runXcount+' — Correction',corrMass,corrAngle,
-        'Amp: '+avg.amp.toFixed(3)+'g @'+avg.phase.toFixed(1)+'°  <span style="color:'+(red>=0?'#2a7a35':'#bb2200')+'">'+(red>=0?'▼':'▲')+Math.abs(red).toFixed(1)+'%</span>');
+      log('Run '+_runXcount+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  '+(red>=0?'▼':'▲')+Math.abs(red).toFixed(1)+'%');
+      const detX='Amp: '+avg.amp.toFixed(3)+' mm/s @'+avg.phase.toFixed(1)+'°  <span style="color:'+(red>=0?'#2a7a35':'#bb2200')+'">'+(red>=0?'▼':'▲')+Math.abs(red).toFixed(1)+'%</span>';
+      const htmlX=_html1PCorrResult('Run '+_runXcount+' — Correction',corrMass,corrAngle,detX);
+      if (resultEl) resultEl.innerHTML=htmlX;
+      _pushResultHist('Run '+_runXcount+' — Correction', htmlX,
+        corrMass.toFixed(1)+'g @ '+corrAngle.toFixed(1)+'°  |  '+avg.amp.toFixed(3)+' mm/s @'+avg.phase.toFixed(1)+'°');
       _drawPolar1P(); _suppressLiveTour = true; _resetAvg(); _balSend('BAL_ACCEPT');
+      persistSession();
     }
     _updateUI();
     _updateCoeffButtons();
@@ -1201,7 +1337,7 @@ const BalanceModule = (() => {
             const n = plane==='A' ? _tourCount : _tourCountB;
             _meas[cond][plane]=avg;
             _pushPts(plane==='A'?_polarPtsA:_polarPtsB, condLabels[cond], avg.amp, avg.phase, colors[cond]);
-            log('✓ Cond.'+(cond+1)+' Palier '+plane+': '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°  ('+n+' tours)');
+            log('✓ Cond.'+(cond+1)+' Palier '+plane+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  ('+n+' tours)');
           });
           _drawAll2P();
           _suppressLiveTour = true;
@@ -1217,8 +1353,8 @@ const BalanceModule = (() => {
           _pushPts(_polarPtsA,'V'+num, avgA.amp, avgA.phase, '#e07000');
           _pushPts(_polarPtsB,'V'+num, avgB.amp, avgB.phase, '#e07000');
           _drawAll2P();
-          log('✓ Run '+num+' A: '+avgA.amp.toFixed(3)+'g @ '+avgA.phase.toFixed(1)+'°');
-          log('✓ Run '+num+' B: '+avgB.amp.toFixed(3)+'g @ '+avgB.phase.toFixed(1)+'°');
+          log('✓ Run '+num+' A: '+avgA.amp.toFixed(3)+' mm/s @ '+avgA.phase.toFixed(1)+'°');
+          log('✓ Run '+num+' B: '+avgB.amp.toFixed(3)+' mm/s @ '+avgB.phase.toFixed(1)+'°');
           _suppressLiveTour = true;
           _balSend('BAL_ACCEPT');
           _resetAvg();
@@ -1243,7 +1379,7 @@ const BalanceModule = (() => {
         _pushPts(plane==='A'?_polarPtsA:_polarPtsB, condLabels[cond], avg.amp, avg.phase, colors[cond]);
         if(plane==='A') _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA);
         else            _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
-        log('✓ Cond.'+(cond+1)+' Palier '+plane+': '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
+        log('✓ Cond.'+(cond+1)+' Palier '+plane+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
         _suppressLiveTour = true;
         _balSend('BAL_ACCEPT');
         _resetAvg();
@@ -1257,7 +1393,7 @@ const BalanceModule = (() => {
         _pushPts(plane==='A'?_polarPtsA:_polarPtsB,'V'+num, avg.amp, avg.phase, '#e07000');
         if(plane==='A') _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA);
         else            _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
-        log('✓ Run '+num+' Palier '+plane+': '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
+        log('✓ Run '+num+' Palier '+plane+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
         _suppressLiveTour = true;
         _balSend('BAL_ACCEPT');
         _resetAvg();
@@ -1272,7 +1408,7 @@ const BalanceModule = (() => {
         _pushPts(plane==='A'?_polarPtsA:_polarPtsB, condLabels[cond], avg.amp, avg.phase, colors[cond]);
         if(plane==='A') _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA);
         else            _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
-        log('✓ Cond.'+(cond+1)+' Palier '+plane+': '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
+        log('✓ Cond.'+(cond+1)+' Palier '+plane+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
         _suppressLiveTour = true;
         _balSend('BAL_ACCEPT');
         _resetAvg();
@@ -1285,7 +1421,7 @@ const BalanceModule = (() => {
         _pushPts(plane==='A'?_polarPtsA:_polarPtsB,'V'+num, avg.amp, avg.phase, '#e07000');
         if(plane==='A') _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA);
         else            _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
-        log('✓ Run '+num+' Palier '+plane+': '+avg.amp.toFixed(3)+'g @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
+        log('✓ Run '+num+' Palier '+plane+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
         _suppressLiveTour = true;
         _balSend('BAL_ACCEPT');
         _resetAvg();
@@ -1340,7 +1476,7 @@ const BalanceModule = (() => {
     if (!rEl) return;
     const redHtml=(red,plane)=>red!==null?
       '<span style="color:'+(red>=0?'#2a7a35':'#bb2200')+'">'+(red>=0?'▼':'▲')+Math.abs(red).toFixed(1)+'%</span>':'';
-    rEl.innerHTML=
+    const html=
       '<div class="bal-correction">'+
       '<div class="bal-corr-label">⚖ Corrections 2 Plans</div>'+
       '<div class="bal-corr-plan-lbl" style="color:#1a6fc4">Plan A</div>'+
@@ -1352,6 +1488,10 @@ const BalanceModule = (() => {
       '<div class="bal-corr-ang">@ '+planB.angle.toFixed(1)+'°  '+redHtml(redB,'B')+'</div>'+
       (detail?'<div class="bal-corr-sep"></div><div class="bal-corr-detail">'+detail+'</div>':'')+
       '</div>';
+    rEl.innerHTML = html;
+    _pushResultHist('Corrections 2 Plans', html,
+      'A '+planA.mass.toFixed(1)+'g @'+planA.angle.toFixed(1)+'°  |  B '+
+      planB.mass.toFixed(1)+'g @'+planB.angle.toFixed(1)+'°');
   }
 
   function _clearResult2P() {
@@ -1421,6 +1561,12 @@ const BalanceModule = (() => {
   // RÉCEPTION TEXTE ESP
   // ════════════════════════════════════════════════════════════
   function _applyCoeffLoaded(line) {
+    const unitMms = line.indexOf('h_unit=mms') >= 0 || line.indexOf('amp_unit=mms') >= 0;
+    if (!unitMms) {
+      log('⚠ Coeff NVS ancien (amp en g) — refaire influence (amp = mm/s)');
+      setStatus('Ancien coefficient (g) — refaire un équilibrage', 'err');
+      return;
+    }
     if (line.indexOf('mode=1P') >= 0 || line.indexOf('mode=1plan') >= 0) {
       _influenceRatio = _parseKeyFloat(line, 'h_amp=');
       _phaseShift = _parseKeyFloat(line, 'h_phase=');
@@ -1446,7 +1592,7 @@ const BalanceModule = (() => {
     _polarPtsB = [];
     _drawPolar1P();
     _drawAll2P();
-    log('Coefficient chargé — prêt pour RunX');
+    log('Coefficient chargé (mm/s) — prêt pour RunX');
     setStatus('Coefficient chargé — RunX prêt', 'ok');
     _updateCoeffButtons();
   }
@@ -1621,6 +1767,8 @@ const BalanceModule = (() => {
     if (resultEl) resultEl.innerHTML = '';
     const r2p = document.getElementById('bal-result-2p');
     if (r2p) r2p.innerHTML = '';
+    _resultHist = [];
+    hideResultHist();
     if (inMass) inMass.value = '100';
     if (inAngle) inAngle.value = '0';
     _hideMassInput();
@@ -1647,7 +1795,7 @@ const BalanceModule = (() => {
 
   function doSaveCoeff() {
     if (!_canSaveCoeff()) return;
-    let cmd = 'BAL_SAVE_COEFF ';
+    let cmd = 'BAL_SAVE_COEFF h_unit=mms ';
     if (_mode === '1P') {
       cmd += 'mode=1P h_amp=' + _influenceRatio.toFixed(6) + ' h_phase=' + _phaseShift.toFixed(2);
     } else {
@@ -1735,7 +1883,7 @@ const BalanceModule = (() => {
     c.beginPath();c.arc(px,py,6,0,2*Math.PI);c.fillStyle='#e07000';c.fill();
     c.strokeStyle='#fff';c.lineWidth=1.5;c.beginPath();c.moveTo(px-4,py);c.lineTo(px+4,py);c.moveTo(px,py-4);c.lineTo(px,py+4);c.stroke();
     c.fillStyle='#c05000';c.font='8px "Courier New",monospace';c.textAlign='left';
-    c.fillText(avgAmp.toFixed(3)+'g @'+Math.round(avgPh)+'°',px+8,py-3);
+    c.fillText(avgAmp.toFixed(3)+' mm/s @'+Math.round(avgPh)+'°',px+8,py-3);
     c.fillStyle='#c0500099';c.fillText('n='+nTour,px+8,py+8);
   }
 
@@ -1787,24 +1935,25 @@ const BalanceModule = (() => {
     if (_mode==='1P') {
       const running=[S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING];
       const ready=[S.IDLE,S.RUN1_READY,S.RUN2_READY,S.RUNX_READY];
+      const _tb = (k) => (typeof t === 'function' ? t(k) : k);
       if (_measMode === 'clip') {
         btnRun.disabled = ![...running, ...ready].includes(state);
         const lblSat = {
-          [S.IDLE]: 'Démarrer', [S.RUN1_READY]: 'Run 1  ▶', [S.RUN1_RUNNING]: '✓ Capturer',
-          [S.RUN2_READY]: 'Run  ▶', [S.RUN2_RUNNING]: '✓ Capturer',
-          [S.RUNX_READY]: 'Run  ▶', [S.RUNX_RUNNING]: '✓ Capturer', [S.RPM_SCAN]: 'Scan RPM…'
+          [S.IDLE]: _tb('bal.start'), [S.RUN1_READY]: _tb('bal.run1'), [S.RUN1_RUNNING]: _tb('bal.capture'),
+          [S.RUN2_READY]: _tb('bal.run'), [S.RUN2_RUNNING]: _tb('bal.capture'),
+          [S.RUNX_READY]: _tb('bal.run'), [S.RUNX_RUNNING]: _tb('bal.capture'), [S.RPM_SCAN]: _tb('bal.rpmScan')
         };
-        btnRun.textContent = lblSat[state] || 'Run ▶';
+        btnRun.textContent = lblSat[state] || _tb('bal.run');
       } else {
         btnRun.disabled=![...running,...ready,S.R2_CONFIG,S.CORRECTION].includes(state);
-        const lbl={[S.IDLE]:'Démarrer',[S.RUN1_READY]:'Run 1  ▶',[S.RUN1_RUNNING]:'✓ Capturer',
-          [S.R2_CONFIG]:'📦 Valider masse essai',[S.RUN2_READY]:'Run 2  ▶',[S.RUN2_RUNNING]:'✓ Capturer',
-          [S.CORRECTION]:'▶ Continuer',[S.RUNX_READY]:'Run vérif  ▶',[S.RUNX_RUNNING]:'✓ Capturer',[S.RPM_SCAN]:'Scan RPM…'};
-        btnRun.textContent=lbl[state]||'Run ▶';
+        const lbl={[S.IDLE]:_tb('bal.start'),[S.RUN1_READY]:_tb('bal.run1'),[S.RUN1_RUNNING]:_tb('bal.capture'),
+          [S.R2_CONFIG]:_tb('bal.validateMass'),[S.RUN2_READY]:_tb('bal.run2'),[S.RUN2_RUNNING]:_tb('bal.capture'),
+          [S.CORRECTION]:_tb('bal.continue'),[S.RUNX_READY]:_tb('bal.verifyRun'),[S.RUNX_RUNNING]:_tb('bal.capture'),[S.RPM_SCAN]:_tb('bal.rpmScan')};
+        btnRun.textContent=lbl[state]||_tb('bal.run');
       }
     } else {
       const def=_getStepDef(_2pStep);
-      if (!def){btnRun.disabled=true;btnRun.textContent='Terminé ✓';return;}
+      if (!def){btnRun.disabled=true;btnRun.textContent=(typeof t==='function'?t('bal.done'):'Terminé ✓');return;}
 
       const running=[S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING];
       const ready=[S.IDLE,S.RUN1_READY,S.RUN2_READY,S.RUNX_READY];
@@ -1917,6 +2066,7 @@ const BalanceModule = (() => {
       saveOffered: _saveOfferedThisProc,
       resultHtml: resultEl ? resultEl.innerHTML : '',
       result2pHtml: _result2pHtml(),
+      resultHist: _resultHist,
       ts: Date.now(),
     };
   }
@@ -1971,6 +2121,7 @@ const BalanceModule = (() => {
     if (resultEl) resultEl.innerHTML = o.resultHtml || '';
     const r2p = document.getElementById('bal-result-2p');
     if (r2p) r2p.innerHTML = o.result2pHtml || '';
+    _resultHist = Array.isArray(o.resultHist) ? o.resultHist : [];
     setMode(_mode);
     _drawPolar1P();
     _drawAll2P();
@@ -2113,6 +2264,7 @@ const BalanceModule = (() => {
     resize, clearSession, selectSensor,
     hasProgress, persistSession, pauseForLeave, resumeSession,
     discardSession, prepareNewFromMenu, setWinMax, copyLog,
+    showResultHist, hideResultHist,
     isPaused: function () { return !!_sessionPaused; },
     getMeasMode: function () { return _measMode; },
   };

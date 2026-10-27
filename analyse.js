@@ -31,8 +31,13 @@ function _anIsDualUi() {
 
 let anMagB = null;
 let anMagVelB = null;
+let anMagDisp = null;
+let anMagDispB = null;
 let anDemodResultB = null;
 let anDataDisplayB = null;
+/** Caches temporel intégré (mm/s, mm) — invalidés avec filtre / nouvelle acquis. */
+let anDataVel = null, anDataVelB = null;
+let anDataDispMm = null, anDataDispMmB = null;
 
 // Visibilité traces A/B (hamburger 👁) — indépendante du flush données
 let anShowA = true;
@@ -193,6 +198,15 @@ function anPersistClear() {
 let anMode = 'time'; // 'time' | 'fft' | 'demod' | 'bump_wait' | 'bump_ready'
 let anMag  = null;
 let anZMin = 0, anZMax = 1;
+/** Zoom vertical temporel (>1 = zoom in). anYPan = décalage du centre (g). */
+let anYZoom = 1;
+let anYPan = 0;
+/** Dernière plage Y pleine (sans zoom) — pour clamp pan / scrollbar. */
+let _anYBaseMid = 0;
+let _anYFullHalf = 1;
+const AN_YZOOM_FACTOR = 1.25;
+const AN_YZOOM_MIN = 0.2;
+const AN_YZOOM_MAX = 50;
 let anCursorX = -1;
 /** Curseurs temporels : {t, amp} | null — clic1 puis clic2 → Δt / RPM */
 let anTimeC1 = null;
@@ -280,7 +294,8 @@ function _anMaxVal() {
   if (anMode === 'time') return anP.t || 1;
   if (anMode === 'demod' && anDemodResult)
     return anDemodResult.freqsRpm[anDemodResult.freqsRpm.length - 1] || DEMOD_FMAX_RPM;
-  return anUnit === 'mm/s' ? fftMaxRpmVel(anP.fs) : fftMaxRpmG(anP.fs);
+  if (anUnit === 'g') return fftMaxRpmG(anP.fs);
+  return (typeof fftMaxRpmVel === 'function') ? fftMaxRpmVel(anP.fs) : fftMaxRpmG(anP.fs);
 }
 
 // ── Indicateur de progression acquisition (analyse temporelle seule) ──
@@ -725,10 +740,12 @@ function _analyseFillFloat(raw, g, n) {
 
 function _analyseAfterReceive(t, fromB) {
   if (_wavSource) analysePause();
-  anMode = 'time'; anZMin = 0; anZMax = t;
-  anMag = null; anMagVel = null; anMagB = null; anMagVelB = null; anCursorX = -1;
+  anMode = 'time'; anZMin = 0; anZMax = t; anYZoom = 1; anYPan = 0;
+  anMag = null; anMagVel = null; anMagDisp = null;
+  anMagB = null; anMagVelB = null; anMagDispB = null; anCursorX = -1;
   _anClearTimeCursors();
   anUnit = 'g'; anDataDisplay = null; anDataDisplayB = null; anFilterInfo = '';
+  _anInvalidateTimeIntegrated();
   anDemodResult = null; anDemodResultB = null;
   anSelStart = -1; anSelEnd = -1; _anUpdateSelBtn();
   anApplyLayoutByMode();
@@ -791,7 +808,7 @@ function analyseReceiveBloc(g, fs, t, n, raw) {
   bumpLiveG = g;
   const btn = document.getElementById('btn-bump-start');
   if (btn) {
-    btn.textContent = '▶ Démarrer';
+    btn.textContent = (typeof t === 'function') ? t('common.start') : '▶ Démarrer';
     btn.classList.add('bal-btn-run');
     btn.classList.remove('bal-btn-stop');
   }
@@ -831,7 +848,8 @@ function analyseReceiveBlocB(g, fs, t, n, raw) {
   }
   anDataB = _analyseFillFloat(raw, g, Math.min(n, raw.length));
   anDataDisplayB = null;
-  anMagB = null; anMagVelB = null; anDemodResultB = null;
+  anMagB = null; anMagVelB = null; anMagDispB = null; anDemodResultB = null;
+  anDataVelB = null; anDataDispMmB = null;
   _anGotB = true;
   if (typeof termAddLine === 'function') {
     termAddLine('[B] acquis. reçue' + (_anGotA ? ' — DOUBLE OK' : ' — attente A…'), 'sys');
@@ -870,13 +888,73 @@ window.analyseReceiveBlocB = analyseReceiveBlocB;
 
 // ── Gestion états boutons ─────────────────────────────────
 function anUpdateBtnStates() {
-  const inFreq  = anMode === 'fft' || anMode === 'demod';
-  const inDemod = anMode === 'demod';
+  const inTime  = anMode === 'time';
   const inFFT   = anMode === 'fft';
-  _btnSet('btn-an-fft',   inFreq);
-  _btnSet('btn-an-g',     inFFT && anUnit === 'g');
-  _btnSet('btn-an-vel',   inFFT && anUnit === 'mm/s');
+  const inDemod = anMode === 'demod';
+  _btnSet('btn-an-time',  inTime);
+  _btnSet('btn-an-fft',   inFFT || inDemod);
+  _btnSet('btn-an-g',     anUnit === 'g');
+  _btnSet('btn-an-vel',   anUnit === 'mm/s');
+  _btnSet('btn-an-disp',  anUnit === 'mm');
   _btnSet('btn-an-demod', inDemod);
+}
+
+function _anUnitLabel() {
+  if (typeof t === 'function') {
+    if (anUnit === 'mm/s') return t('an.unit.vel');
+    if (anUnit === 'mm') return t('an.unit.disp');
+    return t('an.unit.g');
+  }
+  if (anUnit === 'mm/s') return 'Vitesse (mm/s)';
+  if (anUnit === 'mm') return 'Déplacement (mm)';
+  return 'Amplitude (g)';
+}
+function _anUnitShort() {
+  if (anUnit === 'mm/s') return 'mm/s';
+  if (anUnit === 'mm') return 'mm';
+  return 'g';
+}
+
+/** Signal temporel A/B selon unité (g brut ou intégré). */
+function _anTimeSigA() {
+  if (anUnit === 'mm/s') return anDataVel || anDataDisplay || anData;
+  if (anUnit === 'mm') return anDataDispMm || anDataDisplay || anData;
+  return anDataDisplay || anData;
+}
+function _anTimeSigB() {
+  if (anUnit === 'mm/s') return anDataVelB || anDataDisplayB || anDataB;
+  if (anUnit === 'mm') return anDataDispMmB || anDataDisplayB || anDataB;
+  return anDataDisplayB || anDataB;
+}
+
+function _anInvalidateTimeIntegrated() {
+  anDataVel = null; anDataVelB = null;
+  anDataDispMm = null; anDataDispMmB = null;
+}
+
+function _anEnsureTimeIntegrated() {
+  if (anUnit !== 'mm/s' && anUnit !== 'mm') return;
+  const fs = anP.fs;
+  const srcA = anDataDisplay || anData;
+  if (srcA && srcA.length) {
+    const n = Math.min(anP.n || srcA.length, srcA.length);
+    if (anUnit === 'mm/s' && !anDataVel && typeof integrateAccelToVel === 'function') {
+      anDataVel = integrateAccelToVel(srcA, fs, n);
+    }
+    if (anUnit === 'mm' && !anDataDispMm && typeof integrateAccelToDisp === 'function') {
+      anDataDispMm = integrateAccelToDisp(srcA, fs, n);
+    }
+  }
+  const srcB = anDataDisplayB || anDataB;
+  if (srcB && srcB.length) {
+    const nB = Math.min(srcB.length, anP.n || srcB.length);
+    if (anUnit === 'mm/s' && !anDataVelB && typeof integrateAccelToVel === 'function') {
+      anDataVelB = integrateAccelToVel(srcB, fs, nB);
+    }
+    if (anUnit === 'mm' && !anDataDispMmB && typeof integrateAccelToDisp === 'function') {
+      anDataDispMmB = integrateAccelToDisp(srcB, fs, nB);
+    }
+  }
 }
 function _btnSet(id, active) {
   const el = document.getElementById(id);
@@ -912,31 +990,45 @@ function anUpdateStats() {
     document.getElementById('an-fs').textContent    =
       anP.fs+' Hz  N='+anP.n+'  T='+anP.t.toFixed(3)+'s  ±'+anP.g+'g';
 
-  } else if (anMode === 'fft' && anUnit === 'g' && anMag) {
-    const nFFT  = anMag.length * 2;
+  } else if (anMode === 'fft' && (anUnit === 'g' || anUnit === 'mm') && anMag) {
+    _anEnsureFftA();
+    const mag = _anPickMag(anMag, anMagVel, anMagDisp) || anMag;
+    const u = _anUnitShort();
+    const nFFT  = mag.length * 2;
     const rpmPB = (anP.fs / nFFT) * 60;
-    const maxB  = Math.min(anMag.length-1, Math.floor(fftMaxRpmG(anP.fs)/rpmPB));
+    const maxB  = Math.min(mag.length-1, Math.floor(_anMaxVal()/rpmPB));
     let pkBin=0, pkAmp=0;
-    for (let i=1;i<=maxB;i++) if(anMag[i]>pkAmp){pkAmp=anMag[i];pkBin=i;}
-    let rmsG=0;
-    for (let i=1;i<=maxB;i++) rmsG+=anMag[i]*anMag[i];
-    rmsG=Math.sqrt(rmsG*2);
-    document.getElementById('an-rms').textContent   = rmsG.toFixed(4)+' g';
-    document.getElementById('an-peak').textContent  = pkAmp.toFixed(4)+' g';
-    document.getElementById('an-crest').textContent = (rmsG>0?pkAmp/rmsG:0).toFixed(2);
+    for (let i=1;i<=maxB;i++) if(mag[i]>pkAmp){pkAmp=mag[i];pkBin=i;}
+    let rmsS=0;
+    for (let i=1;i<=maxB;i++) rmsS+=mag[i]*mag[i];
+    rmsS=Math.sqrt(rmsS*2);
+    const dec = anUnit === 'g' ? 4 : 3;
+    document.getElementById('an-rms').textContent   = rmsS.toFixed(dec)+' '+u;
+    document.getElementById('an-peak').textContent  = pkAmp.toFixed(dec)+' '+u;
+    document.getElementById('an-crest').textContent = (rmsS>0?pkAmp/rmsS:0).toFixed(2);
     document.getElementById('an-fs').textContent    =
       anP.fs+' Hz  N='+anP.n+'  T='+anP.t.toFixed(3)+'s  ±'+anP.g+'g';
 
   } else {
-    const rms  = anCalcRMS(sig);
-    const peak = anCalcPeak(sig);
-    document.getElementById('an-rms').textContent   = rms.toFixed(4)+' g';
-    document.getElementById('an-peak').textContent  = peak.toFixed(4)+' g';
+    // Temporel (g / mm/s / mm)
+    _anEnsureTimeIntegrated();
+    const tSig = _anTimeSigA() || sig;
+    const u = _anUnitShort();
+    const dec = anUnit === 'g' ? 4 : 3;
+    const rms  = anCalcRMS(tSig);
+    const peak = anCalcPeak(tSig);
+    document.getElementById('an-rms').textContent   = rms.toFixed(dec)+' '+u;
+    document.getElementById('an-peak').textContent  = peak.toFixed(dec)+' '+u;
     document.getElementById('an-crest').textContent = (peak/rms).toFixed(2);
     let dual = '';
     if (anDataB && anDataB.length) {
-      const rmsB = anCalcRMS(anDataB);
-      dual = '  |  B RMS ' + rmsB.toFixed(4) + ' g';
+      const tSigB = _anTimeSigB();
+      if (anUnit === 'g') {
+        const meanA = anCalcMean(tSig);
+        const meanB = anCalcMean(tSigB);
+        dual = '  |  Ā=' + meanA.toFixed(2) + 'g  B̄=' + meanB.toFixed(2) + 'g';
+      }
+      dual += '  B RMS ' + anCalcRMS(tSigB).toFixed(dec) + ' ' + u;
     }
     document.getElementById('an-fs').textContent    =
       anP.fs+' Hz  N='+anP.n+'  T='+anP.t.toFixed(3)+'s  ±'+anP.g+'g' +
@@ -951,6 +1043,7 @@ function analyseDraw() {
     anApplyLayoutByMode();
     anDrawBumpLive();
     if (typeof _anSyncHScroll === 'function') _anSyncHScroll();
+    if (typeof _anSyncVScroll === 'function') _anSyncVScroll();
     return;
   }
   if (!anData) return;
@@ -960,6 +1053,7 @@ function analyseDraw() {
   else if (anMode === 'demod') anDrawDemod();
   anUpdateStats();
   if (typeof _anSyncHScroll === 'function') _anSyncHScroll();
+  if (typeof _anSyncVScroll === 'function') _anSyncVScroll();
 }
 function _anDrawOnly() {
   if (!anData) return;
@@ -978,7 +1072,9 @@ function anDrawCursor(ctx, xPx, val, amp, unit, pH, W, color, tag) {
   ctx.beginPath(); ctx.moveTo(xPx, APAD.t); ctx.lineTo(xPx, APAD.t + pH); ctx.stroke();
   ctx.setLineDash([]);
   const prefix = tag ? (tag + ' ') : '';
-  const label = prefix + val.toFixed(unit === 's' ? 4 : 1) + ' ' + unit + '  ' + amp.toFixed(4) + ' g';
+  const uAmp = (typeof _anUnitShort === 'function') ? _anUnitShort() : 'g';
+  const aDec = (uAmp === 'g') ? 4 : 3;
+  const label = prefix + val.toFixed(unit === 's' ? 4 : 1) + ' ' + unit + '  ' + amp.toFixed(aDec) + ' ' + uAmp;
   ctx.font = 'bold 10px Arial';
   const tw = ctx.measureText(label).width;
   const lx = (xPx + tw + 6 > W - APAD.r) ? xPx - tw - 6 : xPx + 4;
@@ -1006,11 +1102,11 @@ function _anUpdateTimeCursorBar() {
   let html = '';
   if (anTimeC1) {
     html += '<span class="tc1">C1</span> t=' + anTimeC1.t.toFixed(4) + ' s  ' +
-      anTimeC1.amp.toFixed(4) + ' g';
+      anTimeC1.amp.toFixed(anUnit === 'g' ? 4 : 3) + ' ' + _anUnitShort();
   }
   if (anTimeC2) {
     html += ' &nbsp;|&nbsp; <span class="tc2">C2</span> t=' + anTimeC2.t.toFixed(4) + ' s  ' +
-      anTimeC2.amp.toFixed(4) + ' g';
+      anTimeC2.amp.toFixed(anUnit === 'g' ? 4 : 3) + ' ' + _anUnitShort();
     const dt = Math.abs(anTimeC2.t - anTimeC1.t);
     if (dt > 1e-9) {
       const rpm = 60 / dt;
@@ -1026,7 +1122,8 @@ function _anUpdateTimeCursorBar() {
 
 /** Snap au pic local (|amp| max) autour du clic. */
 function _anSnapTimePeak(tClick) {
-  const sig = anDataDisplay || anData;
+  _anEnsureTimeIntegrated();
+  const sig = _anTimeSigA();
   if (!sig || !anP.fs) return { t: tClick, amp: 0 };
   const fs = anP.fs;
   const n = Math.min(anP.n, sig.length);
@@ -1214,11 +1311,113 @@ function _anZoomFullSpectrum() {
   anZMax = _anMaxVal();
 }
 
+function _anClampYZoom(z) {
+  return Math.max(AN_YZOOM_MIN, Math.min(AN_YZOOM_MAX, z));
+}
+
+/** min/max d'un signal sur [i0,i1] — {lo,hi} ou null. */
+function _anScanMinMax(sig, i0, i1) {
+  if (!sig || !sig.length) return null;
+  let lo = Infinity, hi = -Infinity;
+  const i1s = Math.min(sig.length - 1, i1);
+  for (let i = i0; i <= i1s; i++) {
+    const v = sig[i];
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
+  }
+  if (!isFinite(lo) || !isFinite(hi)) return null;
+  if (hi === lo) { lo -= 0.05; hi += 0.05; }
+  return { lo: lo, hi: hi };
+}
+
+/**
+ * Plage Y temporelle.
+ * Mono : centrée sur (min+max)/2 → offset gravité remplit le graphique.
+ * Dual A+B : échelle absolue symétrique ±max(|lo|,|hi|) autour de 0
+ *   → gravité opposée reste séparée (+1g / −1g), pas superposée.
+ * anYZoom / anYPan : zoom + pan vertical (scrollbar / Shift-glisser / tactile).
+ */
+function _anTimeYRange(i0, i1) {
+  _anEnsureTimeIntegrated();
+  const ra = _anVisA() ? _anScanMinMax(_anTimeSigA(), i0, i1) : null;
+  const rb = _anVisB() ? _anScanMinMax(_anTimeSigB(), i0, i1) : null;
+  const dual = !!(ra && rb);
+  // Gravité opposée (±1g) : symétrique 0 seulement en accélération g
+  const gravDual = dual && anUnit === 'g';
+
+  let baseMid, fullHalf;
+  if (gravDual) {
+    const lo = Math.min(ra.lo, rb.lo);
+    const hi = Math.max(ra.hi, rb.hi);
+    const ext = Math.max(Math.abs(lo), Math.abs(hi), 0.05);
+    baseMid = 0;
+    fullHalf = ext * 1.12;
+  } else {
+    const r = ra || rb;
+    let lo = r ? r.lo : -1;
+    let hi = r ? r.hi : 1;
+    if (dual) {
+      lo = Math.min(ra.lo, rb.lo);
+      hi = Math.max(ra.hi, rb.hi);
+    }
+    baseMid = (lo + hi) / 2;
+    fullHalf = ((hi - lo) / 2) * 1.12;
+  }
+  if (fullHalf < 1e-6) fullHalf = 1e-6;
+  _anYBaseMid = baseMid;
+  _anYFullHalf = fullHalf;
+
+  let viewHalf = fullHalf / Math.max(anYZoom, 1e-9);
+  if (viewHalf < 1e-6) viewHalf = 1e-6;
+  _anClampYPan(viewHalf, fullHalf);
+  const mid = baseMid + anYPan;
+  return { yMin: mid - viewHalf, yMax: mid + viewHalf, mid: mid, dual: dual,
+    baseMid: baseMid, fullHalf: fullHalf, viewHalf: viewHalf };
+}
+
+function _anClampYPan(viewHalf, fullHalf) {
+  const vh = viewHalf != null ? viewHalf : (_anYFullHalf / Math.max(anYZoom, 1e-9));
+  const fh = fullHalf != null ? fullHalf : _anYFullHalf;
+  const maxPan = Math.max(0, fh - vh);
+  if (anYPan > maxPan) anYPan = maxPan;
+  if (anYPan < -maxPan) anYPan = -maxPan;
+  if (anYZoom <= 1.001) anYPan = 0;
+}
+
+function _anPanByDeltaY(dyPx, pH, span0, pan0) {
+  if (!pH || pH <= 0) return;
+  // Doigt/souris vers le bas → contenu descend → on regarde plus haut (g ↑)
+  anYPan = pan0 + (dyPx / pH) * span0;
+  _anClampYPan();
+}
+
+function analyseYZoomIn() {
+  if (anMode !== 'time' || !anData) return;
+  anYZoom = _anClampYZoom(anYZoom * AN_YZOOM_FACTOR);
+  _anClampYPan();
+  analyseDraw();
+}
+function analyseYZoomOut() {
+  if (anMode !== 'time' || !anData) return;
+  anYZoom = _anClampYZoom(anYZoom / AN_YZOOM_FACTOR);
+  _anClampYPan();
+  analyseDraw();
+}
+function analyseYZoomReset() {
+  anYZoom = 1;
+  anYPan = 0;
+  if (anMode === 'time') analyseDraw();
+}
+window.analyseYZoomIn = analyseYZoomIn;
+window.analyseYZoomOut = analyseYZoomOut;
+window.analyseYZoomReset = analyseYZoomReset;
+
 // ─────────────────────────────────────────────────────────
 // DESSIN TEMPOREL
 // ─────────────────────────────────────────────────────────
 function anDrawTime() {
-  const _sig=anDataDisplay||anData;
+  _anEnsureTimeIntegrated();
+  const _sig = _anTimeSigA();
   const canvas=document.getElementById('an-canvas');
   const wrap=document.getElementById('an-canvas-wrap');
   const W=wrap.offsetWidth||window.innerWidth;
@@ -1232,29 +1431,30 @@ function anDrawTime() {
   const span=anZMax-anZMin;
   ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
   ctx.strokeStyle='#555'; ctx.lineWidth=1; ctx.strokeRect(P.l,P.t,pW,pH);
-  let maxA=0;
-  if (_anVisA() && _sig) {
-    for(let i=i0;i<=i1;i++) if(Math.abs(_sig[i])>maxA) maxA=Math.abs(_sig[i]);
+  const yr = _anTimeYRange(i0, i1);
+  const yMin = yr.yMin, yMax = yr.yMax, ySpan = yMax - yMin;
+  const yDec = (anUnit === 'g') ? 3 : 2;
+  function yPix(v) {
+    return P.t + pH * (1 - (v - yMin) / ySpan);
   }
-  const _sigB0 = anDataDisplayB || anDataB;
-  if (_anVisB() && _sigB0 && _sigB0.length) {
-    const i1b = Math.min(_sigB0.length - 1, i1);
-    for (let i = i0; i <= i1b; i++) {
-      if (Math.abs(_sigB0[i]) > maxA) maxA = Math.abs(_sigB0[i]);
+  for (let g = 0; g <= 4; g++) {
+    const av = yMin + ySpan * g / 4;
+    const y = yPix(av);
+    if (g !== 0 && g !== 4) {
+      ctx.strokeStyle = '#eee'; ctx.lineWidth = 0.5;
+      ctx.beginPath(); ctx.moveTo(P.l, y); ctx.lineTo(P.l + pW, y); ctx.stroke();
     }
+    ctx.fillStyle = '#333'; ctx.font = '9px Arial'; ctx.textAlign = 'right';
+    ctx.fillText(av.toFixed(yDec), P.l - 4, y + 3);
   }
-  if(maxA===0) maxA=1; maxA*=1.15;
-  for(let g=0;g<=4;g++){
-    const av=-maxA+maxA*2*g/4,y=P.t+pH/2-(av/maxA)*pH/2;
-    if(g!==2){ctx.strokeStyle='#eee';ctx.lineWidth=0.5;ctx.beginPath();ctx.moveTo(P.l,y);ctx.lineTo(P.l+pW,y);ctx.stroke();}
-    ctx.fillStyle='#333';ctx.font='9px Arial';ctx.textAlign='right';
-    ctx.fillText(av.toFixed(3),P.l-4,y+3);
+  if (yMin < 0 && yMax > 0) {
+    const y0 = yPix(0);
+    ctx.strokeStyle = '#bbb'; ctx.lineWidth = 0.9;
+    ctx.beginPath(); ctx.moveTo(P.l, y0); ctx.lineTo(P.l + pW, y0); ctx.stroke();
   }
-  ctx.strokeStyle='#ccc';ctx.lineWidth=0.8;
-  ctx.beginPath();ctx.moveTo(P.l,P.t+pH/2);ctx.lineTo(P.l+pW,P.t+pH/2);ctx.stroke();
-  ctx.save();ctx.translate(11,P.t+pH/2);ctx.rotate(-Math.PI/2);
-  ctx.textAlign='center';ctx.font='10px Arial';ctx.fillStyle='#333';
-  ctx.fillText('Amplitude (g)',0,0);ctx.restore();
+  ctx.save(); ctx.translate(11, P.t + pH / 2); ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center'; ctx.font = '10px Arial'; ctx.fillStyle = '#333';
+  ctx.fillText(_anUnitLabel(), 0, 0); ctx.restore();
   const xt=Math.min(6,Math.floor(pW/50));
   for(let t2=0;t2<=xt;t2++){
     const ts=anZMin+span*t2/xt,x=P.l+(ts-anZMin)/span*pW;
@@ -1275,14 +1475,14 @@ function anDrawTime() {
     let first = true;
     for (let i = i0; i <= i1s; i += step) {
       const x = P.l + ((i / fs) - anZMin) / span * pW;
-      const y = P.t + pH / 2 - (sig[i] / maxA) * pH / 2;
+      const y = yPix(sig[i]);
       if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
     }
     ctx.stroke();
   }
   const dualTime = !!(anDataB && anDataB.length);
   if (_anVisA()) _strokeSig(_sig, dualTime ? AN_COLOR_A : _anPrimaryColor(), 1.2);
-  const _sigB = anDataDisplayB || anDataB;
+  const _sigB = _anTimeSigB();
   if (_anVisB() && _sigB && _sigB.length) _strokeSig(_sigB, AN_COLOR_B, 1.2);
   ctx.restore();
   // Légende (mono B → orange « B », pas bleu « A »)
@@ -1355,18 +1555,34 @@ function _anEnsureFftA() {
   if (anUnit === 'mm/s' && !anMagVel) {
     anMagVel = computeVelFFT(chunk, anP.fs, n);
   }
+  if (anUnit === 'mm' && !anMagDisp && typeof computeDispFFT === 'function') {
+    anMagDisp = computeDispFFT(chunk, anP.fs, n);
+  }
 }
 
 function _anEnsureFftB() {
   const _sigB = anDataDisplayB || anDataB;
-  if (!_sigB || !_sigB.length) { anMagB = null; anMagVelB = null; return; }
+  if (!_sigB || !_sigB.length) {
+    anMagB = null; anMagVelB = null; anMagDispB = null; return;
+  }
   const chunkB = _anTimeChunk(_sigB);
-  if (!chunkB || chunkB.length < 64) { anMagB = null; anMagVelB = null; return; }
+  if (!chunkB || chunkB.length < 64) {
+    anMagB = null; anMagVelB = null; anMagDispB = null; return;
+  }
   const nB = chunkB.length;
   if (!anMagB) anMagB = computeFFT(chunkB, nB, anP.fs);
   if (anUnit === 'mm/s' && !anMagVelB) {
     anMagVelB = computeVelFFT(chunkB, anP.fs, nB);
   }
+  if (anUnit === 'mm' && !anMagDispB && typeof computeDispFFT === 'function') {
+    anMagDispB = computeDispFFT(chunkB, anP.fs, nB);
+  }
+}
+
+function _anPickMag(magG, magVel, magDisp) {
+  if (anUnit === 'mm/s') return magVel || magG;
+  if (anUnit === 'mm') return magDisp || magG;
+  return magG;
 }
 
 function _anStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aS, color, fill, maxA) {
@@ -1411,12 +1627,11 @@ function _anStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aS, color
 function anDrawFFT() {
   _anEnsureFftA();
   _anEnsureFftB();
-  const isVel = (anUnit === 'mm/s');
-  const mag = isVel ? anMagVel : anMag;
-  const magB = isVel ? anMagVelB : anMagB;
-  const maxRpm = isVel ? fftMaxRpmVel(anP.fs) : fftMaxRpmG(anP.fs);
-  const yLabel = isVel ? 'Vitesse (mm/s)' : 'Amplitude (g)';
-  const decimals = isVel ? 2 : 3;
+  const mag = _anPickMag(anMag, anMagVel, anMagDisp);
+  const magB = _anPickMag(anMagB, anMagVelB, anMagDispB);
+  const maxRpm = _anMaxVal();
+  const yLabel = _anUnitLabel();
+  const decimals = (anUnit === 'g') ? 3 : 2;
   const canvas = document.getElementById('an-canvas');
   const wrap = document.getElementById('an-canvas-wrap');
   const W = wrap.offsetWidth || window.innerWidth;
@@ -1710,7 +1925,9 @@ const anWrap = document.getElementById('an-canvas-wrap');
 let anTouchMode  = 'none';
 let anTouchX0    = 0, anTouchY0 = 0;
 let anPanMin0    = 0, anPanMax0 = 0;
+let anPanY0      = 0, anYSpan0 = 1;
 let anPinD0      = 0, anPinMin0 = 0, anPinMax0 = 0;
+let anPinDy0     = 0, anPinYZoom0 = 1;
 let _anLongTimer  = null;
 let _anLongStart  = 0;
 let _anLongAnimId = null;
@@ -1752,6 +1969,8 @@ anWrap.addEventListener('touchstart', (e) => {
   if (e.touches.length === 1) {
     anTouchX0=e.touches[0].clientX; anTouchY0=e.touches[0].clientY;
     anPanMin0=anZMin; anPanMax0=anZMax;
+    anPanY0 = anYPan;
+    anYSpan0 = (2 * _anYFullHalf) / Math.max(anYZoom, 1e-9);
     _anLongStart=performance.now();
 
     if (anMode === 'time') {
@@ -1800,6 +2019,8 @@ anWrap.addEventListener('touchstart', (e) => {
     _anCancelLong();
     anTouchMode='pinch'; anCursorX=-1; anSelecting=false;
     anPinD0=anDist(e); anPinMin0=anZMin; anPinMax0=anZMax;
+    anPinDy0 = Math.abs(e.touches[0].clientY - e.touches[1].clientY) || 1;
+    anPinYZoom0 = anYZoom;
   }
 }, {passive:true});
 
@@ -1812,12 +2033,25 @@ anWrap.addEventListener('touchmove', (e) => {
   if (e.touches.length === 1) {
     const dx=e.touches[0].clientX-anTouchX0;
     const dy=e.touches[0].clientY-anTouchY0;
-    if(_anLongTimer && Math.sqrt(dx*dx+dy*dy)>AN_LONG_PRESS_PX){
+    function _anStartTouchPan() {
       _anCancelLong();
-      if(anTouchMode==='wait') anTouchMode='pan';
+      // Zoom Y actif + geste surtout vertical → pan Y (Android dual ±1g)
+      if (anMode === 'time' && anYZoom > 1.02 && Math.abs(dy) > Math.abs(dx) * 1.15) {
+        anTouchMode = 'pan_y';
+        anCursorX = -1;
+        anPanY0 = anYPan;
+        anYSpan0 = (2 * _anYFullHalf) / Math.max(anYZoom, 1e-9);
+      } else {
+        anTouchMode = 'pan';
+        anCursorX = -1;
+      }
+    }
+    if(_anLongTimer && Math.sqrt(dx*dx+dy*dy)>AN_LONG_PRESS_PX){
+      if(anTouchMode==='wait') _anStartTouchPan();
+      else _anCancelLong();
     }
     if(anTouchMode==='wait'){
-      if(Math.abs(dx)>AN_PAN_THRESHOLD){_anCancelLong();anTouchMode='pan';}
+      if(Math.abs(dx)>AN_PAN_THRESHOLD || Math.abs(dy)>AN_PAN_THRESHOLD) _anStartTouchPan();
       else return;
     }
     if (anTouchMode === 'drag_sb') {
@@ -1838,10 +2072,14 @@ anWrap.addEventListener('touchmove', (e) => {
       anSelStart=Math.max(0,Math.min(t,t0)); anSelEnd=Math.min(anP.t,Math.max(t,t0));
       analyseDraw(); return;
     }
-    if(anTouchMode==='cursor' && Math.abs(dx)>AN_PAN_THRESHOLD){
-      _anCancelLong(); anTouchMode='pan'; anCursorX=-1;
+    if(anTouchMode==='cursor' && (Math.abs(dx)>AN_PAN_THRESHOLD || Math.abs(dy)>AN_PAN_THRESHOLD)){
+      _anStartTouchPan();
     }
-    if(anTouchMode==='pan'){
+    if(anTouchMode==='pan_y'){
+      const pH = canvas.height - APAD.t - APAD.b;
+      _anPanByDeltaY(dy, pH, anYSpan0, anPanY0);
+      analyseDraw();
+    } else if(anTouchMode==='pan'){
       const span0=anPanMax0-anPanMin0, dVal=-(dx/pW)*span0;
       let nMin=anPanMin0+dVal, nMax=anPanMax0+dVal;
       if(nMin<0){nMax-=nMin;nMin=0;}
@@ -1852,6 +2090,14 @@ anWrap.addEventListener('touchmove', (e) => {
       anSetCursorFromTouch(e.touches[0].clientX); analyseDraw();
     }
   } else if(anTouchMode==='pinch' && e.touches.length===2){
+    const dxF = Math.abs(e.touches[0].clientX - e.touches[1].clientX);
+    const dyF = Math.abs(e.touches[0].clientY - e.touches[1].clientY);
+    // Temps : pincement surtout vertical → zoom Y (Android)
+    if (anMode === 'time' && dyF > dxF * 1.2 && anPinDy0 > 0) {
+      anYZoom = _anClampYZoom(anPinYZoom0 * (dyF / anPinDy0));
+      analyseDraw();
+      return;
+    }
     const ratio=anPinD0/anDist(e);
     const center=(anPinMin0+anPinMax0)/2;
     const half=(anPinMax0-anPinMin0)/2*ratio;
@@ -1864,7 +2110,7 @@ anWrap.addEventListener('touchmove', (e) => {
 
 anWrap.addEventListener('touchend',()=>{
   _anCancelLong();
-  if(anTouchMode==='pan'){anCursorX=-1;analyseDraw();}
+  if(anTouchMode==='pan' || anTouchMode==='pan_y'){anCursorX=-1;analyseDraw();}
   if(anTouchMode==='wait'&&(anMode==='fft'||anMode==='demod')){
     anSetCursorFromTouch(anTouchX0); analyseDraw();
   }
@@ -1948,7 +2194,8 @@ function _anTimeChunk(sig) {
 }
 
 function _anInvalidateFft() {
-  anMag = null; anMagVel = null; anMagB = null; anMagVelB = null;
+  anMag = null; anMagVel = null; anMagDisp = null;
+  anMagB = null; anMagVelB = null; anMagDispB = null;
 }
 function _anUpdateSelBtn(){
   const hasSel=anSelStart>=0&&anSelEnd>anSelStart;
@@ -1968,7 +2215,7 @@ let _anMouse = {
   down: false, mode: 'none', x0: 0, panMin0: 0, panMax0: 0,
   carrierRpm0: 0, sbDelta0: 60,
 };
-let _anScrollDrag = null;
+let _anScrollDrag = null; // { axis:'x'|'y', ... }
 
 function _anMinSpan() {
   return anMode === 'time' ? 0.01 : 50;
@@ -2033,10 +2280,9 @@ function _anSnapCursorToPeak() {
   if (anMode === 'fft') {
     _anEnsureFftA();
     _anEnsureFftB();
-    const isVel = (anUnit === 'mm/s');
-    const mag = (_anVisA() && (isVel ? anMagVel : anMag))
-      ? (isVel ? anMagVel : anMag)
-      : (_anVisB() ? (isVel ? anMagVelB : anMagB) : null);
+    const mag = (_anVisA() && _anPickMag(anMag, anMagVel, anMagDisp))
+      ? _anPickMag(anMag, anMagVel, anMagDisp)
+      : (_anVisB() ? _anPickMag(anMagB, anMagVelB, anMagDispB) : null);
     if (!mag) return;
     const fs = anP.fs;
     const nFFT = nextPow2(anP.n);
@@ -2091,6 +2337,8 @@ function _anResetZoom() {
   if (!anData) return;
   anZMin = 0;
   anZMax = _anMaxVal();
+  anYZoom = 1;
+  anYPan = 0;
   anCursorX = -1;
   if (anMode === 'time') _anClearTimeCursors();
   analyseDraw();
@@ -2137,12 +2385,67 @@ function _anHScrollSetFromClientX(clientX, thumbW) {
   analyseDraw();
 }
 
+function _anSyncVScroll() {
+  const bar = document.getElementById('an-vscroll');
+  const thumb = document.getElementById('an-vscroll-thumb');
+  if (!bar || !thumb) return;
+  const hide = !anData || anMode !== 'time' || anYZoom <= 1.02;
+  if (hide) {
+    bar.style.display = 'none';
+    bar.setAttribute('aria-hidden', 'true');
+    return;
+  }
+  bar.style.display = 'block';
+  bar.setAttribute('aria-hidden', 'false');
+  const track = bar.querySelector('.graph-vscroll-track');
+  const th = (track && track.clientHeight) || 1;
+  const viewHalf = _anYFullHalf / Math.max(anYZoom, 1e-9);
+  const full = Math.max(_anYFullHalf * 2, 1e-9);
+  const view = Math.max(viewHalf * 2, 1e-9);
+  const thumbH = Math.max(28, (view / full) * th);
+  const maxTop = Math.max(0, th - thumbH);
+  // Haut de la piste = g max (baseMid+fullHalf) ; bas = g min
+  const maxPan = Math.max(0, _anYFullHalf - viewHalf);
+  const frac = maxPan > 1e-12 ? (maxPan - anYPan) / (2 * maxPan) : 0.5;
+  const top = Math.max(0, Math.min(maxTop, frac * maxTop));
+  thumb.style.height = thumbH + 'px';
+  thumb.style.transform = 'translateY(' + top + 'px)';
+}
+
+function _anVScrollSetFromClientY(clientY, thumbH) {
+  const track = document.querySelector('#an-vscroll .graph-vscroll-track');
+  if (!track) return;
+  const rect = track.getBoundingClientRect();
+  const th = rect.height || 1;
+  const viewHalf = _anYFullHalf / Math.max(anYZoom, 1e-9);
+  const full = Math.max(_anYFullHalf * 2, 1e-9);
+  const view = Math.max(viewHalf * 2, 1e-9);
+  const tH = thumbH || Math.max(28, (view / full) * th);
+  const maxTop = Math.max(0, th - tH);
+  let top = clientY - rect.top - tH / 2;
+  top = Math.max(0, Math.min(maxTop, top));
+  const maxPan = Math.max(0, _anYFullHalf - viewHalf);
+  const frac = maxTop > 0 ? top / maxTop : 0.5;
+  anYPan = maxPan - frac * (2 * maxPan);
+  _anClampYPan(viewHalf, _anYFullHalf);
+  analyseDraw();
+}
+
 if (anWrap) {
   anWrap.addEventListener('wheel', (e) => {
     if (!anData) return;
     if (anMode === 'bump_wait' || anMode === 'bump_stream') return;
     e.preventDefault();
-    const factor = e.deltaY > 0 ? AN_WHEEL_FACTOR : (1 / AN_WHEEL_FACTOR);
+    // Shift + molette = zoom vertical (temps). Sens : molette bas = zoom in.
+    if (anMode === 'time' && e.shiftKey) {
+      anYZoom = _anClampYZoom(
+        anYZoom * (e.deltaY > 0 ? AN_YZOOM_FACTOR : (1 / AN_YZOOM_FACTOR))
+      );
+      analyseDraw();
+      return;
+    }
+    // Molette bas = zoom in (sens inversé vs défaut navigateur)
+    const factor = e.deltaY > 0 ? (1 / AN_WHEEL_FACTOR) : AN_WHEEL_FACTOR;
     _anZoomAt(e.clientX, factor);
   }, { passive: false });
 
@@ -2161,10 +2464,20 @@ if (anWrap) {
     // Mode temps (souris) :
     //   clic             → curseur C1/C2 (Δt / RPM)
     //   glisser          → sélection fenêtre FFT
-    //   Ctrl+glisser     → pan
+    //   Ctrl+glisser     → pan X
+    //   Shift+glisser    → pan Y (si zoom vertical)
     //   Sél / Alt        → sélection dès le départ
+    _anMouse.y0 = e.clientY;
+    _anMouse.yPan0 = anYPan;
+    _anMouse.ySpan0 = (2 * _anYFullHalf) / Math.max(anYZoom, 1e-9);
     if (anMode === 'time') {
+      const wantPanY = e.shiftKey && !anSelMode;
       const wantPan = (e.ctrlKey || e.metaKey) && !anSelMode;
+      if (wantPanY) {
+        _anMouse.mode = 'pan_y';
+        anCursorX = -1;
+        return;
+      }
       if (wantPan) {
         /* pending → pan ci-dessous */
       } else if (anSelMode || e.altKey) {
@@ -2218,6 +2531,21 @@ if (anWrap) {
 
 window.addEventListener('pointermove', (e) => {
   if (_anScrollDrag) {
+    if (_anScrollDrag.axis === 'y') {
+      const track = document.querySelector('#an-vscroll .graph-vscroll-track');
+      if (!track) return;
+      const th = track.clientHeight || 1;
+      const dy = e.clientY - _anScrollDrag.y0;
+      const viewHalf = _anYFullHalf / Math.max(anYZoom, 1e-9);
+      const maxPan = Math.max(0, _anYFullHalf - viewHalf);
+      const maxTop = Math.max(0, th - _anScrollDrag.thumbH);
+      const dFrac = maxTop > 0 ? dy / maxTop : 0;
+      // Haut = g max → pan ↓ quand thumb descend
+      anYPan = _anScrollDrag.pan0 - dFrac * (2 * maxPan);
+      _anClampYPan(viewHalf, _anYFullHalf);
+      analyseDraw();
+      return;
+    }
     const maxVal = _anMaxVal();
     const span = _anScrollDrag.span;
     const track = document.querySelector('#an-hscroll .graph-hscroll-track');
@@ -2231,17 +2559,41 @@ window.addEventListener('pointermove', (e) => {
   }
   if (!_anMouse.down || e.pointerType === 'touch') return;
   const dx = e.clientX - _anMouse.x0;
+  const dy = e.clientY - _anMouse.y0;
 
-  if (_anMouse.mode === 'pending_time' && Math.abs(dx) > AN_MOUSE_DRAG_PX) {
-    _anMouse.mode = 'sel';
-    anSelecting = true;
-    anCursorX = -1;
-    const t0 = _anTouchToTime(_anMouse.x0);
-    const t = _anTouchToTime(e.clientX);
-    anSelStart = Math.max(0, Math.min(t, t0));
-    anSelEnd = Math.min(anP.t, Math.max(t, t0));
+  if (_anMouse.mode === 'pan_y') {
+    const canvas = document.getElementById('an-canvas');
+    if (!canvas) return;
+    const pH = canvas.height - APAD.t - APAD.b;
+    _anPanByDeltaY(dy, pH, _anMouse.ySpan0, _anMouse.yPan0);
     analyseDraw();
     return;
+  }
+
+  if (_anMouse.mode === 'pending_time') {
+    // Zoom Y : glisser vertical → pan Y (sans Shift)
+    if (anYZoom > 1.02 && Math.abs(dy) > Math.abs(dx) * 1.15 && Math.abs(dy) > AN_MOUSE_DRAG_PX) {
+      _anMouse.mode = 'pan_y';
+      anCursorX = -1;
+      const canvas = document.getElementById('an-canvas');
+      if (canvas) {
+        const pH = canvas.height - APAD.t - APAD.b;
+        _anPanByDeltaY(dy, pH, _anMouse.ySpan0, _anMouse.yPan0);
+        analyseDraw();
+      }
+      return;
+    }
+    if (Math.abs(dx) > AN_MOUSE_DRAG_PX) {
+      _anMouse.mode = 'sel';
+      anSelecting = true;
+      anCursorX = -1;
+      const t0 = _anTouchToTime(_anMouse.x0);
+      const t = _anTouchToTime(e.clientX);
+      anSelStart = Math.max(0, Math.min(t, t0));
+      anSelEnd = Math.min(anP.t, Math.max(t, t0));
+      analyseDraw();
+      return;
+    }
   }
 
   if (_anMouse.mode === 'sel') {
@@ -2323,7 +2675,7 @@ window.addEventListener('pointercancel', () => {
   thumb.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     e.stopPropagation();
-    _anScrollDrag = { x0: e.clientX, z0: anZMin, span: anZMax - anZMin };
+    _anScrollDrag = { axis: 'x', x0: e.clientX, z0: anZMin, span: anZMax - anZMin };
     try { thumb.setPointerCapture(e.pointerId); } catch (err) {}
   });
   if (track) {
@@ -2331,6 +2683,31 @@ window.addEventListener('pointercancel', () => {
       if (e.target === thumb) return;
       e.preventDefault();
       _anHScrollSetFromClientX(e.clientX);
+    });
+  }
+})();
+
+(function _anBindVScroll() {
+  const bar = document.getElementById('an-vscroll');
+  const thumb = document.getElementById('an-vscroll-thumb');
+  if (!bar || !thumb) return;
+  const track = bar.querySelector('.graph-vscroll-track');
+  thumb.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const viewHalf = _anYFullHalf / Math.max(anYZoom, 1e-9);
+    const full = Math.max(_anYFullHalf * 2, 1e-9);
+    const view = Math.max(viewHalf * 2, 1e-9);
+    const th = (track && track.clientHeight) || 1;
+    const thumbH = Math.max(28, (view / full) * th);
+    _anScrollDrag = { axis: 'y', y0: e.clientY, pan0: anYPan, thumbH: thumbH };
+    try { thumb.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  if (track) {
+    track.addEventListener('pointerdown', (e) => {
+      if (e.target === thumb) return;
+      e.preventDefault();
+      _anVScrollSetFromClientY(e.clientY);
     });
   }
 })();
@@ -2349,61 +2726,60 @@ window.addEventListener('pointercancel', () => {
 // BOUTONS CTRL-BAR
 // ============================================================
 
-// ── FFT toggle ────────────────────────────────────────────
-function analyseToggleFFT() {
+/** Vue Temps | FFT — conserve l'unité (g / mm/s / mm). */
+function analyseSetView(view) {
   if (!anData) return;
-  if (anMode === 'time') {
-    // Sélection active → FFT sur la portion (même logique que FFT Sél)
-    if (anSelStart >= 0 && anSelEnd > anSelStart) {
+  if (view === 'time') {
+    if (anMode === 'time') { anUpdateBtnStates(); return; }
+    anMode = 'time';
+    anZMin = 0; anZMax = anP.t || 1;
+    anCursorX = -1;
+    _anClearTimeCursors();
+  } else if (view === 'fft') {
+    if (anMode === 'time' && anSelStart >= 0 && anSelEnd > anSelStart) {
       analyseFFTSel();
       return;
     }
-    anMode='fft';
+    if (anMode === 'fft') { anUpdateBtnStates(); return; }
+    anMode = 'fft';
     _anInvalidateFft();
-    anUnit='g'; anCursorX=-1;
+    anCursorX = -1;
     _anClearTimeCursors();
     _anZoomFullSpectrum();
-  } else if (anMode === 'demod') {
-    // Quitter démod → FFT standard
-    anMode='fft'; anCursorX=-1;
+  } else return;
+  anUpdateBtnStates();
+  analyseDraw();
+}
+window.analyseSetView = analyseSetView;
+
+/** @deprecated — bascule ; préférer analyseSetView */
+function analyseToggleFFT() {
+  analyseSetView(anMode === 'time' ? 'fft' : 'time');
+}
+
+/** Unité g | mm/s | mm — s'applique à Temps et FFT (6 combos). */
+function anSetUnit(unit) {
+  if (!anData) return;
+  if (unit !== 'g' && unit !== 'mm/s' && unit !== 'mm') return;
+  anUnit = unit;
+  anCursorX = -1;
+  if (anMode === 'demod') {
+    // Démod reste en enveloppe g — bascule vers FFT pour voir l'unité
+    anMode = 'fft';
+    _anInvalidateFft();
+    _anZoomFullSpectrum();
+  } else if (anMode === 'fft') {
+    _anEnsureFftA();
+    _anEnsureFftB();
     _anZoomFullSpectrum();
   } else {
-    // FFT → temporel
-    anMode='time'; anZMin=0; anZMax=anP.t||1; anCursorX=-1;
-    _anClearTimeCursors();
+    _anEnsureTimeIntegrated();
+    anYZoom = 1; anYPan = 0;
   }
   anUpdateBtnStates();
   analyseDraw();
 }
-
-// ── Unité g / mm/s ────────────────────────────────────────
-function anSetUnit(unit) {
-  if (!anData) return;
-  anUnit = unit;
-  if (anMode !== 'fft') {
-    anMode='fft';
-    _anInvalidateFft();
-    anCursorX=-1;
-    _anZoomFullSpectrum();
-    anUpdateBtnStates(); analyseDraw(); return;
-  }
-  anCursorX=-1;
-  if (unit === 'mm/s') {
-    if (!anMagVel && anData) {
-      const chunk = _anTimeChunk(anDataDisplay || anData);
-      if (chunk && chunk.length >= 64)
-        anMagVel = computeVelFFT(chunk, anP.fs, chunk.length);
-    }
-    const _sB = anDataDisplayB || anDataB;
-    if (_sB && _sB.length && !anMagVelB) {
-      const chunkB = _anTimeChunk(_sB);
-      if (chunkB && chunkB.length >= 64)
-        anMagVelB = computeVelFFT(chunkB, anP.fs, chunkB.length);
-    }
-  }
-  _anZoomFullSpectrum();
-  anUpdateBtnStates(); analyseDraw();
-}
+window.anSetUnit = anSetUnit;
 
 // ── Hamburger ─────────────────────────────────────────────
 function anToggleHam() {
@@ -2766,7 +3142,7 @@ function _anApplyLoadedCapture(parsed, fileName) {
   anUpdateStats();
   if (_wavSource) analysePause();
   analyseResetDualSession();
-  anMode = 'time'; anZMin = 0; anZMax = anP.t;
+  anMode = 'time'; anZMin = 0; anZMax = anP.t; anYZoom = 1; anYPan = 0;
   anMag = null; anMagVel = null; anCursorX = -1;
   if (typeof _anClearTimeCursors === 'function') _anClearTimeCursors();
   anUnit = 'g'; anDataDisplay = null; anFilterInfo = '';
@@ -2810,6 +3186,7 @@ function analyseLoad() {
 
 // ── Helpers calcul ────────────────────────────────────────
 function anCalcRMS(d){let s=0;for(let i=0;i<d.length;i++)s+=d[i]*d[i];return Math.sqrt(s/d.length);}
+function anCalcMean(d){if(!d||!d.length)return 0;let s=0;for(let i=0;i<d.length;i++)s+=d[i];return s/d.length;}
 function anCalcPeak(d){let m=0;for(let i=0;i<d.length;i++)if(Math.abs(d[i])>m)m=Math.abs(d[i]);return m;}
 
 // ============================================================
@@ -2965,7 +3342,9 @@ function _anRunFilterAsync(t, f1, f2) {
       if (t === 'ph') anFilterInfo = 'PH ' + f1.toFixed(0) + ' Hz';
       else if (t === 'pb') anFilterInfo = 'PB ' + f1.toFixed(0) + ' Hz';
       else anFilterInfo = 'BP ' + f1.toFixed(0) + '-' + f2.toFixed(0) + ' Hz';
-      anMag = null; anMagVel = null; anMagB = null; anMagVelB = null;
+      anMag = null; anMagVel = null; anMagDisp = null;
+      anMagB = null; anMagVelB = null; anMagDispB = null;
+      _anInvalidateTimeIntegrated();
       _anUpdateFilterLabel();
       if (anMode === 'fft') {
         anMode = 'time'; anZMin = 0; anZMax = anP.t; anUpdateBtnStates();
@@ -2981,7 +3360,9 @@ function _anRunFilterAsync(t, f1, f2) {
 
 function analyseFilterReset(){
   anDataDisplay=null;anDataDisplayB=null;anFilterInfo='';
-  anMag=null;anMagVel=null;anMagB=null;anMagVelB=null;
+  anMag=null;anMagVel=null;anMagDisp=null;
+  anMagB=null;anMagVelB=null;anMagDispB=null;
+  _anInvalidateTimeIntegrated();
   _anUpdateFilterLabel();anCursorX=-1;analyseDraw();
 }
 

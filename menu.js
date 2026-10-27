@@ -4,12 +4,13 @@
 const MenuModule = (() => {
 
   const L = {
-    PROBE:       'probe',        // choix sonde A / B / A+B
-    CONN:        'conn',         // IP ESP A/B + reset session
+    PROBE:       'probe',
+    CONN:        'conn',
+    LANG:        'lang',
     ROOT:        'root',
-    ANALYSE:     'analyse',      // sous-menu Analyse type
-    G_RANGE:     'g_range',      // choix plage ±g
-    FS:          'fs',           // choix fréquence échantillonnage
+    ANALYSE:     'analyse',
+    G_RANGE:     'g_range',
+    FS:          'fs',
     BUMP_G:      'bump_g',
     BUMP_FS:     'bump_fs',
   };
@@ -21,6 +22,16 @@ const MenuModule = (() => {
 
   const BUMP_BUFFER_SAMPLES = 45000;
 
+  function _tt(key, vars) {
+    return (typeof t === 'function') ? t(key, vars) : key;
+  }
+
+  function _pathText() {
+    return _path.map(function (p) {
+      return (p && p.indexOf('menu.') === 0) ? _tt(p) : p;
+    }).join(' › ');
+  }
+
   function _bumpReadSec(fsHz) {
     const s = BUMP_BUFFER_SAMPLES / fsHz;
     return s >= 10 ? (Math.round(s) + ' s') : (s.toFixed(1) + ' s');
@@ -30,24 +41,23 @@ const MenuModule = (() => {
     return (typeof ProbeMode !== 'undefined' && ProbeMode.isSet());
   }
 
-  // ──────────────────────────────────────────────────────
-  // Init — appelé depuis app.js au DOMContentLoaded
-  // ──────────────────────────────────────────────────────
   function init(sendFn, switchTabFn, navGotoFn) {
     _send      = sendFn;
     _switchTab = switchTabFn;
     _navGoto   = navGotoFn || null;
     _container = document.getElementById('menu-tree');
+    if (typeof I18n !== 'undefined' && I18n.onChange) {
+      I18n.onChange(function () {
+        _render(_level);
+        if (typeof I18n.applyDom === 'function') I18n.applyDom();
+      });
+    }
     if (_probeSet()) _render(L.ROOT);
     else showProbeSelect();
   }
 
-  // ──────────────────────────────────────────────────────
-  // Rendu — reconstruit les boutons à chaque changement de niveau
-  // ──────────────────────────────────────────────────────
   function _render(level) {
-    // Pas de modules tant que la sonde n'est pas choisie (Connexion OK sans sonde)
-    if (level !== L.PROBE && level !== L.CONN && !_probeSet()) {
+    if (level !== L.PROBE && level !== L.CONN && level !== L.LANG && !_probeSet()) {
       showProbeSelect();
       return;
     }
@@ -55,16 +65,12 @@ const MenuModule = (() => {
     if (!_container) return;
     _container.innerHTML = '';
 
-    // ── Fil d'Ariane + Retour ──────────────────────────
-    // PROBE : titre seul (pas de retour — rien derrière)
-    // ROOT  : Retour → choix sonde
-    // sinon : Retour dans l'arbre Analyse
     if (level === L.PROBE) {
       const nav = document.createElement('div');
       nav.className = 'sc-nav';
       const crumb = document.createElement('span');
       crumb.className = 'sc-crumb';
-      crumb.textContent = 'Choisir sonde';
+      crumb.textContent = _tt('menu.crumb.chooseProbe');
       nav.appendChild(crumb);
       _container.appendChild(nav);
     } else if (level === L.ROOT || _path.length > 0) {
@@ -73,7 +79,7 @@ const MenuModule = (() => {
 
       const back = document.createElement('button');
       back.className = 'sc sc-back';
-      back.textContent = '← Retour';
+      back.textContent = _tt('common.back');
       if (level === L.ROOT) {
         back.onclick = () => {
           if (typeof ProbeMode !== 'undefined') ProbeMode.change();
@@ -87,14 +93,13 @@ const MenuModule = (() => {
       const crumb = document.createElement('span');
       crumb.className = 'sc-crumb';
       crumb.textContent = level === L.ROOT
-        ? ('Sonde ' + (typeof ProbeMode !== 'undefined' ? ProbeMode.get() : '?'))
-        : _path.join(' › ');
+        ? (_tt('common.probe') + ' ' + (typeof ProbeMode !== 'undefined' ? ProbeMode.get() : '?'))
+        : _pathText();
       nav.appendChild(crumb);
 
       _container.appendChild(nav);
     }
 
-    // ── Boutons du niveau courant ──────────────────────
     _getButtons(level).forEach(btn => {
       const el = document.createElement('button');
       el.className = 'sc sc-menu' + (btn.accent ? ' sc-accent-menu' : '');
@@ -103,7 +108,7 @@ const MenuModule = (() => {
         el.classList.add('sc-disabled');
       }
       if (btn.sub) {
-        el.innerHTML = `<span class="sc-label">${btn.label}</span><span class="sc-sub">${btn.sub}</span>`;
+        el.innerHTML = '<span class="sc-label">' + btn.label + '</span><span class="sc-sub">' + btn.sub + '</span>';
       } else {
         el.textContent = btn.label;
       }
@@ -112,9 +117,6 @@ const MenuModule = (() => {
     });
   }
 
-  // ──────────────────────────────────────────────────────
-  // Définition des boutons par niveau
-  // ──────────────────────────────────────────────────────
   function _getButtons(level) {
     switch (level) {
 
@@ -122,88 +124,97 @@ const MenuModule = (() => {
         const aOk = typeof ProbeMode !== 'undefined' && ProbeMode.aOk();
         const bOk = typeof ProbeMode !== 'undefined' && ProbeMode.bOk();
         return [
-          { label: 'Sonde A',  sub: aOk ? 'ESP A connecté' : 'ESP A hors ligne', key: 'probe_a',  disabled: !aOk },
-          { label: 'Sonde B',  sub: bOk ? 'ESP B connecté' : 'ESP B hors ligne', key: 'probe_b',  disabled: !bOk },
-          { label: 'A + B',    sub: (aOk && bOk) ? 'Mode duo' : 'A et B requis', key: 'probe_ab', accent: true, disabled: !(aOk && bOk) },
-          { label: '🔌 Connexion', sub: 'IP · reset · copier log', key: 'conn_menu' },
+          { label: _tt('menu.probeA'),  sub: aOk ? _tt('menu.probeA.ok') : _tt('menu.probeA.off'), key: 'probe_a',  disabled: !aOk },
+          { label: _tt('menu.probeB'),  sub: bOk ? _tt('menu.probeB.ok') : _tt('menu.probeB.off'), key: 'probe_b',  disabled: !bOk },
+          { label: _tt('menu.probeAB'), sub: (aOk && bOk) ? _tt('menu.probeAB.ok') : _tt('menu.probeAB.off'), key: 'probe_ab', accent: true, disabled: !(aOk && bOk) },
+          { label: _tt('menu.conn'),    sub: _tt('menu.conn.sub'), key: 'conn_menu' },
         ];
       }
 
       case L.CONN: {
-        const aHost = (typeof ESP32_HOST !== 'undefined' && ESP32_HOST) ? ESP32_HOST : 'non défini';
-        const bHost = (typeof ESP32_HOST_B !== 'undefined' && ESP32_HOST_B) ? ESP32_HOST_B : 'non défini';
+        if (typeof isEspScanBusy === 'function' && isEspScanBusy()) {
+          return [
+            { label: _tt('menu.scanCancel'), sub: _tt('menu.scanCancel.sub'), key: 'conn_scan_cancel', accent: true },
+          ];
+        }
+        const aHost = (typeof ESP32_HOST !== 'undefined' && ESP32_HOST) ? ESP32_HOST : _tt('common.undefined');
+        const bHost = (typeof ESP32_HOST_B !== 'undefined' && ESP32_HOST_B) ? ESP32_HOST_B : _tt('common.undefined');
+        const lang = (typeof I18n !== 'undefined' && I18n.getLang) ? I18n.getLang().toUpperCase() : 'FR';
         return [
-          { label: 'ESP A', sub: aHost, key: 'conn_a' },
-          { label: 'ESP B', sub: bHost, key: 'conn_b' },
-          { label: 'Reset', sub: 'NVS + éq.', key: 'conn_reset' },
-          { label: '📋 Log', sub: 'Copier terminal', key: 'conn_copy_log', accent: true },
+          { label: _tt('menu.scan'), sub: _tt('menu.scan.sub'), key: 'conn_scan', accent: true },
+          { label: _tt('menu.espA'), sub: aHost, key: 'conn_a' },
+          { label: _tt('menu.espB'), sub: bHost, key: 'conn_b' },
+          { label: _tt('menu.lang'), sub: lang + ' · ' + _tt('menu.lang.sub'), key: 'conn_lang' },
+          { label: _tt('menu.reset'), sub: _tt('menu.reset.sub'), key: 'conn_reset' },
+          { label: _tt('menu.log'), sub: _tt('menu.log.sub'), key: 'conn_copy_log' },
         ];
       }
 
-      // ── Racine ──────────────────────────────────────
+      case L.LANG: {
+        const cur = (typeof I18n !== 'undefined' && I18n.getLang) ? I18n.getLang() : 'fr';
+        return [
+          { label: _tt('menu.lang.fr'), sub: _tt('menu.lang.fr.sub'), key: 'lang_fr', accent: cur === 'fr' },
+          { label: _tt('menu.lang.en'), sub: _tt('menu.lang.en.sub'), key: 'lang_en', accent: cur === 'en' },
+        ];
+      }
+
       case L.ROOT: return [
-        { label: 'Equilibrage',   sub: '1 ou 2 plans',       key: 'eq',      accent: true },
-        { label: '📊 Analyse',    sub: 'Temp · FFT · Live',  key: 'analyse'              },
+        { label: _tt('menu.eq'),      sub: _tt('menu.eq.sub'),      key: 'eq',      accent: true },
+        { label: _tt('menu.analyse'), sub: _tt('menu.analyse.sub'), key: 'analyse' },
       ];
 
-      // ── Sous-menu Analyse type ───────────────────────
       case L.ANALYSE: return [
-        { label: '〜 Temporel',   sub: 'Brut + FFT',      key: 'temporelle'              },
-        { label: '🔨 Bump Test',  sub: 'Impulsionnel',    key: 'bump'                    },
-        { label: '📈 Live FFT',   sub: 'Spectre continu', key: 'live_fft'                },
-        { label: 'Phase',         sub: 'Harmonique · Suivi', key: 'harmonique'            },
+        { label: _tt('menu.temporal'), sub: _tt('menu.temporal.sub'), key: 'temporelle' },
+        { label: _tt('menu.bump'),     sub: _tt('menu.bump.sub'),     key: 'bump' },
+        { label: _tt('menu.liveFft'),  sub: _tt('menu.liveFft.sub'),  key: 'live_fft' },
+        { label: _tt('menu.phase'),    sub: _tt('menu.phase.sub'),    key: 'harmonique' },
       ];
 
-      // ── Choix plage ±g ───────────────────────────────
       case L.G_RANGE: return [
-        { label: '± 2 g',   sub: 'Faible',   key: 'g2',   cmd: '2'  },
-        { label: '± 4 g',   sub: '',          key: 'g4',   cmd: '4'  },
-        { label: '± 8 g',   sub: '',          key: 'g8',   cmd: '8'  },
-        { label: '± 16 g',  sub: 'Fort',      key: 'g16',  cmd: '16' },
-        { label: '✨ Auto',  sub: 'Détection', key: 'auto', cmd: ' ', accent: true },
+        { label: '± 2 g',  sub: _tt('menu.g.weak'),   key: 'g2',   cmd: '2'  },
+        { label: '± 4 g',  sub: '',                   key: 'g4',   cmd: '4'  },
+        { label: '± 8 g',  sub: '',                   key: 'g8',   cmd: '8'  },
+        { label: '± 16 g', sub: _tt('menu.g.strong'), key: 'g16',  cmd: '16' },
+        { label: _tt('menu.g.auto'), sub: _tt('menu.g.auto.sub'), key: 'auto', cmd: ' ', accent: true },
       ];
 
-      // ── Choix fréquence d'échantillonnage ────────────
       case L.FS: return [
-        { label: '1 000 Hz',  sub: '500 Hz max',  key: 'fs1',  cmd: '1'  },
-        { label: '2 000 Hz',  sub: '1 kHz max',   key: 'fs2',  cmd: '2'  },
-        { label: '4 000 Hz',  sub: '2 kHz max',   key: 'fs4',  cmd: '4'  },
-        { label: '8 000 Hz',  sub: '4 kHz max',   key: 'fs8',  cmd: '8'  },
-        { label: '16 000 Hz', sub: '8 kHz ⭐',    key: 'fs16', cmd: '16', accent: true },
-        { label: '24 000 Hz', sub: '12 kHz max',  key: 'fs24', cmd: '24' },
-        { label: '32 000 Hz', sub: '16 kHz max',  key: 'fs32', cmd: '32' },
+        { label: '1 000 Hz',  sub: _tt('menu.fs.max', { hz: '500 Hz' }),  key: 'fs1',  cmd: '1'  },
+        { label: '2 000 Hz',  sub: _tt('menu.fs.max', { hz: '1 kHz' }),   key: 'fs2',  cmd: '2'  },
+        { label: '4 000 Hz',  sub: _tt('menu.fs.max', { hz: '2 kHz' }),   key: 'fs4',  cmd: '4'  },
+        { label: '8 000 Hz',  sub: _tt('menu.fs.max', { hz: '4 kHz' }),   key: 'fs8',  cmd: '8'  },
+        { label: '16 000 Hz', sub: '8 kHz ⭐',                             key: 'fs16', cmd: '16', accent: true },
+        { label: '24 000 Hz', sub: _tt('menu.fs.max', { hz: '12 kHz' }),  key: 'fs24', cmd: '24' },
+        { label: '32 000 Hz', sub: _tt('menu.fs.max', { hz: '16 kHz' }),  key: 'fs32', cmd: '32' },
       ];
 
       case L.BUMP_G: return [
-        { label: '± 2 g',  sub: 'Bump', key: 'bg2',  cmd: '2'  },
-        { label: '± 4 g',  sub: '',      key: 'bg4',  cmd: '4'  },
-        { label: '± 8 g',  sub: '',      key: 'bg8',  cmd: '8'  },
-        { label: '± 16 g', sub: 'Fort',  key: 'bg16', cmd: '16' },
+        { label: '± 2 g',  sub: _tt('menu.g.bump'),   key: 'bg2',  cmd: '2'  },
+        { label: '± 4 g',  sub: '',                   key: 'bg4',  cmd: '4'  },
+        { label: '± 8 g',  sub: '',                   key: 'bg8',  cmd: '8'  },
+        { label: '± 16 g', sub: _tt('menu.g.strong'), key: 'bg16', cmd: '16' },
       ];
 
       case L.BUMP_FS: return [
-        { label: '1 000 Hz',  sub: 'lecture ' + _bumpReadSec(1000),  key: 'bfs1',  cmd: '1000'  },
-        { label: '2 000 Hz',  sub: 'lecture ' + _bumpReadSec(2000),  key: 'bfs2',  cmd: '2000'  },
-        { label: '4 000 Hz',  sub: 'lecture ' + _bumpReadSec(4000),  key: 'bfs4',  cmd: '4000'  },
-        { label: '8 000 Hz',  sub: 'lecture ' + _bumpReadSec(8000),  key: 'bfs8',  cmd: '8000'  },
-        { label: '16 000 Hz', sub: 'lecture ' + _bumpReadSec(16000) + ' ⭐', key: 'bfs16', cmd: '16000', accent: true },
-        { label: '24 000 Hz', sub: 'lecture ' + _bumpReadSec(24000), key: 'bfs24', cmd: '24000' },
-        { label: '32 000 Hz', sub: 'lecture ' + _bumpReadSec(32000), key: 'bfs32', cmd: '32000' },
+        { label: '1 000 Hz',  sub: _tt('menu.fs.read', { sec: _bumpReadSec(1000) }),  key: 'bfs1',  cmd: '1000'  },
+        { label: '2 000 Hz',  sub: _tt('menu.fs.read', { sec: _bumpReadSec(2000) }),  key: 'bfs2',  cmd: '2000'  },
+        { label: '4 000 Hz',  sub: _tt('menu.fs.read', { sec: _bumpReadSec(4000) }),  key: 'bfs4',  cmd: '4000'  },
+        { label: '8 000 Hz',  sub: _tt('menu.fs.read', { sec: _bumpReadSec(8000) }),  key: 'bfs8',  cmd: '8000'  },
+        { label: '16 000 Hz', sub: _tt('menu.fs.read', { sec: _bumpReadSec(16000) }) + ' ⭐', key: 'bfs16', cmd: '16000', accent: true },
+        { label: '24 000 Hz', sub: _tt('menu.fs.read', { sec: _bumpReadSec(24000) }), key: 'bfs24', cmd: '24000' },
+        { label: '32 000 Hz', sub: _tt('menu.fs.read', { sec: _bumpReadSec(32000) }), key: 'bfs32', cmd: '32000' },
       ];
 
       default: return [];
     }
   }
 
-  // ──────────────────────────────────────────────────────
-  // Gestion des choix
-  // ──────────────────────────────────────────────────────
   function _onChoice(btn) {
     switch (_level) {
 
       case L.PROBE:
         if (btn.key === 'conn_menu') {
-          _path = ['Sonde', 'Connexion'];
+          _path = ['menu.crumb.probe', 'menu.crumb.conn'];
           _render(L.CONN);
           break;
         }
@@ -218,6 +229,23 @@ const MenuModule = (() => {
         break;
 
       case L.CONN:
+        if (btn.key === 'conn_scan_cancel') {
+          if (typeof cancelEspScan === 'function') cancelEspScan();
+          if (typeof termAddLine === 'function') termAddLine(_tt('app.cancelSearch'), 'sys');
+          break;
+        }
+        if (btn.key === 'conn_scan' && typeof findEspAndPrompt === 'function') {
+          findEspAndPrompt().finally(function () {
+            if (_level === L.CONN) _render(L.CONN);
+          });
+          _render(L.CONN);
+          break;
+        }
+        if (btn.key === 'conn_lang') {
+          _path = ['menu.crumb.probe', 'menu.crumb.conn', 'menu.lang'];
+          _render(L.LANG);
+          break;
+        }
         if (btn.key === 'conn_a' && typeof changeIpA === 'function') changeIpA();
         else if (btn.key === 'conn_b' && typeof changeIpB === 'function') changeIpB();
         else if (btn.key === 'conn_reset' && typeof clearVaSession === 'function') clearVaSession();
@@ -225,14 +253,25 @@ const MenuModule = (() => {
         _render(L.CONN);
         break;
 
+      case L.LANG:
+        if (btn.key === 'lang_fr' || btn.key === 'lang_en') {
+          const code = btn.key === 'lang_en' ? 'en' : 'fr';
+          if (typeof I18n !== 'undefined' && I18n.setLang) I18n.setLang(code);
+          if (typeof termAddLine === 'function') {
+            termAddLine(_tt('app.langSet', { lang: code.toUpperCase() }), 'ok');
+          }
+          _path = ['menu.crumb.probe', 'menu.crumb.conn'];
+          _render(L.CONN);
+        }
+        break;
+
       case L.ROOT:
         if (btn.key === 'eq') {
           _path = [];
           _render(L.ROOT);
-          // Entrée unique BalanceSession
           if (typeof BalanceSession !== 'undefined' && BalanceSession.isLive &&
               BalanceSession.isLive()) {
-            BalanceSession.start(); // déjà LIVE → réaffiche l'onglet
+            BalanceSession.start();
             break;
           }
           if (typeof BalanceModule !== 'undefined') {
@@ -241,7 +280,7 @@ const MenuModule = (() => {
               (BalanceModule.isPaused && BalanceModule.isPaused() &&
                BalanceModule.hasProgress && BalanceModule.hasProgress());
             if (paused) {
-              if (confirm('Session d\'équilibrage en pause.\n\nOK = Reprendre\nAnnuler = choisir…')) {
+              if (confirm(_tt('app.sessionPausedConfirm'))) {
                 if (typeof BalanceSession !== 'undefined' && BalanceSession.resume) {
                   BalanceSession.resume();
                 } else if (typeof BalanceModule.resumeSession === 'function') {
@@ -258,7 +297,7 @@ const MenuModule = (() => {
           if (typeof BalanceSession !== 'undefined' && BalanceSession.start) {
             BalanceSession.start();
           } else if (typeof DualSession !== 'undefined' && DualSession.available()) {
-            DualSession.startModule('balance', 'WS_GOTO=EQ', { label: 'Équilibrage' });
+            DualSession.startModule('balance', 'WS_GOTO=EQ', { label: _tt('menu.eq') });
           } else if (_navGoto) {
             _navGoto('balance', 'WS_GOTO=EQ');
           } else {
@@ -266,28 +305,26 @@ const MenuModule = (() => {
             setTimeout(() => _switchTab('balance'), 200);
           }
         } else if (btn.key === 'analyse') {
-          _path = ['Analyse']; _render(L.ANALYSE);
+          _path = ['menu.crumb.analyse']; _render(L.ANALYSE);
         }
         break;
 
       case L.ANALYSE:
         if (btn.key === 'temporelle') {
-          _path = ['Analyse', 'Temporel']; _render(L.G_RANGE);
+          _path = ['menu.crumb.analyse', 'menu.crumb.temporal']; _render(L.G_RANGE);
 
         } else if (btn.key === 'bump') {
           _selectedG = null;
-          _path = ['Analyse', 'Bump', 'Plage G'];
+          _path = ['menu.crumb.analyse', 'menu.crumb.bump', 'menu.crumb.gRange'];
           _render(L.BUMP_G);
 
         } else if (btn.key === 'live_fft') {
           _path = []; _render(L.ROOT);
-          // Entrée unique machine d'états
           if (typeof FftSession !== 'undefined' && FftSession.start) FftSession.start();
           else if (typeof fftToggle === 'function') fftToggle();
 
         } else if (btn.key === 'harmonique') {
           _path = []; _render(L.ROOT);
-          // Entrée unique machine d'états
           if (typeof PhaseSession !== 'undefined' && PhaseSession.start) PhaseSession.start();
           else if (typeof HarmonicModule !== 'undefined' && HarmonicModule.harmToggle) {
             HarmonicModule.harmToggle();
@@ -297,13 +334,13 @@ const MenuModule = (() => {
 
       case L.G_RANGE:
         _selectedG = btn.cmd;
-        _path = ['Analyse', 'Temporel', btn.label];
+        _path = ['menu.crumb.analyse', 'menu.crumb.temporal', btn.label];
         _render(L.FS);
         break;
 
       case L.BUMP_G:
         _selectedG = btn.cmd;
-        _path = ['Analyse', 'Bump', btn.label, 'Fs'];
+        _path = ['menu.crumb.analyse', 'menu.crumb.bump', btn.label, 'menu.crumb.fs'];
         _render(L.BUMP_FS);
         break;
 
@@ -311,7 +348,6 @@ const MenuModule = (() => {
         const g  = _selectedG || '16';
         const fs = btn.cmd;
 
-        // Entrée unique : AnalSession.start (mono + duo) — plus de if dual ici
         const _startTempo = () => {
           if (typeof AnalSession !== 'undefined' && AnalSession.start) {
             AnalSession.start({ g: g, fs: fs });
@@ -350,7 +386,6 @@ const MenuModule = (() => {
         const g = _selectedG || '2';
         const fs = btn.cmd || '4000';
         const cmd = 'WS_GOTO=ANAL_BUMP G=' + g + ' FS=' + fs;
-        // Toujours armer le panneau Bump (an-bump-panel) — sinon onglet Analyse vide
         const bumpReady = () => {
           if (typeof BumpSession !== 'undefined' && BumpSession.enter) BumpSession.enter();
           else if (typeof bumpStart === 'function') bumpStart();
@@ -361,7 +396,6 @@ const MenuModule = (() => {
           }, 50);
         };
         if (typeof DualSession !== 'undefined') {
-          // B reçoit le GOTO en parallèle de A (pas après NAV_ACK) — mode AB seulement
           DualSession.startModule('analyse', cmd, {
             label: 'Bump G=' + g + ' FS=' + fs,
             onReady: bumpReady,
@@ -384,29 +418,31 @@ const MenuModule = (() => {
     }
   }
 
-  // ──────────────────────────────────────────────────────
-  // Navigation Retour
-  // ──────────────────────────────────────────────────────
   function _goBack() {
-    if      (_level === L.CONN)    { _path = ['Sonde'];                 _render(L.PROBE);   }
-    else if (_level === L.ANALYSE) { _path = [];                        _render(L.ROOT);    }
-    else if (_level === L.G_RANGE) { _path = ['Analyse'];               _render(L.ANALYSE); }
-    else if (_level === L.FS)      { _path = ['Analyse', 'Temporel'];   _render(L.G_RANGE); }
-    else if (_level === L.BUMP_G)  { _path = ['Analyse'];               _render(L.ANALYSE); }
-    else if (_level === L.BUMP_FS) { _path = ['Analyse', 'Bump', 'Plage G']; _render(L.BUMP_G); }
-    else                           { _path = [];                        _render(L.ROOT);    }
+    if (_level === L.CONN && typeof isEspScanBusy === 'function' && isEspScanBusy()) {
+      if (typeof cancelEspScan === 'function') cancelEspScan();
+      if (typeof termAddLine === 'function') termAddLine(_tt('app.cancelSearch'), 'sys');
+    }
+    if      (_level === L.LANG)    { _path = ['menu.crumb.probe', 'menu.crumb.conn']; _render(L.CONN); }
+    else if (_level === L.CONN)    { _path = ['menu.crumb.probe']; _render(L.PROBE); }
+    else if (_level === L.ANALYSE) { _path = []; _render(L.ROOT); }
+    else if (_level === L.G_RANGE) { _path = ['menu.crumb.analyse']; _render(L.ANALYSE); }
+    else if (_level === L.FS)      { _path = ['menu.crumb.analyse', 'menu.crumb.temporal']; _render(L.G_RANGE); }
+    else if (_level === L.BUMP_G)  { _path = ['menu.crumb.analyse']; _render(L.ANALYSE); }
+    else if (_level === L.BUMP_FS) { _path = ['menu.crumb.analyse', 'menu.crumb.bump', 'menu.crumb.gRange']; _render(L.BUMP_G); }
+    else                           { _path = []; _render(L.ROOT); }
   }
 
   function showProbeSelect() {
-    _path = ['Sonde'];
+    _path = ['menu.crumb.probe'];
     _selectedG = null;
     _render(L.PROBE);
   }
 
-  /** Re-dessine les boutons sonde quand A/B connecte/déconnecte. */
   function refreshProbeIfShown() {
     if (_level === L.PROBE) _render(L.PROBE);
     else if (_level === L.CONN) _render(L.CONN);
+    else if (_level === L.LANG) _render(L.LANG);
   }
 
   function reset() {

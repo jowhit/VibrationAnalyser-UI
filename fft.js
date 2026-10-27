@@ -4,6 +4,8 @@ let fftMag = null;
 let fftMagB = null;
 let fftMagVel = null;
 let fftMagVelB = null;
+let fftMagDisp = null;
+let fftMagDispB = null;
 let fftP   = { g:2, fs:1000, n:4096 };
 let fftZMin = 60, fftZMax = 3000;   // min = 60 RPM (filtre passe-haut)
 let fftAutoScale = true;
@@ -29,16 +31,43 @@ function _fftPrimaryFill() {
 }
 
 // ── Filtre passe-haut permanent ───────────────────────────────
-// Tous les spectres (g et mm/s) sont filtrés sous HP_RPM_MIN
-const HP_RPM_MIN = 60;   // RPM
-const HP_HZ_MIN  = HP_RPM_MIN / 60.0;  // Hz = 1.0 Hz
+// Intégration amplifie 1/ω (vitesse) et 1/ω² (déplacement) → bas de bande
+// artificiellement fort : coupure plus haute pour mm (double intégration).
+const HP_RPM_MIN = 60;   // RPM (spectre g / mm/s)
+const HP_HZ_MIN  = HP_RPM_MIN / 60.0;  // 1.0 Hz
+const HP_DISP_HZ = 3.0;  // Hz — déplacement temporel / spectre mm
 
 // ── Unité FFT ─────────────────────────────────────────────────
-let fftUnit = 'g';       // 'g' | 'mm/s'
+let fftUnit = 'g';       // 'g' | 'mm/s' | 'mm'
 let _fftLastSigA = null; // pour status RMS
 
 function fftMaxRpmG(fs)   { return (fs / 2) * 60; }
 function fftMaxRpmVel(fs) { return Math.min((fs / 2) * 60, 60000); }
+function fftMaxRpmDisp(fs) { return fftMaxRpmVel(fs); }
+
+function _fftMaxRpmForUnit(unit, fs) {
+  return (unit === 'g') ? fftMaxRpmG(fs) : fftMaxRpmVel(fs);
+}
+function _fftUnitLabel(unit) {
+  if (typeof t === 'function') {
+    if (unit === 'mm/s') return t('an.unit.vel');
+    if (unit === 'mm') return t('an.unit.disp');
+    return t('an.unit.g');
+  }
+  if (unit === 'mm/s') return 'Vitesse (mm/s)';
+  if (unit === 'mm') return 'Déplacement (mm)';
+  return 'Amplitude (g)';
+}
+function _fftUnitShort(unit) {
+  if (unit === 'mm/s') return 'mm/s';
+  if (unit === 'mm') return 'mm';
+  return 'g';
+}
+function _fftPickMag(unit, magG, magVel, magDisp) {
+  if (unit === 'mm/s') return magVel || magG;
+  if (unit === 'mm') return magDisp || magG;
+  return magG;
+}
 
 function _fftFillSig(g, n, raw) {
   const scale = g / 32768.0;
@@ -51,19 +80,22 @@ function _fftFillSig(g, n, raw) {
 function _fftUpdateStatus(sig) {
   if (!fftMag) return;
   const fs = fftP.fs, n = fftP.n;
-  const mag = fftUnit === 'g' ? fftMag : (fftMagVel || fftMag);
+  const mag = _fftPickMag(fftUnit, fftMag, fftMagVel, fftMagDisp);
   const nFFT = nextPow2(n);
   const rpmPB = (fs / nFFT) * 60;
   const minBinHP = Math.max(1, Math.ceil(HP_RPM_MIN / rpmPB));
   const maxBin = Math.min(mag.length - 1,
-    Math.floor((fftUnit === 'mm/s' ? fftMaxRpmVel(fs) : fftMaxRpmG(fs)) / rpmPB));
+    Math.floor(_fftMaxRpmForUnit(fftUnit, fs) / rpmPB));
   const pk = fftPeakInfo(mag, fs, n, minBinHP);
   let statusStr;
   const tag = _fftPrimaryTag();
+  const u = _fftUnitShort(fftUnit);
   if (fftUnit === 'mm/s' && sig) {
     const rmsIso = calcRmsIso(sig, fs, n);
     statusStr = 'Pic ' + tag + ': ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.amp.toFixed(3) + ' mm/s' +
                 '   |   RMS ISO: ' + rmsIso.toFixed(3) + ' mm/s';
+  } else if (fftUnit === 'mm') {
+    statusStr = 'Pic ' + tag + ': ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.amp.toFixed(4) + ' mm';
   } else {
     const rmsG = fftSpecRMS(fftMag, minBinHP, maxBin);
     statusStr = 'Pic ' + tag + ': ' + pk.rpm.toFixed(0) + ' RPM  ' + pk.amp.toFixed(4) + ' g' +
@@ -84,12 +116,13 @@ function fftReceiveBloc(g, fs, n, raw) {
   fftP = { g, fs, n };
   const sig = _fftFillSig(g, n, raw);
   _fftLastSigA = sig;
-  fftMag    = computeFFT(sig, n, fs);
-  fftMagVel = computeVelFFT(sig, fs, n);
+  fftMag     = computeFFT(sig, n, fs);
+  fftMagVel  = computeVelFFT(sig, fs, n);
+  fftMagDisp = computeDispFFT(sig, fs, n);
 
   if (fftAutoScale) {
-    const useMag = fftUnit === 'g' ? fftMag : fftMagVel;
-    const maxRpm = fftUnit === 'g' ? fftMaxRpmG(fs) : fftMaxRpmVel(fs);
+    const useMag = _fftPickMag(fftUnit, fftMag, fftMagVel, fftMagDisp);
+    const maxRpm = _fftMaxRpmForUnit(fftUnit, fs);
     const rpmPB  = (fs / nextPow2(n)) * 60;
     const minBinHP = Math.max(1, Math.ceil(HP_RPM_MIN / rpmPB));
     const maxBin   = Math.min(nextPow2(n) / 2 - 1, Math.floor(maxRpm / rpmPB));
@@ -123,8 +156,9 @@ function fftReceiveBlocB(g, fs, n, raw) {
   const nUse = (fftP && fftP.n) ? Math.min(fftP.n, n, raw.length) : Math.min(n, raw.length);
   const fsUse = fs || (fftP && fftP.fs) || 1000;
   const sig = _fftFillSig(g, nUse, raw);
-  fftMagB    = computeFFT(sig, nUse, fsUse);
-  fftMagVelB = computeVelFFT(sig, fsUse, nUse);
+  fftMagB     = computeFFT(sig, nUse, fsUse);
+  fftMagVelB  = computeVelFFT(sig, fsUse, nUse);
+  fftMagDispB = computeDispFFT(sig, fsUse, nUse);
   showTab('fft');
   if (fftMag) _fftWaitHide();
   if (typeof FftSession !== 'undefined' && FftSession.onFrame) FftSession.onFrame();
@@ -175,9 +209,9 @@ function fftRaw(re, im, n) {
   }
 }
 
-// ── Intégration fréquentielle → spectre vitesse mm/s ─────────
-// Filtre passe-haut à HP_HZ_MIN (1 Hz = 60 RPM) intégré dans l'intégration
-function computeVelFFT(sig_g, fs, n) {
+// ── Intégration fréquentielle g → vitesse temporelle mm/s ─────
+// Filtre passe-haut à HP_HZ_MIN (1 Hz = 60 RPM)
+function integrateAccelToVel(sig_g, fs, n) {
   const nFFT = nextPow2(n);
   const re = new Float64Array(nFFT), im = new Float64Array(nFFT);
   for (let i = 0; i < n; i++) re[i] = sig_g[i] * 9.80665;
@@ -186,7 +220,6 @@ function computeVelFFT(sig_g, fs, n) {
   const vr = new Float64Array(nFFT), vi = new Float64Array(nFFT);
   for (let k = 1; k < nFFT / 2; k++) {
     const fk = k * df;
-    // Filtre passe-haut : zéro tous les bins sous HP_HZ_MIN
     if (fk < HP_HZ_MIN) { vr[k]=vi[k]=vr[nFFT-k]=vi[nFFT-k]=0; continue; }
     const w = 2 * Math.PI * fk;
     vr[k] = im[k]/w; vi[k] = -re[k]/w;
@@ -200,7 +233,43 @@ function computeVelFFT(sig_g, fs, n) {
   mean /= n;
   const velMm = new Float64Array(n);
   for (let i = 0; i < n; i++) velMm[i] = (vr[i] - mean) * 1000.0;
-  return computeFFT(velMm, n);   // pas de fs ici (déjà filtré)
+  return velMm;
+}
+
+function computeVelFFT(sig_g, fs, n) {
+  return computeFFT(integrateAccelToVel(sig_g, fs, n), n);
+}
+
+/** g → déplacement temporel mm (double intégration fréquentielle + HP 3 Hz). */
+function integrateAccelToDisp(sig_g, fs, n) {
+  const nFFT = nextPow2(n);
+  const re = new Float64Array(nFFT), im = new Float64Array(nFFT);
+  for (let i = 0; i < n; i++) re[i] = sig_g[i] * 9.80665;
+  fftRaw(re, im, nFFT);
+  const df = fs / nFFT;
+  const xr = new Float64Array(nFFT), xi = new Float64Array(nFFT);
+  const hp = (typeof HP_DISP_HZ === 'number') ? HP_DISP_HZ : 3.0;
+  for (let k = 1; k < nFFT / 2; k++) {
+    const fk = k * df;
+    if (fk < hp) { xr[k]=xi[k]=xr[nFFT-k]=xi[nFFT-k]=0; continue; }
+    const w = 2 * Math.PI * fk;
+    const w2 = w * w;
+    xr[k] = -re[k] / w2; xi[k] = -im[k] / w2;
+    xr[nFFT-k] = xr[k]; xi[nFFT-k] = -xi[k];
+  }
+  xr[nFFT/2] = 0; xi[nFFT/2] = 0;
+  for (let i = 0; i < nFFT; i++) xi[i] = -xi[i];
+  fftRaw(xr, xi, nFFT);
+  let mean = 0;
+  for (let i = 0; i < n; i++) { xr[i] /= nFFT; mean += xr[i]; }
+  mean /= n;
+  const dispMm = new Float64Array(n);
+  for (let i = 0; i < n; i++) dispMm[i] = (xr[i] - mean) * 1000.0;
+  return dispMm;
+}
+
+function computeDispFFT(sig_g, fs, n) {
+  return computeFFT(integrateAccelToDisp(sig_g, fs, n), n);
 }
 
 // ── RMS ISO (bandpass 10 Hz – min(10 kHz, 0.49·fs)) ─────────
@@ -294,13 +363,12 @@ function fftDraw() {
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
 
-  const isVel = (fftUnit === 'mm/s');
-  const mag   = isVel ? (fftMagVel || fftMag) : fftMag;
-  const magB  = isVel ? fftMagVelB : fftMagB;
+  const mag   = _fftPickMag(fftUnit, fftMag, fftMagVel, fftMagDisp);
+  const magB  = _fftPickMag(fftUnit, fftMagB, fftMagVelB, fftMagDispB);
   const fs = fftP.fs, n = fftP.n;
-  const maxRpm = isVel ? fftMaxRpmVel(fs) : fftMaxRpmG(fs);
-  const yLabel = isVel ? 'Vitesse (mm/s)' : 'Amplitude (g)';
-  const decimals = isVel ? 2 : 3;
+  const maxRpm = _fftMaxRpmForUnit(fftUnit, fs);
+  const yLabel = _fftUnitLabel(fftUnit);
+  const decimals = (fftUnit === 'g') ? 3 : 2;
 
   const zMin  = Math.max(fftZMin, HP_RPM_MIN);
   const zMax  = Math.min(fftZMax, maxRpm);
@@ -957,19 +1025,21 @@ function fftManualZoom(f) {
 function _fftUpdateUnitBtns() {
   const g = document.getElementById('btn-fft-g');
   const v = document.getElementById('btn-fft-vel');
+  const d = document.getElementById('btn-fft-disp');
   if (g) g.classList.toggle('bal-mode-toggle--active', fftUnit === 'g');
   if (v) v.classList.toggle('bal-mode-toggle--active', fftUnit === 'mm/s');
+  if (d) d.classList.toggle('bal-mode-toggle--active', fftUnit === 'mm');
 }
 
 function fftSetUnit(unit) {
-  if (unit !== 'g' && unit !== 'mm/s') return;
+  if (unit !== 'g' && unit !== 'mm/s' && unit !== 'mm') return;
   if (fftUnit === unit) return;
   fftUnit = unit;
   _fftUpdateUnitBtns();
   fftCursorBin = -1;
   if (fftAutoScale && fftMag) {
-    const mag    = fftUnit === 'g' ? fftMag : (fftMagVel || fftMag);
-    const maxRpm = fftUnit === 'mm/s' ? fftMaxRpmVel(fftP.fs) : fftMaxRpmG(fftP.fs);
+    const mag    = _fftPickMag(fftUnit, fftMag, fftMagVel, fftMagDisp);
+    const maxRpm = _fftMaxRpmForUnit(fftUnit, fftP.fs);
     const nFFT   = nextPow2(fftP.n);
     const rpmPB  = (fftP.fs / nFFT) * 60;
     const minBinHP = Math.max(1, Math.ceil(HP_RPM_MIN / rpmPB));
@@ -979,7 +1049,7 @@ function fftSetUnit(unit) {
     fftZMax = Math.min(Math.max(600, pk*rpmPB*4), maxRpm);
   } else {
     fftZMin = Math.max(fftZMin, HP_RPM_MIN);
-    if (fftUnit === 'mm/s') fftZMax = Math.min(fftZMax, fftMaxRpmVel(fftP.fs));
+    if (fftUnit !== 'g') fftZMax = Math.min(fftZMax, fftMaxRpmVel(fftP.fs));
   }
   fftDraw();
 }

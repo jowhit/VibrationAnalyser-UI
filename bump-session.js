@@ -43,7 +43,7 @@ const BumpSession = (() => {
   function _setBtnIdle() {
     const btn = document.getElementById('btn-bump-start');
     if (!btn) return;
-    btn.textContent = '▶ Démarrer';
+    btn.textContent = (typeof t === 'function') ? t('common.start') : '▶ Démarrer';
     btn.classList.add('bal-btn-run');
     btn.classList.remove('bal-btn-stop');
   }
@@ -51,7 +51,7 @@ const BumpSession = (() => {
   function _setBtnStop() {
     const btn = document.getElementById('btn-bump-start');
     if (!btn) return;
-    btn.textContent = '◼ Arrêter';
+    btn.textContent = (typeof t === 'function') ? t('common.stop') : '◼ Arrêter';
     btn.classList.add('bal-btn-stop');
     btn.classList.remove('bal-btn-run');
   }

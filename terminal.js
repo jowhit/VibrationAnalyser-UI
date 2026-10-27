@@ -33,11 +33,14 @@ function termCopyLog() {
   }
   const text = lines.join('\n');
   if (!text) {
-    termAddLine('[log] (vide)', 'sys');
+    termAddLine('[log] (empty)', 'sys');
     return;
   }
   const done = function (ok) {
-    termAddLine(ok ? '[log] copié (' + lines.length + ' lignes)' : '[log] !! copie échouée', 'sys');
+    const msg = ok
+      ? ((typeof t === 'function' ? t('term.copied') : 'Log copied') + ' (' + lines.length + ')')
+      : (typeof t === 'function' ? t('term.copyFail') : 'Copy failed');
+    termAddLine('[log] ' + msg, 'sys');
   };
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(text).then(function () { done(true); }).catch(function () {

@@ -278,11 +278,11 @@ const HarmonicModule = (() => {
     const btn = document.getElementById('btn-harm-toggle');
     if (!btn) return;
     if (_running) {
-      btn.textContent = '◼ Arrêter';
+      btn.textContent = (typeof t === 'function') ? t('common.stop') : '◼ Arrêter';
       btn.classList.add('bal-btn-stop');
       btn.classList.remove('bal-btn-run');
     } else {
-      btn.textContent = '▶ Démarrer';
+      btn.textContent = (typeof t === 'function') ? t('common.start') : '▶ Démarrer';
       btn.classList.remove('bal-btn-stop');
       btn.classList.add('bal-btn-run');
     }
