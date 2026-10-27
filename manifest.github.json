@@ -1,0 +1,38 @@
+{
+  "id": "/VibrationAnalyser-UI/",
+  "name": "ESP32 Analyseur",
+  "short_name": "Analyseur",
+  "description": "Analyse vibrations et equilibrage ESP32",
+  "start_url": "/VibrationAnalyser-UI/",
+  "scope": "/VibrationAnalyser-UI/",
+  "display": "standalone",
+  "background_color": "#f5f5f5",
+  "theme_color": "#1a1a2e",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/VibrationAnalyser-UI/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/VibrationAnalyser-UI/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/VibrationAnalyser-UI/icon-192-maskable.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
+      "src": "/VibrationAnalyser-UI/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
