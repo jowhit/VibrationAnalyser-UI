@@ -1,4 +1,5 @@
 {
+  "id": "https://jowhit.github.io/VibrationAnalyser-UI/",
   "name": "ESP32 Analyseur",
   "short_name": "Analyseur",
   "description": "Analyse vibrations et equilibrage ESP32",
