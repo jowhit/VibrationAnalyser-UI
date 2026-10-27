@@ -38,7 +38,11 @@
   "pwa.copied": "Copied!",
   "pwa.dismiss": "Got it",
   "pwa.hintInstall": "Tap Install, or Chrome menu ⋮ → Install app.",
-  "pwa.hintClear": "If Install is missing: clear site data, reload, try again.",
+  "pwa.hintClear": "No Install button: open this link in Chrome (not GitHub), or uninstall the old Analyser app, or Probe → Connection → Reset PWA.",
+  "pwa.hintInstalled": "Already installed (standalone). To reinstall: uninstall Analyser, then reopen this link in Chrome.",
+  "pwa.resetHint": "Install banner shown again — reload in Chrome if needed.",
+  "pwa.reset": "Reset PWA",
+  "pwa.reset.sub": "Show Install again",
 
   "menu.crumb.chooseProbe": "Choose probe",
   "menu.crumb.probe": "Probe",

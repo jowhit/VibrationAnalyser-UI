@@ -38,7 +38,11 @@
   "pwa.copied": "Copié !",
   "pwa.dismiss": "Compris",
   "pwa.hintInstall": "Appuie sur Installer, ou menu Chrome ⋮ → Installer l'application.",
-  "pwa.hintClear": "Si le menu n'offre pas Installer : efface les données du site, recharge, réessaie.",
+  "pwa.hintClear": "Pas de bouton Installer : ouvre ce lien dans Chrome (pas GitHub), ou désinstalle l'ancienne app Analyseur, ou Sonde → Connexion → Reset PWA.",
+  "pwa.hintInstalled": "Déjà installée (mode standalone). Pour réinstaller : désinstalle Analyseur puis rouvre ce lien dans Chrome.",
+  "pwa.resetHint": "Bandeau install réaffiché — recharge la page dans Chrome si besoin.",
+  "pwa.reset": "Reset PWA",
+  "pwa.reset.sub": "Réafficher Installer",
 
   "menu.crumb.chooseProbe": "Choisir sonde",
   "menu.crumb.probe": "Sonde",

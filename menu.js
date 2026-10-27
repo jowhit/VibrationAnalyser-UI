@@ -145,6 +145,7 @@ const MenuModule = (() => {
           { label: _tt('menu.espA'), sub: aHost, key: 'conn_a' },
           { label: _tt('menu.espB'), sub: bHost, key: 'conn_b' },
           { label: _tt('menu.lang'), sub: lang + ' · ' + _tt('menu.lang.sub'), key: 'conn_lang' },
+          { label: _tt('pwa.reset'), sub: _tt('pwa.reset.sub'), key: 'conn_pwa_reset' },
           { label: _tt('menu.reset'), sub: _tt('menu.reset.sub'), key: 'conn_reset' },
           { label: _tt('menu.log'), sub: _tt('menu.log.sub'), key: 'conn_copy_log' },
         ];
@@ -248,6 +249,7 @@ const MenuModule = (() => {
         }
         if (btn.key === 'conn_a' && typeof changeIpA === 'function') changeIpA();
         else if (btn.key === 'conn_b' && typeof changeIpB === 'function') changeIpB();
+        else if (btn.key === 'conn_pwa_reset' && typeof resetPwaInstall === 'function') resetPwaInstall();
         else if (btn.key === 'conn_reset' && typeof clearVaSession === 'function') clearVaSession();
         else if (btn.key === 'conn_copy_log' && typeof termCopyLog === 'function') termCopyLog();
         _render(L.CONN);
