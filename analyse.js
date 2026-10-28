@@ -1,5 +1,5 @@
 // analyse.js — Analyse temporelle + FFT + Démodulation enveloppe
-// Modes : anMode = 'time' | 'fft' | 'demod' | 'bump_wait' | 'bump_ready'
+// Modes : anMode = 'time' | 'fft' | 'demod' | 'bump_wait' | 'bump_stream'
 let anData = null;
 let anDataB = null; // 2e sonde (mode DOUBLE) — même G/Fs
 let anP    = { g:2, fs:1000, n:0, t:0 };
@@ -195,7 +195,7 @@ function anPersistClear() {
   _anPersistTimer = null;
   try { localStorage.removeItem(AN_LS_KEY); } catch (e) {}
 }
-let anMode = 'time'; // 'time' | 'fft' | 'demod' | 'bump_wait' | 'bump_ready'
+let anMode = 'time'; // 'time' | 'fft' | 'demod' | 'bump_wait' | 'bump_stream'
 let anMag  = null;
 let anZMin = 0, anZMax = 1;
 /** Zoom vertical temporel (>1 = zoom in). anYPan = décalage du centre (g). */
