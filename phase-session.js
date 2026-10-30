@@ -1,20 +1,15 @@
 // phase-session.js — Machine d'états : Phase / Harmonique (mono + duo)
 //
 // États :
-//   IDLE ──start──► (WS_GOTO=ANAL_HARM) ──beginLive──► STREAMING ──stop──► VIEW
-//   STREAMING|VIEW ──reset/abort──► IDLE
-//   VIEW ──start──► (nav) …
+//   IDLE ──enter──► (WS_GOTO=ANAL_HARM) ──READY──► (HARM_START) ──STREAMING──► VIEW
 //
-// Deux vues UI (HarmonicModule.switchView) : Harmonique | Suivi Phase
-// — même session ESP, même SM.
-//
-// Entrée unique : PhaseSession.start()  (menu Terminal)
+// Menu Terminal : PhaseSession.enter()  (ESP en attente bouton)
 // Bouton page   : PhaseSession.toggle()
-// Onglet Phase  : viewer only (pas de WS_GOTO)
 
 const PhaseSession = (() => {
   const S = {
     IDLE: 'IDLE',
+    READY: 'READY',
     STREAMING: 'STREAMING',
     VIEW: 'VIEW',
   };
@@ -40,7 +35,6 @@ const PhaseSession = (() => {
     }
   }
 
-  /** Stop ESP sans wsGoto (évite reset récursif dans wsGoto). */
   function _stopEsp() {
     if (typeof DualSession !== 'undefined') {
       DualSession.sendBoth('WS_GOTO=HARM_STOP');
@@ -49,12 +43,23 @@ const PhaseSession = (() => {
     }
   }
 
+  function _sendStart() {
+    if (typeof DualSession !== 'undefined' && DualSession.is && DualSession.is()) {
+      DualSession.sendBoth('HARM_START');
+    } else if (typeof DualSession !== 'undefined' && DualSession.sendBoth && _dual) {
+      DualSession.sendBoth('HARM_START');
+    } else if (typeof wsSend === 'function') {
+      wsSend('HARM_START');
+    }
+  }
+
   function getState() { return _state; }
   function isDual() { return _dual; }
   function isStreaming() { return _state === S.STREAMING; }
-  function isActive() { return _state === S.STREAMING || _state === S.VIEW; }
+  function isActive() {
+    return _state === S.READY || _state === S.STREAMING || _state === S.VIEW;
+  }
 
-  /** * → IDLE. Stop ESP si STREAMING. */
   function reset(silent) {
     if (_state === S.STREAMING) _stopEsp();
     _state = S.IDLE;
@@ -72,7 +77,7 @@ const PhaseSession = (() => {
   }
 
   /**
-   * Après NAV_ACK ANAL_HARM : session prête (estimation RPM côté ESP).
+   * Démarre le live ESP (après HARM_START).
    * @param {boolean} [dualFlag]
    */
   function beginLive(dualFlag) {
@@ -89,12 +94,12 @@ const PhaseSession = (() => {
       HarmonicModule.onDualReady(_dual);
     }
 
+    _sendStart();
     _state = S.STREAMING;
     _setBtnRunning(true);
     _log('[PHASE] ' + (_dual ? 'DOUBLE' : 'mono') + ' — STREAMING');
   }
 
-  /** STREAMING|VIEW → VIEW (garde polaire / phase gelés). */
   function stop() {
     if (_state === S.IDLE) return;
     if (_state === S.STREAMING) _stopEsp();
@@ -123,39 +128,50 @@ const PhaseSession = (() => {
     _log('!! Phase: NAV timeout');
   }
 
-  /**
-   * Entrée unique (menu Terminal). Relance depuis IDLE.
-   */
-  function start() {
-    if (_state !== S.IDLE) reset(true);
+  function _onNavReady(dual) {
+    _dual = !!dual;
+    _state = S.READY;
+    _setBtnRunning(false);
+    if (typeof showTab === 'function') showTab('harmonic');
+    _log('[PHASE] READY — appuyer Démarrer');
+  }
 
-    const ready = function (dual) {
-      beginLive(dual);
-    };
+  /** Menu : page Phase prête, ESP en ATTENTE (pas d'acq). */
+  function enter() {
+    if (_state === S.READY || _state === S.STREAMING) {
+      if (typeof showTab === 'function') showTab('harmonic');
+      return;
+    }
+    if (_state !== S.IDLE) reset(true);
 
     if (typeof DualSession !== 'undefined') {
       DualSession.startModule('harmonic', 'WS_GOTO=ANAL_HARM', {
         label: 'Phase',
-        onReady: ready,
+        onReady: _onNavReady,
         onFail: _failNav,
       });
     } else if (typeof window.wsGoto === 'function') {
       window.wsGoto('harmonic', 'WS_GOTO=ANAL_HARM', {
-        onAck: function () { ready(false); },
+        onAck: function () { _onNavReady(false); },
         onTimeout: _failNav,
       });
     } else if (typeof wsSend === 'function') {
       wsSend('WS_GOTO=ANAL_HARM');
-      setTimeout(function () { ready(false); }, 400);
+      setTimeout(function () { _onNavReady(false); }, 400);
     }
+  }
+
+  /** @deprecated — menu doit appeler enter() */
+  function start() {
+    enter();
   }
 
   function toggle() {
     if (_state === S.STREAMING) stop();
-    else start();
+    else if (_state === S.READY || _state === S.VIEW) beginLive(_dual);
+    else enter();
   }
 
-  /** Trame HARM_BIN — seulement en STREAMING. */
   function onFrame() {
     if (_state !== S.STREAMING) return;
   }
@@ -166,6 +182,7 @@ const PhaseSession = (() => {
     isDual: isDual,
     isStreaming: isStreaming,
     isActive: isActive,
+    enter: enter,
     start: start,
     beginLive: beginLive,
     stop: stop,

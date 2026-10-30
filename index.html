@@ -20,11 +20,11 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=92">
+<link rel="stylesheet" href="style.css?v=107">
 <link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   // Bump à chaque release UI — invalide l'ancien « Compris »
-  var PWA_UI_VER = '92';
+  var PWA_UI_VER = '105';
   var PWA_URL = 'https://jowhit.github.io/VibrationAnalyser-UI/';
 
   function _pwaT(key) {
@@ -217,6 +217,7 @@
   <div class="tab active" data-tab="term" onclick="requestTab('term')" data-i18n="tab.term">Terminal</div>
   <!-- Live FFT : pas d'onglet — uniquement Terminal → Analyse → Live FFT -->
   <div class="tab" data-tab="analyse" onclick="requestTab('analyse')" data-i18n="tab.analyse">Analyse</div>
+  <!-- Bode / Sync : pas d'onglet — Terminal → Analyse → … (NAV_ACK) -->
   <div class="tab" data-tab="balance" onclick="requestTab('balance')" data-i18n="tab.balance">Equilibrage</div>
   <div class="tab" data-tab="harmonic" onclick="requestTab('harmonic')" data-i18n="tab.harmonic">Phase</div>
   <div class="tab" data-tab="calc" onclick="requestTab('calc')" data-i18n="tab.calc">Calcul</div>
@@ -293,6 +294,10 @@
       <div class="graph-hscroll-track">
         <div id="an-hscroll-thumb" class="graph-hscroll-thumb"></div>
       </div>
+    </div>
+    <div id="an-tempo-cmdbar" class="an-bump-actions mod-cmdbar" style="display:none;">
+      <button type="button" id="btn-an-tempo-start" class="bal-btn bal-btn-run mod-start-btn"
+              onclick="AnalSession.toggleStart()">&#9654; Démarrer</button>
     </div>
     <div id="an-bump-panel" style="display:none;">
       <div class="an-bump-title" id="an-bump-title" data-i18n="an.bumpTitle">MODE BUMP TEST</div>
@@ -627,6 +632,76 @@
 
 
   <!-- ══════════════════════════════════════════════════════════
+       BODE BRUT (preview + recalcul JS)
+  ══════════════════════════════════════════════════════════ -->
+  <div id="page-bode" style="display:none;">
+    <div class="mod-rpm-strip">
+      <div class="mod-rpm-box">
+        <span id="bode-rpm-dot" class="bal-rpm-dot bal-rpm-dot--lost"></span>
+        <span class="bal-rpm-label">RPM</span>
+        <span id="bode-rpm-val" class="bal-rpm-val">0</span>
+      </div>
+    </div>
+    <div class="graph-header">
+      <span id="bode-cfg-line" data-i18n="bode.waiting">Bode — choisir G/Fs au menu</span>
+    </div>
+    <div id="bode-status" class="bode-mod-status">—</div>
+
+    <div id="bode-preview-wrap" class="bode-preview-wrap">
+      <div id="bode-live-wrap" class="bode-live-wrap">
+        <canvas id="bode-live-canvas"></canvas>
+      </div>
+    </div>
+
+    <div id="bode-result-wrap" class="bode-result-wrap" style="display:none;">
+      <div id="bode-mod-phase-wrap" class="bode-mod-phase-wrap">
+        <canvas id="bode-mod-phase-canvas"></canvas>
+      </div>
+      <div id="bode-mod-amp-wrap" class="bode-mod-amp-wrap">
+        <canvas id="bode-mod-amp-canvas"></canvas>
+      </div>
+      <div id="bode-cursor-line" class="bode-cursor-line">Toucher le graphe → curseur RPM</div>
+      <div id="bode-mod-info" class="bode-mod-info">—</div>
+    </div>
+
+    <div class="bal-cmdbar mod-cmdbar">
+      <button type="button" id="btn-bode-toggle" class="bal-btn bal-btn-run mod-start-btn">&#9654; Démarrer</button>
+      <button type="button" id="btn-bode-save" class="bal-btn" style="display:none;"
+              onclick="bodeSave()" data-i18n="common.save">Sauv</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════
+       ANALYSE SYNCHRONE (TSA)
+  ══════════════════════════════════════════════════════════ -->
+  <div id="page-sync" style="display:none;">
+    <div class="mod-rpm-strip">
+      <div class="mod-rpm-box">
+        <span id="sync-rpm-dot" class="bal-rpm-dot bal-rpm-dot--lost"></span>
+        <span class="bal-rpm-label">RPM</span>
+        <span id="sync-rpm-val" class="bal-rpm-val">0</span>
+      </div>
+    </div>
+    <div class="graph-header">
+      <span id="sync-cfg-line" data-i18n="sync.waiting">Synchrone — choisir G/Fs au menu</span>
+    </div>
+    <div id="sync-status" class="sync-mod-status">—</div>
+
+    <div id="sync-trace-wrap" class="sync-trace-wrap">
+      <canvas id="sync-trace-canvas"></canvas>
+    </div>
+    <div id="sync-fft-wrap" class="sync-fft-wrap" style="display:none;">
+      <canvas id="sync-fft-canvas"></canvas>
+    </div>
+    <div id="sync-mod-info" class="sync-mod-info">—</div>
+
+    <div class="bal-cmdbar mod-cmdbar">
+      <button type="button" id="btn-sync-toggle" class="bal-btn bal-btn-run mod-start-btn">&#9654; Démarrer</button>
+      <button type="button" id="btn-sync-fft" class="bal-btn" style="display:none;" data-i18n="sync.fft">FFT ordres</button>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════════════════════════════
        ÉQUILIBRAGE
   ══════════════════════════════════════════════════════════ -->
   <div id="page-balance" style="display:none;">
@@ -797,7 +872,7 @@
               <button type="button" class="bal-btn bal-mode-toggle bal-mode-toggle--active" data-bal-win="16">16</button>
               <button type="button" class="bal-btn bal-mode-toggle" data-bal-win="32">32</button>
             </div>
-            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v92</div>
+            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v96</div>
           </div>
         </div>
         <button id="btn-bal-run" class="bal-btn bal-btn-run" disabled>&#9654; Démarrer</button>
@@ -866,29 +941,48 @@
       </div>
     </div>
 
+    <!-- Visage 3 : Orbite 1X (A=X, B=Y à 90°) -->
+    <div id="harm-orbit-view" style="display:none;">
+      <div class="orbit-section">
+        <div class="harm-header">
+          <span class="harm-title" data-i18n="harm.orbitTitle">Orbite 1X</span>
+        </div>
+        <div class="orbit-hint" data-i18n="harm.orbitHint">A = X · B = Y (sondes à 90°) · ○ = tach</div>
+        <div id="orbit-canvas-wrap">
+          <canvas id="orbit-canvas"></canvas>
+        </div>
+        <div id="orbit-info" class="orbit-info">—</div>
+      </div>
+    </div>
+
     <div class="bal-cmdbar harm-cmdbar mod-cmdbar">
       <button type="button" id="btn-harm-view-classic" class="bal-btn bal-mode-toggle bal-mode-toggle--active" onclick="HarmonicModule.switchView('classic')" data-i18n="harm.classic">Harmonique</button>
       <button type="button" id="btn-harm-view-phase" class="bal-btn bal-mode-toggle" onclick="HarmonicModule.switchView('phase')" data-i18n="harm.phaseTrack">Suivi Phase</button>
+      <button type="button" id="btn-harm-view-orbit" class="bal-btn bal-mode-toggle" onclick="HarmonicModule.switchView('orbit')" data-i18n="harm.orbit">Orbite</button>
       <button type="button" id="btn-harm-toggle" class="bal-btn bal-btn-run harm-start-btn mod-start-btn">&#9654; Démarrer</button>
     </div>
   </div>
 
 </div><!-- #main -->
 
-<script src="i18n.js?v=92"></script>
-<script src="terminal.js?v=92"></script>
-<script src="fft.js?v=92"></script>
-<script src="fft-session.js?v=92"></script>
+<script src="i18n.js?v=107"></script>
+<script src="terminal.js?v=107"></script>
+<script src="fft.js?v=107"></script>
+<script src="fft-session.js?v=107"></script>
 <script src="demod.js?v=16"></script>
-<script src="analyse.js?v=92"></script>
-<script src="anal-session.js?v=70"></script>
-<script src="bump-session.js?v=92"></script>
-<script src="calc.js?v=92"></script>
-<script src="balance.js?v=92"></script>
+<script src="analyse.js?v=107"></script>
+<script src="anal-session.js?v=107"></script>
+<script src="bump-session.js?v=107"></script>
+<script src="calc.js?v=107"></script>
+<script src="balance.js?v=107"></script>
 <script src="balance-session.js?v=70"></script>
-<script src="harmonic.js?v=92"></script>
-<script src="phase-session.js?v=92"></script>
-<script src="menu.js?v=92"></script>
-<script src="app.js?v=92"></script>
+<script src="harmonic.js?v=107"></script>
+<script src="phase-session.js?v=107"></script>
+<script src="bode.js?v=107"></script>
+<script src="bode-session.js?v=107"></script>
+<script src="sync.js?v=107"></script>
+<script src="sync-session.js?v=107"></script>
+<script src="menu.js?v=107"></script>
+<script src="app.js?v=107"></script>
 </body>
 </html>

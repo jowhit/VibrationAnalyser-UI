@@ -11,6 +11,8 @@
 const AnalSession = (() => {
   const S = {
     IDLE: 'IDLE',
+    /** Params G/Fs choisis — attend bouton Démarrer (pas d'acq auto). */
+    ARMED: 'ARMED',
     ARMING: 'ARMING',
     ACQUIRING: 'ACQUIRING',
     TRANSFERRING: 'TRANSFERRING',
@@ -59,7 +61,20 @@ const AnalSession = (() => {
   function getState() { return _state; }
   function isDual() { return _dual; }
   function isActive() {
-    return _state === S.ARMING || _state === S.ACQUIRING || _state === S.TRANSFERRING;
+    return _state === S.ARMED || _state === S.ARMING ||
+      _state === S.ACQUIRING || _state === S.TRANSFERRING;
+  }
+
+  function _showTempoStart(on) {
+    const btn = document.getElementById('btn-an-tempo-start');
+    const bar = document.getElementById('an-tempo-cmdbar');
+    if (bar) bar.style.display = on ? 'flex' : 'none';
+    if (btn) {
+      btn.disabled = !on;
+      btn.textContent = (typeof t === 'function') ? t('common.start') : '▶ Démarrer';
+      btn.classList.add('bal-btn-run');
+      btn.classList.remove('bal-btn-stop');
+    }
   }
 
   /** Reset propre (wsGoto / changement module / erreur). */
@@ -71,8 +86,40 @@ const AnalSession = (() => {
     _armA = _armB = false;
     _capA = _capB = false;
     _binA = _binB = false;
+    _showTempoStart(false);
     if (!silent && was !== S.IDLE && was !== S.READY && typeof acqHideProgress === 'function') {
       acqHideProgress();
+    }
+  }
+
+  /**
+   * Après choix G/Fs au menu : page Analyse prête, acq au bouton.
+   * @param {{ g: string|number, fs: string|number }} opts
+   */
+  function arm(opts) {
+    opts = opts || {};
+    reset(true);
+    _g = (opts.g != null && opts.g !== '') ? String(opts.g) : '16';
+    _fs = (opts.fs != null && opts.fs !== '') ? String(opts.fs) : '16';
+    _setState(S.ARMED);
+    const bumpPanel = document.getElementById('an-bump-panel');
+    if (bumpPanel) bumpPanel.style.display = 'none';
+    if (typeof anMode !== 'undefined') anMode = 'time';
+    _showTempoStart(true);
+    const el = document.getElementById('an-fs');
+    if (el) {
+      const gLbl = (_g === ' ' || _g === '') ? 'AUTO' : ('±' + _g + 'g');
+      el.textContent = 'Prêt — ' + gLbl + '  FS=' + _fs + ' — Démarrer';
+    }
+    if (typeof showTab === 'function') showTab('analyse');
+    _log('[TEMPO] ARMED — appuyer Démarrer');
+  }
+
+  function toggleStart() {
+    // Démarrer uniquement après arm() via Terminal — jamais depuis READY
+    // (évite de relancer une acq pendant le traitement / affichage).
+    if (_state === S.ARMED) {
+      start({ g: _g, fs: _fs });
     }
   }
 
@@ -129,11 +176,14 @@ const AnalSession = (() => {
       _clearTimer();
       _log('[DOUBLE] OK — A+B reçus');
       _setState(S.READY);
+      // Pas de Démarrer après transfert — seulement via Terminal → arm()
+      _showTempoStart(false);
       return;
     }
     if (!_binA) return;
     _clearTimer();
     _setState(S.READY);
+    _showTempoStart(false);
   }
 
   /**
@@ -142,12 +192,14 @@ const AnalSession = (() => {
    */
   function start(opts) {
     opts = opts || {};
-    const g = (opts.g != null && opts.g !== '') ? String(opts.g) : '16';
-    const fs = (opts.fs != null && opts.fs !== '') ? String(opts.fs) : '16';
+    const g = (opts.g != null && opts.g !== '') ? String(opts.g) : (_g || '16');
+    const fs = (opts.fs != null && opts.fs !== '') ? String(opts.fs) : (_fs || '16');
 
+    const keepArmed = (_state === S.ARMED);
     reset(true);
     _g = g;
     _fs = fs;
+    _showTempoStart(false);
 
     if (typeof analyseArmDual === 'function') analyseArmDual();
     _dual = _isDualWanted();
@@ -155,6 +207,7 @@ const AnalSession = (() => {
     if (_dual && typeof DualSession !== 'undefined') DualSession.begin();
 
     const params = _params();
+    if (keepArmed) _log('[TEMPO] Start ' + params);
 
     if (!_dual) {
       _setState(S.ACQUIRING);
@@ -237,6 +290,8 @@ const AnalSession = (() => {
     getState: getState,
     isDual: isDual,
     isActive: isActive,
+    arm: arm,
+    toggleStart: toggleStart,
     start: start,
     startAnalTemporal: startAnalTemporal,
     reset: reset,

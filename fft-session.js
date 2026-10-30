@@ -1,18 +1,16 @@
 // fft-session.js — Machine d'états : Live FFT (mono + duo)
 //
 // États :
-//   IDLE ──start──► (nav) ──beginStream──► STREAMING ──stop──► VIEW
+//   IDLE ──enter──► (nav) ──READY──► (bouton Start) ──STREAMING──► VIEW
 //   STREAMING|VIEW ──abort/reset──► IDLE
-//   VIEW ──start──► (nav) …   (relance)
 //
-// Événements (seuls transitions autorisées) :
-//   start / beginStream / stop / abort / reset / onFrame
-// Entrée unique menu : FftSession.start()
-// Bouton page        : FftSession.toggle()
+// Menu Terminal : FftSession.enter()  (pas de LIVE_START)
+// Bouton page   : FftSession.toggle()
 
 const FftSession = (() => {
   const S = {
     IDLE: 'IDLE',
+    READY: 'READY',
     STREAMING: 'STREAMING',
     VIEW: 'VIEW',
   };
@@ -46,9 +44,8 @@ const FftSession = (() => {
   function getState() { return _state; }
   function isDual() { return _dual; }
   function isStreaming() { return _state === S.STREAMING; }
-  function isActive() { return _state === S.STREAMING; }
+  function isActive() { return _state === S.READY || _state === S.STREAMING; }
 
-  /** * → IDLE (changement module / sonde). Stop ESP si STREAMING. */
   function reset(silent) {
     if (_state === S.STREAMING) _stopEsp();
     _state = S.IDLE;
@@ -60,13 +57,12 @@ const FftSession = (() => {
     if (!silent) _log('[FFT] reset → IDLE');
   }
 
-  /** Alias leave (même transition * → IDLE). silent par défaut. */
   function abort(silent) {
     reset(silent === undefined ? true : silent);
   }
 
   /**
-   * Après NAV_ACK : LIVE_START → STREAMING.
+   * Après NAV_ACK : LIVE_START → STREAMING (bouton Start uniquement).
    * @param {boolean} [dualFlag]
    */
   function beginStream(dualFlag) {
@@ -78,16 +74,24 @@ const FftSession = (() => {
     } else {
       _dual = (typeof DualSession !== 'undefined') ? DualSession.available() : false;
     }
+    // Si dualFlag false mais ProbeMode AB (failDual / handshake B tardif) → forcer duo
+    if (!_dual && typeof DualSession !== 'undefined' && DualSession.available()) {
+      _dual = true;
+    }
     if (_dual && typeof DualSession !== 'undefined') DualSession.begin();
-    _dual = (typeof DualSession !== 'undefined') ? DualSession.is() : _dual;
+    _dual = (typeof DualSession !== 'undefined')
+      ? (DualSession.is() || DualSession.available())
+      : _dual;
     if (typeof _fftDualSession !== 'undefined') _fftDualSession = _dual;
 
     if (typeof _fftWaitShow === 'function') {
       _fftWaitShow(_dual ? 'Live FFT A+B…' : 'Live FFT…');
     }
 
-    if (_dual && typeof DualSession !== 'undefined') {
-      DualSession.sendBoth('LIVE_START');
+    if (_dual) {
+      if (typeof DualSession !== 'undefined' && DualSession.begin) DualSession.begin();
+      if (typeof wsSend === 'function') wsSend('LIVE_START');
+      if (typeof wsSendB === 'function') wsSendB('LIVE_START');
     } else if (typeof wsSend === 'function') {
       wsSend('LIVE_START');
     }
@@ -98,7 +102,6 @@ const FftSession = (() => {
     _log('[FFT] ' + (_dual ? 'DOUBLE' : 'mono') + ' — STREAMING');
   }
 
-  /** STREAMING|VIEW → VIEW (garde le spectre). IDLE : no-op. */
   function stop() {
     if (_state === S.IDLE) return;
     if (_state === S.STREAMING) _stopEsp();
@@ -119,42 +122,62 @@ const FftSession = (() => {
     _log('!! Live FFT: NAV timeout');
   }
 
-  /**
-   * Entrée unique. Toute relance part de IDLE :
-   * STREAMING|VIEW → abort → IDLE → nav → STREAMING.
-   */
-  function start() {
+  function _onNavReady(dual) {
+    _dual = !!dual;
+    // Handshake B raté mais ProbeMode AB → garder le duo pour LIVE_START
+    if (!_dual && typeof DualSession !== 'undefined' && DualSession.available()) {
+      DualSession.begin();
+      _dual = true;
+    }
+    _state = S.READY;
+    fftRunning = false;
+    _setBtnRunning(false);
+    if (typeof _fftWaitHide === 'function') _fftWaitHide();
+    if (typeof showTab === 'function') showTab('fft');
+    _log('[FFT] READY' + (_dual ? ' A+B' : '') + ' — appuyer Démarrer');
+  }
+
+  /** Menu : ouvrir l'onglet, attendre le bouton (pas de LIVE_START). */
+  function enter() {
+    if (_state === S.READY || _state === S.STREAMING) {
+      if (typeof showTab === 'function') showTab('fft');
+      return;
+    }
     if (_state !== S.IDLE) reset(true);
 
     if (typeof _fftWaitShow === 'function') _fftWaitShow('Connexion Live FFT…');
 
-    const ready = function (dual) {
-      beginStream(dual);
-    };
-
     if (typeof DualSession !== 'undefined') {
       DualSession.startModule('fft', 'WS_GOTO=ANAL_LIVE', {
         label: 'Live FFT',
-        onReady: ready,
-        onFail: _failNav,
+        onReady: _onNavReady,
+        // B lent : rester READY — beginStream enverra quand même LIVE_START à B si AB
+        onFail: function () {
+          _onNavReady(typeof DualSession !== 'undefined' && DualSession.available());
+        },
       });
     } else if (typeof window.wsGoto === 'function') {
       window.wsGoto('fft', 'WS_GOTO=ANAL_LIVE', {
-        onAck: function () { ready(false); },
+        onAck: function () { _onNavReady(false); },
         onTimeout: _failNav,
       });
     } else if (typeof wsSend === 'function') {
       wsSend('WS_GOTO=ANAL_LIVE');
-      setTimeout(function () { ready(false); }, 400);
+      setTimeout(function () { _onNavReady(false); }, 400);
     }
+  }
+
+  /** @deprecated — utiliser enter() depuis le menu */
+  function start() {
+    enter();
   }
 
   function toggle() {
     if (_state === S.STREAMING) stop();
-    else start();
+    else if (_state === S.READY || _state === S.VIEW) beginStream(_dual);
+    else enter();
   }
 
-  /** Événement trame : accepté seulement en STREAMING. */
   function onFrame() {
     if (_state !== S.STREAMING) return;
     fftRunning = true;
@@ -166,6 +189,7 @@ const FftSession = (() => {
     isDual: isDual,
     isStreaming: isStreaming,
     isActive: isActive,
+    enter: enter,
     start: start,
     beginStream: beginStream,
     stop: stop,
@@ -178,7 +202,6 @@ const FftSession = (() => {
 
 window.FftSession = FftSession;
 
-// Compat anciennes API
 function _fftFireLiveStart(dualFlag) {
   FftSession.beginStream(dualFlag);
 }

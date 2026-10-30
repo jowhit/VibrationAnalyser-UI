@@ -36,10 +36,10 @@ body { display: flex; flex-direction: column; }
 .tab.active { color: #fff; background: #0066cc; }
 
 /* ── Pages ── */
-#page-term, #page-fft, #page-analyse, #page-calc, #page-balance, #page-harmonic {
+#page-term, #page-fft, #page-analyse, #page-bode, #page-sync, #page-calc, #page-balance, #page-harmonic {
   display: flex; flex-direction: column; flex: 1; overflow: hidden;
 }
-#page-fft, #page-analyse, #page-calc, #page-harmonic { display: none; }
+#page-fft, #page-analyse, #page-bode, #page-sync, #page-calc, #page-harmonic { display: none; }
 
 /* ── Terminal ── */
 #terminal {
@@ -1270,7 +1270,8 @@ body { display: flex; flex-direction: column; }
   gap: 0;
 }
 #page-harmonic #harm-classic-view,
-#page-harmonic #harm-phase-view {
+#page-harmonic #harm-phase-view,
+#page-harmonic #harm-orbit-view {
   padding: 8px;
   gap: 10px;
 }
@@ -1404,6 +1405,116 @@ body { display: flex; flex-direction: column; }
 .pt-hist-entry { display: inline-block; margin-right: 10px; white-space: nowrap; }
 .pt-hist-entry.pt-latest { font-weight: bold; }
 .pt-hist-entry.pt-sat { color: #c45a00; }
+
+/* ── Orbite 1X ───────────────────────────────────────────── */
+#harm-orbit-view {
+  flex: 1; display: flex; flex-direction: column; min-height: 0; gap: 6px;
+}
+.orbit-section {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column;
+  background: #fff; border-radius: 8px; border: 1px solid #ddd;
+  padding: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+.orbit-hint {
+  font-size: 11px; color: #666; padding: 0 4px 4px;
+}
+#orbit-canvas-wrap {
+  flex: 1; min-height: 0;
+  display: flex; justify-content: center; align-items: center;
+}
+#orbit-canvas {
+  display: block; background: #fff;
+}
+.orbit-info {
+  font-family: 'Courier New', monospace; font-size: 12px;
+  color: #444; text-align: center; padding: 4px 0; line-height: 1.5;
+}
+
+/* ── Bode brut (module dédié) ────────────────────────────── */
+#page-bode {
+  padding: 6px 8px 0; gap: 6px;
+}
+.bode-mod-status {
+  font-family: 'Courier New', monospace; font-size: 12px;
+  color: #555; padding: 2px 4px;
+}
+#bode-cfg-line {
+  font-family: 'Courier New', monospace; font-size: 11px; color: #666;
+}
+.bode-preview-wrap,
+.bode-result-wrap {
+  flex: 1; min-height: 0;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.bode-live-wrap {
+  flex: 1; min-height: 120px;
+  background: #fff; border: 1px solid #ddd; border-radius: 8px;
+  overflow: hidden;
+}
+#bode-live-canvas {
+  width: 100%; height: 100%; display: block; background: #fff;
+}
+.bode-mod-phase-wrap {
+  flex: 0 0 28%;
+  min-height: 72px;
+  background: #fff; border: 1px solid #ddd; border-radius: 8px;
+  overflow: hidden;
+}
+.bode-mod-amp-wrap {
+  flex: 1; min-height: 140px;
+  background: #fff; border: 1px solid #ddd; border-radius: 8px;
+  overflow: hidden;
+}
+#bode-mod-phase-canvas,
+#bode-mod-amp-canvas {
+  width: 100%; height: 100%; display: block; background: #fafafa;
+}
+.bode-cursor-line {
+  font-family: 'Courier New', monospace; font-size: 12px;
+  color: #cc3300; text-align: center; padding: 4px 2px; line-height: 1.35;
+  font-weight: bold;
+}
+.bode-mod-info {
+  font-family: 'Courier New', monospace; font-size: 11px;
+  color: #444; text-align: center; padding: 2px 0; line-height: 1.4;
+}
+#bode-mod-phase-canvas,
+#bode-mod-amp-canvas {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* ── Analyse synchrone (TSA) ─────────────────────────────── */
+#page-sync {
+  padding: 6px 8px 0; gap: 6px;
+}
+.sync-mod-status {
+  font-family: 'Courier New', monospace; font-size: 12px;
+  color: #555; padding: 2px 4px;
+}
+#sync-cfg-line {
+  font-family: 'Courier New', monospace; font-size: 11px; color: #666;
+}
+.sync-trace-wrap,
+.sync-fft-wrap {
+  flex: 1; min-height: 160px;
+  background: #fff; border: 1px solid #ddd; border-radius: 8px;
+  overflow: hidden;
+}
+.sync-trace-wrap {
+  display: flex; align-items: center; justify-content: center;
+}
+#sync-trace-canvas {
+  display: block; background: #fff; max-width: 100%; max-height: 100%;
+}
+#sync-fft-canvas {
+  width: 100%; height: 100%; display: block; background: #fafafa;
+}
+.sync-mod-info {
+  font-family: 'Courier New', monospace; font-size: 11px;
+  color: #444; text-align: center; padding: 2px 0; line-height: 1.4;
+}
 
 /* Responsive */
 @media (max-width: 600px) {

@@ -4,7 +4,7 @@
 // lang/*.json volontairement ABSENTS du précache : chargés à la demande par i18n.js
 // (évite qu'un 404/JSON casse l'installabilité PWA perçue / cache SW).
 
-const CACHE_NAME = 'vibanalyser-v92';
+const CACHE_NAME = 'vibanalyser-v107';
 const FILES = [
   './index.html',
   './i18n.js',
@@ -17,6 +17,10 @@ const FILES = [
   './fft.js',
   './fft-session.js',
   './harmonic.js',
+  './bode.js',
+  './bode-session.js',
+  './sync.js',
+  './sync-session.js',
   './phase-session.js',
   './demod.js',
   './calc.js',

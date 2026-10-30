@@ -340,6 +340,15 @@ function acqStartTemporal(opts) {
 }
 
 function acqShowProgress(payload) {
+  // Sync/Bode ne doivent pas voler l'onglet Analyse avec l'overlay temporel
+  if (typeof SyncSession !== 'undefined' && SyncSession.getState) {
+    const ss = SyncSession.getState();
+    if (ss === 'ACQUIRING' || ss === 'FINALIZE' || ss === 'READY') return;
+  }
+  if (typeof BodeModuleSession !== 'undefined' && BodeModuleSession.getState) {
+    const bs = BodeModuleSession.getState();
+    if (bs === 'RECORDING' || bs === 'FINALIZE' || bs === 'READY') return;
+  }
   const m = /^(\d+)/.exec(payload || '');
   if (!m) return;
   const durMs = parseInt(m[1], 10);

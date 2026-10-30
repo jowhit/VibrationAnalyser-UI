@@ -13,6 +13,10 @@ const MenuModule = (() => {
     FS:          'fs',
     BUMP_G:      'bump_g',
     BUMP_FS:     'bump_fs',
+    BODE_G:      'bode_g',
+    BODE_FS:     'bode_fs',
+    SYNC_G:      'sync_g',
+    SYNC_FS:     'sync_fs',
   };
 
   let _send = null, _switchTab = null, _navGoto = null;
@@ -21,6 +25,8 @@ const MenuModule = (() => {
   let _container = null;
 
   const BUMP_BUFFER_SAMPLES = 45000;
+  const BODE_BUFFER_SAMPLES = 45000;
+  const SYNC_BUFFER_SAMPLES = 45000;
 
   function _tt(key, vars) {
     return (typeof t === 'function') ? t(key, vars) : key;
@@ -34,6 +40,16 @@ const MenuModule = (() => {
 
   function _bumpReadSec(fsHz) {
     const s = BUMP_BUFFER_SAMPLES / fsHz;
+    return s >= 10 ? (Math.round(s) + ' s') : (s.toFixed(1) + ' s');
+  }
+
+  function _bodeReadSec(fsHz) {
+    const s = BODE_BUFFER_SAMPLES / fsHz;
+    return s >= 10 ? (Math.round(s) + ' s') : (s.toFixed(1) + ' s');
+  }
+
+  function _syncReadSec(fsHz) {
+    const s = SYNC_BUFFER_SAMPLES / fsHz;
     return s >= 10 ? (Math.round(s) + ' s') : (s.toFixed(1) + ' s');
   }
 
@@ -167,6 +183,8 @@ const MenuModule = (() => {
       case L.ANALYSE: return [
         { label: _tt('menu.temporal'), sub: _tt('menu.temporal.sub'), key: 'temporelle' },
         { label: _tt('menu.bump'),     sub: _tt('menu.bump.sub'),     key: 'bump' },
+        { label: _tt('menu.bode'),     sub: _tt('menu.bode.sub'),     key: 'bode' },
+        { label: _tt('menu.sync'),     sub: _tt('menu.sync.sub'),     key: 'sync' },
         { label: _tt('menu.liveFft'),  sub: _tt('menu.liveFft.sub'),  key: 'live_fft' },
         { label: _tt('menu.phase'),    sub: _tt('menu.phase.sub'),    key: 'harmonique' },
       ];
@@ -204,6 +222,42 @@ const MenuModule = (() => {
         { label: '16 000 Hz', sub: _tt('menu.fs.read', { sec: _bumpReadSec(16000) }) + ' ⭐', key: 'bfs16', cmd: '16000', accent: true },
         { label: '24 000 Hz', sub: _tt('menu.fs.read', { sec: _bumpReadSec(24000) }), key: 'bfs24', cmd: '24000' },
         { label: '32 000 Hz', sub: _tt('menu.fs.read', { sec: _bumpReadSec(32000) }), key: 'bfs32', cmd: '32000' },
+      ];
+
+      case L.BODE_G: return [
+        { label: '± 2 g',  sub: _tt('menu.g.bump'),   key: 'odg2',  cmd: '2'  },
+        { label: '± 4 g',  sub: '',                   key: 'odg4',  cmd: '4'  },
+        { label: '± 8 g',  sub: '',                   key: 'odg8',  cmd: '8'  },
+        { label: '± 16 g', sub: _tt('menu.g.strong'), key: 'odg16', cmd: '16' },
+        { label: _tt('menu.g.auto'), sub: _tt('menu.g.auto.sub'), key: 'odgauto', cmd: 'auto', accent: true },
+      ];
+
+      case L.BODE_FS: return [
+        { label: '1 000 Hz',  sub: _tt('menu.fs.read', { sec: _bodeReadSec(1000) }),  key: 'odfs1',  cmd: '1000'  },
+        { label: '2 000 Hz',  sub: _tt('menu.fs.read', { sec: _bodeReadSec(2000) }),  key: 'odfs2',  cmd: '2000'  },
+        { label: '4 000 Hz',  sub: _tt('menu.fs.read', { sec: _bodeReadSec(4000) }),  key: 'odfs4',  cmd: '4000'  },
+        { label: '8 000 Hz',  sub: _tt('menu.fs.read', { sec: _bodeReadSec(8000) }),  key: 'odfs8',  cmd: '8000'  },
+        { label: '16 000 Hz', sub: _tt('menu.fs.read', { sec: _bodeReadSec(16000) }) + ' ⭐', key: 'odfs16', cmd: '16000', accent: true },
+        { label: '24 000 Hz', sub: _tt('menu.fs.read', { sec: _bodeReadSec(24000) }), key: 'odfs24', cmd: '24000' },
+        { label: '32 000 Hz', sub: _tt('menu.fs.read', { sec: _bodeReadSec(32000) }), key: 'odfs32', cmd: '32000' },
+      ];
+
+      case L.SYNC_G: return [
+        { label: '± 2 g',  sub: _tt('menu.g.weak'),   key: 'syg2',  cmd: '2'  },
+        { label: '± 4 g',  sub: '',                   key: 'syg4',  cmd: '4'  },
+        { label: '± 8 g',  sub: '',                   key: 'syg8',  cmd: '8'  },
+        { label: '± 16 g', sub: _tt('menu.g.strong'), key: 'syg16', cmd: '16' },
+        { label: _tt('menu.g.auto'), sub: _tt('menu.g.auto.sub'), key: 'sygauto', cmd: 'auto', accent: true },
+      ];
+
+      case L.SYNC_FS: return [
+        { label: '1 000 Hz',  sub: _tt('menu.fs.read', { sec: _syncReadSec(1000) }),  key: 'syfs1',  cmd: '1000'  },
+        { label: '2 000 Hz',  sub: _tt('menu.fs.read', { sec: _syncReadSec(2000) }),  key: 'syfs2',  cmd: '2000'  },
+        { label: '4 000 Hz',  sub: _tt('menu.fs.read', { sec: _syncReadSec(4000) }),  key: 'syfs4',  cmd: '4000'  },
+        { label: '8 000 Hz',  sub: _tt('menu.fs.read', { sec: _syncReadSec(8000) }),  key: 'syfs8',  cmd: '8000'  },
+        { label: '16 000 Hz', sub: _tt('menu.fs.read', { sec: _syncReadSec(16000) }) + ' ⭐', key: 'syfs16', cmd: '16000', accent: true },
+        { label: '24 000 Hz', sub: _tt('menu.fs.read', { sec: _syncReadSec(24000) }), key: 'syfs24', cmd: '24000' },
+        { label: '32 000 Hz', sub: _tt('menu.fs.read', { sec: _syncReadSec(32000) }), key: 'syfs32', cmd: '32000' },
       ];
 
       default: return [];
@@ -320,14 +374,30 @@ const MenuModule = (() => {
           _path = ['menu.crumb.analyse', 'menu.crumb.bump', 'menu.crumb.gRange'];
           _render(L.BUMP_G);
 
+        } else if (btn.key === 'bode') {
+          // SM : L.ANALYSE → L.BODE_G → L.BODE_FS → WS_GOTO → BodeModuleSession
+          _selectedG = null;
+          _path = ['menu.crumb.analyse', 'menu.crumb.bode', 'menu.crumb.gRange'];
+          _render(L.BODE_G);
+
+        } else if (btn.key === 'sync') {
+          // SM : L.ANALYSE → L.SYNC_G → L.SYNC_FS → WS_GOTO → SyncSession
+          _selectedG = null;
+          _path = ['menu.crumb.analyse', 'menu.crumb.sync', 'menu.crumb.gRange'];
+          _render(L.SYNC_G);
+
         } else if (btn.key === 'live_fft') {
           _path = []; _render(L.ROOT);
-          if (typeof FftSession !== 'undefined' && FftSession.start) FftSession.start();
+          // enter = page prête ; Start = LIVE_START
+          if (typeof FftSession !== 'undefined' && FftSession.enter) FftSession.enter();
+          else if (typeof FftSession !== 'undefined' && FftSession.start) FftSession.start();
           else if (typeof fftToggle === 'function') fftToggle();
 
         } else if (btn.key === 'harmonique') {
           _path = []; _render(L.ROOT);
-          if (typeof PhaseSession !== 'undefined' && PhaseSession.start) PhaseSession.start();
+          // enter = page prête ; Start = HARM_START
+          if (typeof PhaseSession !== 'undefined' && PhaseSession.enter) PhaseSession.enter();
+          else if (typeof PhaseSession !== 'undefined' && PhaseSession.start) PhaseSession.start();
           else if (typeof HarmonicModule !== 'undefined' && HarmonicModule.harmToggle) {
             HarmonicModule.harmToggle();
           }
@@ -346,34 +416,48 @@ const MenuModule = (() => {
         _render(L.BUMP_FS);
         break;
 
+      case L.BODE_G:
+        _selectedG = btn.cmd;
+        _path = ['menu.crumb.analyse', 'menu.crumb.bode', btn.label, 'menu.crumb.fs'];
+        _render(L.BODE_FS);
+        break;
+
+      case L.SYNC_G:
+        _selectedG = btn.cmd;
+        _path = ['menu.crumb.analyse', 'menu.crumb.sync', btn.label, 'menu.crumb.fs'];
+        _render(L.SYNC_FS);
+        break;
+
       case L.FS: {
         const g  = _selectedG || '16';
         const fs = btn.cmd;
 
-        const _startTempo = () => {
-          if (typeof AnalSession !== 'undefined' && AnalSession.start) {
+        // Arme la page Analyse — l'acq part au bouton Démarrer
+        const _armTempo = () => {
+          if (typeof AnalSession !== 'undefined' && AnalSession.arm) {
+            AnalSession.arm({ g: g, fs: fs });
+          } else if (typeof AnalSession !== 'undefined' && AnalSession.start) {
             AnalSession.start({ g: g, fs: fs });
           } else if (typeof startAnalTemporal === 'function') {
             startAnalTemporal(g, fs);
-          } else {
-            _send('ANAL_START G=' + g + ' FS=' + fs + '\n');
           }
         };
         if (_navGoto) {
           _navGoto('analyse', 'WS_GOTO=ANAL_TEMP', {
             onAck: () => {
-              _startTempo();
+              _armTempo();
               setTimeout(() => _switchTab('analyse'), 300);
             },
             onTimeout: () => {
               console.warn('NAV timeout pour ANAL_TEMP');
+              _armTempo();
               _switchTab('analyse');
             }
           });
         } else {
           _send('WS_GOTO=ANAL_TEMP\n');
           setTimeout(() => {
-            _startTempo();
+            _armTempo();
             _switchTab('analyse');
           }, 500);
         }
@@ -417,6 +501,58 @@ const MenuModule = (() => {
         _render(L.ROOT);
         break;
       }
+
+      case L.BODE_FS: {
+        const g = _selectedG || '2';
+        const fs = btn.cmd || '4000';
+        const cmd = 'WS_GOTO=ANAL_BODE G=' + g + ' FS=' + fs;
+        const bodeReady = () => {
+          if (typeof BodeModule !== 'undefined' && BodeModule.setConfig) {
+            BodeModule.setConfig(g, fs, BODE_BUFFER_SAMPLES);
+          }
+          if (typeof BodeModuleSession !== 'undefined' && BodeModuleSession.enter) {
+            BodeModuleSession.enter();
+          } else if (typeof showTab === 'function') {
+            showTab('bode');
+          }
+        };
+        if (_navGoto) {
+          _navGoto('bode', cmd, { onAck: bodeReady, onTimeout: bodeReady });
+        } else {
+          _send(cmd + '\n');
+          setTimeout(bodeReady, 300);
+        }
+        _path = [];
+        _selectedG = null;
+        _render(L.ROOT);
+        break;
+      }
+
+      case L.SYNC_FS: {
+        const g = _selectedG || '2';
+        const fs = btn.cmd || '4000';
+        const cmd = 'WS_GOTO=ANAL_SYNC G=' + g + ' FS=' + fs;
+        const syncReady = () => {
+          if (typeof SyncModule !== 'undefined' && SyncModule.setConfig) {
+            SyncModule.setConfig(g, fs, SYNC_BUFFER_SAMPLES);
+          }
+          if (typeof SyncSession !== 'undefined' && SyncSession.enter) {
+            SyncSession.enter();
+          } else if (typeof showTab === 'function') {
+            showTab('sync');
+          }
+        };
+        if (_navGoto) {
+          _navGoto('sync', cmd, { onAck: syncReady, onTimeout: syncReady });
+        } else {
+          _send(cmd + '\n');
+          setTimeout(syncReady, 300);
+        }
+        _path = [];
+        _selectedG = null;
+        _render(L.ROOT);
+        break;
+      }
     }
   }
 
@@ -432,6 +568,10 @@ const MenuModule = (() => {
     else if (_level === L.FS)      { _path = ['menu.crumb.analyse', 'menu.crumb.temporal']; _render(L.G_RANGE); }
     else if (_level === L.BUMP_G)  { _path = ['menu.crumb.analyse']; _render(L.ANALYSE); }
     else if (_level === L.BUMP_FS) { _path = ['menu.crumb.analyse', 'menu.crumb.bump', 'menu.crumb.gRange']; _render(L.BUMP_G); }
+    else if (_level === L.BODE_G)  { _path = ['menu.crumb.analyse']; _render(L.ANALYSE); }
+    else if (_level === L.BODE_FS) { _path = ['menu.crumb.analyse', 'menu.crumb.bode', 'menu.crumb.gRange']; _render(L.BODE_G); }
+    else if (_level === L.SYNC_G)  { _path = ['menu.crumb.analyse']; _render(L.ANALYSE); }
+    else if (_level === L.SYNC_FS) { _path = ['menu.crumb.analyse', 'menu.crumb.sync', 'menu.crumb.gRange']; _render(L.SYNC_G); }
     else                           { _path = []; _render(L.ROOT); }
   }
 

@@ -31,8 +31,8 @@ const HarmonicModule = (() => {
   let _speedCanvas, _speedCtx;
   let _initialized = false;
 
-  // ── Un seul visage calculé par trame : false = Harmonique, true = Suivi phase ──
-  let _phaseTrackingMode = false;
+  // ── Visage actif : 'classic' | 'phase' | 'orbit' ──
+  let _viewMode = 'classic';
 
   // ── Suivi de phase (préfixe _pt — pas partagé avec le calcul harmonique) ──
   const PT_SAT_THRESHOLD = 32700;
@@ -51,10 +51,23 @@ const HarmonicModule = (() => {
   let _ptAmpGB = 0;
   let _ptIsSaturatedB = false;
 
+  // ── Orbite 1X filtrée (A=X, B=Y) ──
+  // Ne dessiner que sur une paire A+B fraîche (évite ellipse A_new+B_old → glitch 45°).
+  const ORBIT_POINTS = 128;
+  const ORBIT_RPM_MATCH = 80; // |rpmA−rpmB| max pour valider la paire
+  let _orbitCanvas, _orbitCtx;
+  let _orbPendA = null;   // { amp, phase, rpm }
+  let _orbPendB = null;
+  let _orbSnap = null;    // dernière paire validée { ax, phA, ay, phB, rpm }
+
   function _applyCanvasVisibility() {
-    if (_polarCanvas) _polarCanvas.style.display = _phaseTrackingMode ? 'none' : '';
-    if (_speedCanvas) _speedCanvas.style.display = _phaseTrackingMode ? 'none' : '';
-    if (_ptCanvas) _ptCanvas.style.display = _phaseTrackingMode ? '' : 'none';
+    const classic = _viewMode === 'classic';
+    const phase = _viewMode === 'phase';
+    const orbit = _viewMode === 'orbit';
+    if (_polarCanvas) _polarCanvas.style.display = classic ? '' : 'none';
+    if (_speedCanvas) _speedCanvas.style.display = classic ? '' : 'none';
+    if (_ptCanvas) _ptCanvas.style.display = phase ? '' : 'none';
+    if (_orbitCanvas) _orbitCanvas.style.display = orbit ? '' : 'none';
   }
 
   // ── INIT ────────────────────────────────────────────────────
@@ -68,6 +81,8 @@ const HarmonicModule = (() => {
     _speedCtx    = _speedCanvas ? _speedCanvas.getContext('2d') : null;
     _ptCanvas    = document.getElementById('pt-canvas');
     _ptCtx       = _ptCanvas ? _ptCanvas.getContext('2d') : null;
+    _orbitCanvas = document.getElementById('orbit-canvas');
+    _orbitCtx    = _orbitCanvas ? _orbitCanvas.getContext('2d') : null;
 
     const btn = document.getElementById('btn-harm-toggle');
     if (btn) {
@@ -86,7 +101,7 @@ const HarmonicModule = (() => {
   function _resize() {
     _applyCanvasVisibility();
 
-    if (!_phaseTrackingMode) {
+    if (_viewMode === 'classic') {
       const wrap = document.getElementById('harm-polar-wrap');
       if (wrap && _polarCanvas) {
         if (wrap.clientWidth === 0) { setTimeout(_resize, 60); return; }
@@ -105,7 +120,7 @@ const HarmonicModule = (() => {
 
       _drawPolar();
       _drawSpeed();
-    } else {
+    } else if (_viewMode === 'phase') {
       var ptWrap = document.getElementById('pt-canvas-wrap');
       if (ptWrap && _ptCanvas) {
         if (ptWrap.clientWidth === 0) { setTimeout(_resize, 60); return; }
@@ -115,6 +130,20 @@ const HarmonicModule = (() => {
         if (psz > 0) { _ptCanvas.width = psz; _ptCanvas.height = psz; }
       }
       _drawPhaseCircle();
+    } else if (_viewMode === 'orbit') {
+      var oWrap = document.getElementById('orbit-canvas-wrap');
+      if (oWrap && _orbitCanvas) {
+        if (oWrap.clientWidth === 0) { setTimeout(_resize, 60); return; }
+        var ow = oWrap.clientWidth  || 300;
+        var oh = oWrap.clientHeight || ow;
+        var osz = Math.min(ow, oh);
+        // Éviter clear involontaire (assigner width/height reset le canvas)
+        if (osz > 0 && (_orbitCanvas.width !== osz || _orbitCanvas.height !== osz)) {
+          _orbitCanvas.width = osz;
+          _orbitCanvas.height = osz;
+        }
+      }
+      _drawOrbit();
     }
   }
 
@@ -145,6 +174,62 @@ const HarmonicModule = (() => {
     _ptIsSaturated = false;
     _ptIsSaturatedB = false;
     _ptHistory = [];
+    _orbPendA = null;
+    _orbPendB = null;
+    _orbSnap = null;
+  }
+
+  /**
+   * Stash 1X pour orbite. Retourne true si une nouvelle paire A+B a été commitée.
+   * @param {number} [rpm]
+   */
+  function _stashOrbit1X(amp_g, phase, isB, rpm) {
+    if (!(amp_g >= 0) || !isFinite(phase)) return false;
+    var pt = {
+      amp: amp_g,
+      phase: phase,
+      rpm: (typeof rpm === 'number' && isFinite(rpm)) ? rpm : 0
+    };
+    if (isB) _orbPendB = pt;
+    else _orbPendA = pt;
+
+    if (!_orbPendA || !_orbPendB) return false;
+
+    var ra = _orbPendA.rpm || 0;
+    var rb = _orbPendB.rpm || 0;
+    if (ra > 0 && rb > 0 && Math.abs(ra - rb) > ORBIT_RPM_MATCH) {
+      // RPM trop divergents — garder le canal qui vient d'arriver, drop l'autre
+      if (isB) _orbPendA = null;
+      else _orbPendB = null;
+      return false;
+    }
+
+    _orbSnap = {
+      ax: _orbPendA.amp,
+      phA: _orbPendA.phase,
+      ay: _orbPendB.amp,
+      phB: _orbPendB.phase,
+      rpm: Math.max(ra, rb)
+    };
+    // Nouvelle paire = besoin d'un nouvel A et d'un nouvel B
+    _orbPendA = null;
+    _orbPendB = null;
+    return true;
+  }
+
+  function _refreshActiveView() {
+    _harmUpdateRpmBar();
+    if (_viewMode === 'phase') {
+      _drawPhaseCircle();
+      _updatePhaseUI();
+    } else if (_viewMode === 'orbit') {
+      _drawOrbit();
+      _updateOrbitUI();
+    } else {
+      _updateInfo();
+      _drawPolar();
+      _drawSpeed();
+    }
   }
 
   function _noteFrame() {
@@ -172,15 +257,10 @@ const HarmonicModule = (() => {
       _harmonicsB = [];
       _ptHasData = false;
       _ptHasDataB = false;
-      _harmUpdateRpmBar();
-      if (_phaseTrackingMode) {
-        _drawPhaseCircle();
-        _updatePhaseUI();
-      } else {
-        _updateInfo();
-        _drawPolar();
-        _drawSpeed();
-      }
+      _orbPendA = null;
+      _orbPendB = null;
+      _orbSnap = null;
+      _refreshActiveView();
     }, 250);
   }
 
@@ -190,9 +270,7 @@ const HarmonicModule = (() => {
       : _harmDualAvailable();
     // Nouveau Start : efface le gel précédent
     _clearLiveData();
-    _harmUpdateRpmBar();
-    _drawPolar();
-    _drawSpeed();
+    _refreshActiveView();
     // GOTO B géré par DualSession.startModule / harmToggle — pas de double envoi ici
   }
 
@@ -205,33 +283,20 @@ const HarmonicModule = (() => {
     // qu’aucune trame n’arrive encore (estimation RPM / pas de tach).
     // La 1ʳᵉ HARM_BIN dans onHarmBinary* appelle setRunning(true).
     setRunning(false);
-    _harmUpdateRpmBar();
-    _drawPolar();
-    _drawSpeed();
-    if (_phaseTrackingMode) {
-      _drawPhaseCircle();
-      _updatePhaseUI();
-    }
+    _refreshActiveView();
   }
 
   function abortStart() {
     _abortSession();
   }
 
-  /** Stop = pause : garde polaire / phase / RPM affichés. Appelé par PhaseSession.stop. */
+  /** Stop = pause : garde polaire / phase / orbit / RPM affichés. Appelé par PhaseSession.stop. */
   function pauseSession() {
     _stopStaleWatch();
     // Ne pas _clearLiveData — gel de la dernière trame (mono et duo)
     if (typeof DualSession !== 'undefined') DualSession.end();
     _running = false;
-    _harmUpdateRpmBar();
-    _updateInfo();
-    _drawPolar();
-    _drawSpeed();
-    if (_phaseTrackingMode) {
-      _drawPhaseCircle();
-      _updatePhaseUI();
-    }
+    _refreshActiveView();
   }
 
   /** Abandon (timeout / leave) : tout effacer. */
@@ -241,14 +306,7 @@ const HarmonicModule = (() => {
     _dualSession = false;
     if (typeof DualSession !== 'undefined') DualSession.end();
     _running = false;
-    _harmUpdateRpmBar();
-    _updateInfo();
-    _drawPolar();
-    _drawSpeed();
-    if (_phaseTrackingMode) {
-      _drawPhaseCircle();
-      _updatePhaseUI();
-    }
+    _refreshActiveView();
   }
 
   /** @deprecated — passer par PhaseSession.toggle() */
@@ -302,6 +360,13 @@ const HarmonicModule = (() => {
     }
   }
 
+  /** Preview RPM avant Start (HARM_RPM=) — n'active pas le live. */
+  function onLiveRpm(rpm) {
+    var v = (typeof rpm === 'number' && isFinite(rpm)) ? rpm : 0;
+    _rpm = v;
+    _harmUpdateRpmBar();
+  }
+
   function onHarmBinary(gRange, fs, rpm, n, samples) {
     if (typeof PhaseSession !== 'undefined' && PhaseSession.onFrame) PhaseSession.onFrame();
     if (!_running) setRunning(true);
@@ -311,11 +376,23 @@ const HarmonicModule = (() => {
     _fs  = fs;
     _harmUpdateRpmBar();
 
-    if (_phaseTrackingMode) {
+    if (_viewMode === 'phase') {
       var pt = _phaseTracking(samples, gRange, fs, rpm, n);
+      _stashOrbit1X(pt.amp_g, pt.phase, false, _rpm);
       _updatePhaseTrackingDisplay(pt, false);
+    } else if (_viewMode === 'orbit') {
+      var hOrb = _multiHarmonicDFT(samples, gRange, fs, rpm, n);
+      var pairedA = false;
+      if (hOrb[0]) {
+        pairedA = _stashOrbit1X(hOrb[0].amp_g, hOrb[0].phase, false, _rpm);
+      }
+      if (pairedA) { _drawOrbit(); _updateOrbitUI(); }
+      else if (!_orbSnap) { _drawOrbit(); _updateOrbitUI(); }
     } else {
       _harmonics = _multiHarmonicDFT(samples, gRange, fs, rpm, n);
+      if (_harmonics[0]) {
+        _stashOrbit1X(_harmonics[0].amp_g, _harmonics[0].phase, false, _rpm);
+      }
       _updateInfo();
       _drawPolar();
       _drawSpeed();
@@ -332,11 +409,23 @@ const HarmonicModule = (() => {
     if (!_fs) _fs = fs;
     _harmUpdateRpmBar();
 
-    if (_phaseTrackingMode) {
+    if (_viewMode === 'phase') {
       var pt = _phaseTracking(samples, gRange, fs, rpm, n);
+      _stashOrbit1X(pt.amp_g, pt.phase, true, _rpmB);
       _updatePhaseTrackingDisplay(pt, true);
+    } else if (_viewMode === 'orbit') {
+      var hOrbB = _multiHarmonicDFT(samples, gRange, fs, rpm, n);
+      var pairedB = false;
+      if (hOrbB[0]) {
+        pairedB = _stashOrbit1X(hOrbB[0].amp_g, hOrbB[0].phase, true, _rpmB);
+      }
+      if (pairedB) { _drawOrbit(); _updateOrbitUI(); }
+      else if (!_orbSnap) { _drawOrbit(); _updateOrbitUI(); }
     } else {
       _harmonicsB = _multiHarmonicDFT(samples, gRange, fs, rpm, n);
+      if (_harmonicsB[0]) {
+        _stashOrbit1X(_harmonicsB[0].amp_g, _harmonicsB[0].phase, true, _rpmB);
+      }
       _updateInfo();
       _drawPolar();
       _drawSpeed();
@@ -790,22 +879,136 @@ const HarmonicModule = (() => {
   }
 
   // ============================================================
-  // switchView — bascule entre 'classic' et 'phase'
+  // Orbite 1X filtrée — A=X, B=Y (sondes à 90°), ○ = tach (t=0)
+  // Dessin uniquement depuis _orbSnap (paire A+B validée).
+  // ============================================================
+  function _drawOrbit() {
+    if (!_orbitCtx || !_orbitCanvas) return;
+    var c = _orbitCtx;
+    var W = _orbitCanvas.width, H = _orbitCanvas.height;
+    if (W === 0 || H === 0) return;
+    var cx = W / 2, cy = H / 2;
+    var R = Math.min(W, H) * 0.38;
+
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = '#ffffff';
+    c.fillRect(0, 0, W, H);
+
+    // Axes
+    c.strokeStyle = '#ccc'; c.lineWidth = 1;
+    c.beginPath(); c.moveTo(cx - R, cy); c.lineTo(cx + R, cy); c.stroke();
+    c.beginPath(); c.moveTo(cx, cy - R); c.lineTo(cx, cy + R); c.stroke();
+
+    // Cadre / cercle de référence
+    c.strokeStyle = '#ddd'; c.lineWidth = 1;
+    c.beginPath(); c.arc(cx, cy, R, 0, 2 * Math.PI); c.stroke();
+
+    c.fillStyle = '#888'; c.font = '11px "Courier New", monospace';
+    c.textAlign = 'left';   c.fillText('+X (A)', cx + R + 4, cy + 4);
+    c.textAlign = 'right';  c.fillText('−X', cx - R - 4, cy + 4);
+    c.textAlign = 'center'; c.fillText('+Y (B)', cx, cy - R - 8);
+    c.textAlign = 'center'; c.fillText('−Y', cx, cy + R + 14);
+
+    if (!_isDualUi() && !_dualSession) {
+      c.fillStyle = '#888'; c.font = '13px "Courier New", monospace';
+      c.textAlign = 'center';
+      var msg = (typeof t === 'function') ? t('harm.orbitNeedDual') : 'Mode DOUBLE requis (A+B à 90°)';
+      c.fillText(msg, cx, cy);
+      return;
+    }
+
+    if (!_orbSnap) {
+      c.fillStyle = '#aaa'; c.font = '13px "Courier New", monospace';
+      c.textAlign = 'center';
+      var wait = (!_orbPendA && !_orbPendB) ? 'En attente A+B…'
+        : (!_orbPendA ? 'En attente A…' : (!_orbPendB ? 'En attente B…' : 'Sync RPM…'));
+      c.fillText(wait, cx, cy);
+      return;
+    }
+
+    var ax = _orbSnap.ax, ay = _orbSnap.ay;
+    var phA = _orbSnap.phA * Math.PI / 180;
+    var phB = _orbSnap.phB * Math.PI / 180;
+    var scale = Math.max(ax, ay, 1e-9);
+
+    c.strokeStyle = '#1a1a2e'; c.lineWidth = 2;
+    c.beginPath();
+    for (var i = 0; i <= ORBIT_POINTS; i++) {
+      var wt = (2 * Math.PI * i) / ORBIT_POINTS;
+      var x = ax * Math.cos(wt - phA);
+      var y = ay * Math.cos(wt - phB);
+      var px = cx + (x / scale) * R;
+      var py = cy - (y / scale) * R; // Y vers le haut
+      if (i === 0) c.moveTo(px, py);
+      else c.lineTo(px, py);
+    }
+    c.stroke();
+
+    // Keyphasor (t = 0 = pulse tach)
+    var kx = cx + (ax * Math.cos(-phA) / scale) * R;
+    var ky = cy - (ay * Math.cos(-phB) / scale) * R;
+    c.beginPath();
+    c.arc(kx, ky, 6, 0, 2 * Math.PI);
+    c.fillStyle = '#fff';
+    c.fill();
+    c.strokeStyle = '#c0392b';
+    c.lineWidth = 2;
+    c.stroke();
+
+    // Centre
+    c.beginPath(); c.arc(cx, cy, 2.5, 0, 2 * Math.PI);
+    c.fillStyle = '#999'; c.fill();
+  }
+
+  function _updateOrbitUI() {
+    var el = document.getElementById('orbit-info');
+    if (!el) return;
+    _harmUpdateRpmBar();
+    if (!_isDualUi() && !_dualSession) {
+      el.textContent = (typeof t === 'function') ? t('harm.orbitNeedDual') : 'Mode DOUBLE requis (A+B à 90°)';
+      return;
+    }
+    if (!_orbSnap) {
+      el.textContent = '—';
+      return;
+    }
+    var rpmShow = Math.round(_orbSnap.rpm || Math.max(_rpm || 0, _rpmB || 0));
+    var dph = _orbSnap.phB - _orbSnap.phA;
+    while (dph > 180) dph -= 360;
+    while (dph < -180) dph += 360;
+    el.innerHTML = [
+      '<b>RPM</b> ' + rpmShow,
+      '<span style="color:' + HARM_COL_A + '">Ax ' + _orbSnap.ax.toFixed(3) +
+        ' g @ ' + Math.round(_orbSnap.phA) + '°</span>',
+      '<span style="color:' + HARM_COL_B + '">Ay ' + _orbSnap.ay.toFixed(3) +
+        ' g @ ' + Math.round(_orbSnap.phB) + '°</span>',
+      'Δφ B−A ' + dph.toFixed(0) + '°'
+    ].join('  |  ');
+  }
+
+  // ============================================================
+  // switchView — 'classic' | 'phase' | 'orbit'
   // ============================================================
   function switchView(view) {
-    _phaseTrackingMode = (view === 'phase');
+    if (view !== 'classic' && view !== 'phase' && view !== 'orbit') {
+      view = 'classic';
+    }
+    _viewMode = view;
     var classicEl = document.getElementById('harm-classic-view');
     var phaseEl   = document.getElementById('harm-phase-view');
+    var orbitEl   = document.getElementById('harm-orbit-view');
     var btnC = document.getElementById('btn-harm-view-classic');
     var btnP = document.getElementById('btn-harm-view-phase');
+    var btnO = document.getElementById('btn-harm-view-orbit');
 
     if (classicEl) classicEl.style.display = view === 'classic' ? 'flex' : 'none';
     if (phaseEl)   phaseEl.style.display   = view === 'phase'   ? 'flex' : 'none';
+    if (orbitEl)   orbitEl.style.display   = view === 'orbit'   ? 'flex' : 'none';
     if (btnC) btnC.classList.toggle('bal-mode-toggle--active', view === 'classic');
     if (btnP) btnP.classList.toggle('bal-mode-toggle--active', view === 'phase');
+    if (btnO) btnO.classList.toggle('bal-mode-toggle--active', view === 'orbit');
 
-    _harmUpdateRpmBar();
-    if (_phaseTrackingMode) _updatePhaseUI();
+    _refreshActiveView();
     _applyCanvasVisibility();
     setTimeout(_resize, 30);
   }
@@ -817,7 +1020,7 @@ const HarmonicModule = (() => {
   function getRPM()  { return _rpm; }
 
   return {
-    init, onData, onHarmBinary, onHarmBinaryB,
+    init, onData, onHarmBinary, onHarmBinaryB, onLiveRpm,
     resize, getRPM, setRunning, beginFromMenu, onDualReady, abortStart,
     pauseSession, harmToggle, switchView,
   };

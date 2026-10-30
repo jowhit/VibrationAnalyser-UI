@@ -20,9 +20,12 @@ function _isMdnsHost(host) {
   return h === ESP_MDNS_HOST || h === 'vibanalyseur.local';
 }
 
-// ── Inversion d'axe par IP (dev : boîtier monté à l'envers) ──
-// Lié à l'IP, pas à A/B — le .84 reste inversé quel que soit le slot.
+// ── Inversion d'axe par IP (même FW A/B — décision côté browser) ──
+// Auto : dernier octet 84 toujours inversé (boîtier retourné).
+// Manuel : localStorage (invert 85, invertA, …) en plus.
 const INVERT_LS_KEY = 'esp_invert_ips';
+/** Octets finaux toujours inversés — même firmware, flip JS uniquement. */
+const INVERT_AUTO_LAST_OCTETS = ['84'];
 
 function _invertLoad() {
   try {
@@ -61,10 +64,17 @@ function _probeHost(which) {
   return (ESP32_IP || ESP32_HOST || '').trim();
 }
 
+function _hostAutoInvert(host) {
+  if (!host || !_isEspIpv4(host)) return false;
+  const last = String(host).trim().split('.').pop();
+  return INVERT_AUTO_LAST_OCTETS.indexOf(last) >= 0;
+}
+
 /** true si le boîtier A ou B doit être inversé (selon son IP). */
 function probeAxisInvert(which) {
   const host = _probeHost(which);
   if (!host) return false;
+  if (_hostAutoInvert(host)) return true;
   return _invertLoad().some(function (t) { return _hostMatchesInvertToken(host, t); });
 }
 
@@ -95,10 +105,15 @@ function handleInvertCommand(raw) {
   if (cmd === 'invert' && (!arg || arg === '?' || arg === 'status')) {
     const a = _probeHost('A') || '(A non défini)';
     const b = _probeHost('B') || '(B non défini)';
-    termAddLine('invert IPs: ' + (list.length ? list.join(', ') : '(aucun)'), 'sys');
-    termAddLine('  A ' + a + ' → ' + (probeAxisInvert('A') ? 'INVERSE' : 'normal'), 'sys');
-    termAddLine('  B ' + b + ' → ' + (probeAxisInvert('B') ? 'INVERSE' : 'normal'), 'sys');
-    termAddLine('Usage: invert 84  |  invertA  |  invertB  |  invert off', 'sys');
+    termAddLine('invert AUTO: …' + INVERT_AUTO_LAST_OCTETS.map(function (o) {
+      return '.' + o;
+    }).join(', '), 'sys');
+    termAddLine('invert extra: ' + (list.length ? list.join(', ') : '(aucun)'), 'sys');
+    termAddLine('  A ' + a + ' → ' + (probeAxisInvert('A') ? 'INVERSE' : 'normal') +
+      (_hostAutoInvert(a) ? ' (auto)' : ''), 'sys');
+    termAddLine('  B ' + b + ' → ' + (probeAxisInvert('B') ? 'INVERSE' : 'normal') +
+      (_hostAutoInvert(b) ? ' (auto)' : ''), 'sys');
+    termAddLine('Usage: invert 85  |  invertA  |  invertB  |  invert off', 'sys');
     return true;
   }
 
@@ -539,6 +554,8 @@ const ProbeMode = (() => {
     if (typeof BalanceSession !== 'undefined') BalanceSession.reset(true);
     if (typeof AnalSession !== 'undefined') AnalSession.reset(true);
     if (typeof BumpSession !== 'undefined') BumpSession.reset(true);
+    if (typeof BodeModuleSession !== 'undefined') BodeModuleSession.reset(true);
+    if (typeof SyncSession !== 'undefined') SyncSession.reset(true);
   }
 
   function set(mode) {
@@ -671,7 +688,11 @@ const DualSession = (() => {
       return;
     }
     if (typeof wsSend === 'function') wsSend(cmd);
-    if (_active && typeof wsSendB === 'function') wsSendB(cmd);
+    // Comme stopBoth : ProbeMode AB suffit — ne pas exiger _active
+    // (failDual / early-return enter peuvent laisser _active=false alors
+    // que B a bien reçu le WS_GOTO et attend BUMP_START / LIVE_START).
+    const needB = _active || available();
+    if (needB && typeof wsSendB === 'function') wsSendB(cmd);
   }
 
   function startModule(tab, gotoCmd, opts) {
@@ -735,7 +756,8 @@ const DualSession = (() => {
             expectTab: tab,
             onOk: readyDual,
             onFail: failDual,
-            timer: setTimeout(failDual, 2500),
+            // Bump alloue ~90 KB — B peut ACK après A de plusieurs secondes
+            timer: setTimeout(failDual, 8000),
           };
         },
         onTimeout: function () {
@@ -843,8 +865,9 @@ let _heartbeatTimer = null;
 let _heartbeatTimerB = null;
 let _lastAliveMs = 0;
 let _lastAliveMsB = 0;
-const WS_HEARTBEAT_MS = 4000;
-const WS_ALIVE_TIMEOUT_MS = 10000;
+const WS_HEARTBEAT_MS = 5000;
+/** Tolérant hotspot Android / micro-coupures (était 10s → faux disconnect au repos). */
+const WS_ALIVE_TIMEOUT_MS = 25000;
 /** >0 pendant calcul JS lourd (filtre FFT…) — évite faux timeout heartbeat. */
 let _wsHeavyWork = 0;
 
@@ -1210,7 +1233,10 @@ function handleTextB(raw) {
   raw.split('\n').forEach(function (line) {
     line = (line || '').trim();
     if (!line) return;
-    if (line === 'WS_PONG' || line === 'PONG') return;
+    if (line === 'WS_PONG' || line === 'PONG') {
+      _markWsAliveB();
+      return;
+    }
 
     // Mode mono B : NAV_ACK / SYS_STATE comme sur A
     if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB()) {
@@ -1503,8 +1529,14 @@ function handleText(raw) {
 
     if (line.startsWith('WIFI_READY=')) {
       const v = line.slice(11).trim();
+      // Déjà connecté à cette IP → ne pas forcer un reconnect (flap idle)
       if (_isEspIpv4(v)) {
-        applyEspIp(v, true);
+        if (ws && ws.readyState === WebSocket.OPEN &&
+            (v === ESP32_HOST || v === ESP32_IP)) {
+          applyEspIp(v, false);
+        } else {
+          applyEspIp(v, true);
+        }
       } else if (_isMdnsHost(v)) {
         discoverEspHost().then((h) => { if (h) _wsConnectTo(h); });
       }
@@ -1535,6 +1567,19 @@ function handleText(raw) {
         if (mod === 'bumptest') {
           showTab('analyse');
           if (typeof bumpStart === 'function') bumpStart();
+        } else if (mod === 'bode') {
+          showTab('bode');
+          // BodeModuleSession.enter via onAck menu (ou ici si pas d'opts)
+          if ((!o || typeof o.onAck !== 'function') &&
+              typeof BodeModuleSession !== 'undefined' && BodeModuleSession.enter) {
+            BodeModuleSession.enter();
+          }
+        } else if (mod === 'sync') {
+          showTab('sync');
+          if ((!o || typeof o.onAck !== 'function') &&
+              typeof SyncSession !== 'undefined' && SyncSession.enter) {
+            SyncSession.enter();
+          }
         } else if (mod) {
           showTab(mod);
           // balance : enterBalance via BalanceSession.beginLive / resume — pas ici
@@ -1548,6 +1593,16 @@ function handleText(raw) {
       if (mod === 'bumptest') {
         showTab('analyse');
         if (typeof bumpStart === 'function') bumpStart();
+      } else if (mod === 'bode') {
+        showTab('bode');
+        if (typeof BodeModuleSession !== 'undefined' && BodeModuleSession.enter) {
+          BodeModuleSession.enter();
+        }
+      } else if (mod === 'sync') {
+        showTab('sync');
+        if (typeof SyncSession !== 'undefined' && SyncSession.enter) {
+          SyncSession.enter();
+        }
       } else if (mod) {
         showTab(mod);
       }
@@ -1575,6 +1630,119 @@ function handleText(raw) {
       return;
     }
 
+    // ── Bode brut (LIVE / TACH preview / CFG / STATUS) ────────
+    if (line.startsWith('BODE_STATUS=')) {
+      const txt = line.slice(12).trim();
+      if (typeof BodeModule !== 'undefined' && BodeModule.setStatus) {
+        BodeModule.setStatus(txt);
+      }
+      if ((/vide|Aucune|insuffisante/i).test(txt) &&
+          typeof BodeModuleSession !== 'undefined' && BodeModuleSession.getState &&
+          BodeModuleSession.getState() === 'FINALIZE') {
+        if (BodeModuleSession.enter) BodeModuleSession.enter();
+      }
+      return;
+    }
+    if (line.startsWith('BODE_LIVE=')) {
+      let v = parseInt(line.slice(10), 10);
+      v = applyAxisInvertScalar('A', v);
+      if (typeof BodeModule !== 'undefined' && BodeModule.onLive) BodeModule.onLive(v);
+      return;
+    }
+    if (line.startsWith('BODE_TACH=')) {
+      const period = parseInt(line.slice(10), 10);
+      if (typeof BodeModule !== 'undefined' && BodeModule.onTachPeriod) {
+        BodeModule.onTachPeriod(period);
+      }
+      return;
+    }
+    if (line.startsWith('BODE_CFG=')) {
+      const payload = line.slice(9).trim();
+      const g = /G=(\d+)/.exec(payload);
+      const f = /FS=(\d+)/.exec(payload);
+      const n = /N=(\d+)/.exec(payload);
+      if (typeof BodeModule !== 'undefined' && BodeModule.setConfig) {
+        BodeModule.setConfig(g ? g[1] : '', f ? f[1] : '', n ? n[1] : '');
+      }
+      return;
+    }
+
+    // ── Sync TSA (STATUS / TACH / CFG) ─────────────────────────
+    if (line.startsWith('SYNC_STATUS=')) {
+      const txt = line.slice(12).trim();
+      if (typeof SyncSession !== 'undefined' && SyncSession.onStatus) {
+        SyncSession.onStatus(txt);
+      } else if (typeof SyncModule !== 'undefined' && SyncModule.setStatus) {
+        SyncModule.setStatus(txt);
+      }
+      return;
+    }
+    if (line.startsWith('SYNC_TACH=')) {
+      const period = parseInt(line.slice(10), 10);
+      if (typeof SyncModule !== 'undefined' && SyncModule.onTachPeriod) {
+        SyncModule.onTachPeriod(period);
+      }
+      return;
+    }
+    if (line.startsWith('SYNC_CFG=')) {
+      const payload = line.slice(9).trim();
+      const g = /G=(\d+)/.exec(payload);
+      const f = /FS=(\d+)/.exec(payload);
+      const n = /N=(\d+)/.exec(payload);
+      if (typeof SyncModule !== 'undefined' && SyncModule.setConfig) {
+        SyncModule.setConfig(g ? g[1] : '', f ? f[1] : '', n ? n[1] : '');
+      }
+      return;
+    }
+
+    // Liste tach post-binaire Bode
+    if (rxState === 'bode_tach') {
+      if (line === 'BODE_TACH_BEGIN') {
+        rxHeaders.tachList = [];
+        return;
+      }
+      if (line === 'BODE_TACH_END') {
+        if (typeof BodeModule !== 'undefined' && BodeModule.onTachUs) {
+          BodeModule.onTachUs(rxHeaders.tachList || []);
+        }
+        rxState = 'text';
+        if (typeof BodeModuleSession !== 'undefined' && BodeModuleSession.onPayloadReady) {
+          BodeModuleSession.onPayloadReady();
+        }
+        return;
+      }
+      if (/^\d+$/.test(line.trim())) {
+        if (!rxHeaders.tachList) rxHeaders.tachList = [];
+        rxHeaders.tachList.push(parseInt(line.trim(), 10) >>> 0);
+        return;
+      }
+      return;
+    }
+
+    // Liste tach post-binaire Sync
+    if (rxState === 'sync_tach') {
+      if (line === 'SYNC_TACH_BEGIN') {
+        rxHeaders.tachList = [];
+        return;
+      }
+      if (line === 'SYNC_TACH_END') {
+        if (typeof SyncModule !== 'undefined' && SyncModule.onTachUs) {
+          SyncModule.onTachUs(rxHeaders.tachList || []);
+        }
+        rxState = 'text';
+        if (typeof SyncSession !== 'undefined' && SyncSession.onPayloadReady) {
+          SyncSession.onPayloadReady();
+        }
+        return;
+      }
+      if (/^\d+$/.test(line.trim())) {
+        if (!rxHeaders.tachList) rxHeaders.tachList = [];
+        rxHeaders.tachList.push(parseInt(line.trim(), 10) >>> 0);
+        return;
+      }
+      return;
+    }
+
     // ── BAL_TOUR → mode binaire balance (doit être avant BAL_ général) ──
     if (line === 'BAL_TOUR') {
       rxState = 'bal_hdr'; rxHeaders = {};
@@ -1587,6 +1755,15 @@ function handleText(raw) {
         rxHeaders.range = parseInt(line.slice(6));
         rxState = 'bal_bin';
         return;
+      }
+      return;
+    }
+
+    // RPM preview Phase (avant HARM_START)
+    if (line.startsWith('HARM_RPM=')) {
+      const rpm = parseFloat(line.slice(9));
+      if (typeof HarmonicModule !== 'undefined' && HarmonicModule.onLiveRpm) {
+        HarmonicModule.onLiveRpm(rpm);
       }
       return;
     }
@@ -1604,6 +1781,63 @@ function handleText(raw) {
       if (line.startsWith('N='))   {
         rxHeaders.n = parseInt(line.slice(2));
         rxState = 'harm_bin';
+        return;
+      }
+      return;
+    }
+
+    // ── BODE_BIN → brut + liste tach ensuite ───────────────────
+    if (line === 'BODE_BIN') {
+      rxState = 'bode_hdr'; rxHeaders = {};
+      return;
+    }
+    if (rxState === 'bode_hdr') {
+      // T0/NTACH avant N= (sinon t0=0 → indices hors buffer → Bode vide)
+      if (line.startsWith('G='))     { rxHeaders.g  = parseInt(line.slice(2));   return; }
+      if (line.startsWith('F='))     { rxHeaders.fs = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('T='))     { rxHeaders.t  = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('T0='))    { rxHeaders.t0 = parseInt(line.slice(3), 10) >>> 0; return; }
+      if (line.startsWith('NTACH=')) { rxHeaders.ntach = parseInt(line.slice(6), 10); return; }
+      if (line.startsWith('N=')) {
+        rxHeaders.n = parseInt(line.slice(2), 10);
+        if (typeof BodeModule !== 'undefined' && BodeModule.beginBinary) {
+          BodeModule.beginBinary({
+            g: rxHeaders.g,
+            fs: rxHeaders.fs,
+            t0: rxHeaders.t0 || 0,
+            n: rxHeaders.n,
+            t: rxHeaders.t
+          });
+        }
+        rxState = 'bode_bin';
+        return;
+      }
+      return;
+    }
+
+    // ── SYNC_BIN → brut + liste tach ensuite ──────────────────
+    if (line === 'SYNC_BIN') {
+      rxState = 'sync_hdr'; rxHeaders = {};
+      return;
+    }
+    if (rxState === 'sync_hdr') {
+      if (line.startsWith('G='))     { rxHeaders.g  = parseInt(line.slice(2));   return; }
+      if (line.startsWith('F='))     { rxHeaders.fs = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('T='))     { rxHeaders.t  = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('T0='))    { rxHeaders.t0 = parseInt(line.slice(3), 10) >>> 0; return; }
+      if (line.startsWith('NTACH=')) { rxHeaders.ntach = parseInt(line.slice(6), 10); return; }
+      if (line.startsWith('N=')) {
+        rxHeaders.n = parseInt(line.slice(2), 10);
+        if (typeof SyncModule !== 'undefined' && SyncModule.beginBinary) {
+          SyncModule.beginBinary({
+            g: rxHeaders.g,
+            fs: rxHeaders.fs,
+            t0: rxHeaders.t0 || 0,
+            n: rxHeaders.n,
+            t: rxHeaders.t
+          });
+        }
+        rxState = 'sync_bin';
         return;
       }
       return;
@@ -1737,6 +1971,21 @@ function handleBinary(buf) {
     if (typeof HarmonicModule !== 'undefined') {
       HarmonicModule.onHarmBinary(h.g, h.fs, h.rpm, h.n, samplesA);
     }
+
+  } else if (rxState === 'bode_bin') {
+    // Garder l'état : liste tach suit le binaire
+    if (typeof BodeModule !== 'undefined' && BodeModule.onSamples) {
+      BodeModule.onSamples(samplesA);
+    }
+    rxState = 'bode_tach';
+    rxHeaders.tachList = [];
+
+  } else if (rxState === 'sync_bin') {
+    if (typeof SyncModule !== 'undefined' && SyncModule.onSamples) {
+      SyncModule.onSamples(samplesA);
+    }
+    rxState = 'sync_tach';
+    rxHeaders.tachList = [];
   }
 }
 
@@ -1770,7 +2019,7 @@ function wsSend(cmd) {
 }
 
 // ── Navigation ──────────────────────────────────────────────
-const ALL_TABS = ['term', 'fft', 'analyse', 'calc', 'balance', 'harmonic', 'demod'];
+const ALL_TABS = ['term', 'fft', 'analyse', 'bode', 'sync', 'calc', 'balance', 'harmonic', 'demod'];
 
 function showTab(name) {
   _activeTab = name;
@@ -1786,6 +2035,12 @@ function showTab(name) {
   });
   if (name === 'fft')      setTimeout(fftDraw,     50);
   if (name === 'analyse')  setTimeout(analyseDraw,  50);
+  if (name === 'bode') setTimeout(() => {
+    if (typeof BodeModule !== 'undefined') BodeModule.resize();
+  }, 50);
+  if (name === 'sync') setTimeout(() => {
+    if (typeof SyncModule !== 'undefined') SyncModule.resize();
+  }, 50);
   if (name === 'balance')  setTimeout(() => {
     if (typeof BalanceModule !== 'undefined') {
       // Viewer only — pas de BAL_INIT ici (sinon IDLE juste après EQ_RESUME
@@ -1823,6 +2078,15 @@ function requestTab(name) {
   if (name === 'harmonic') {
     // Viewer only — démarrage uniquement via Terminal → PhaseSession.start()
     showTab('harmonic');
+    return;
+  }
+  if (name === 'bode') {
+    // Viewer only — démarrage via Terminal → BodeModuleSession
+    showTab('bode');
+    return;
+  }
+  if (name === 'sync') {
+    showTab('sync');
     return;
   }
   if (name === 'fft') {
@@ -1864,6 +2128,8 @@ function wsGoto(tab, cmdLine, opts) {
   // Changement de module → reset machines d'états + flush dual
   if (typeof AnalSession !== 'undefined') AnalSession.reset(true);
   if (typeof BumpSession !== 'undefined') BumpSession.reset(true);
+  if (typeof BodeModuleSession !== 'undefined') BodeModuleSession.reset(true);
+  if (typeof SyncSession !== 'undefined') SyncSession.reset(true);
   if (typeof FftSession !== 'undefined') FftSession.reset(true);
   if (typeof PhaseSession !== 'undefined') PhaseSession.reset(true);
   // Balance : pause (pas reset destructif) — sauf si on reste en EQ
@@ -2022,6 +2288,8 @@ document.addEventListener('DOMContentLoaded', () => {
     showTab(lastTab);
     if (typeof MenuModule     !== 'undefined') MenuModule.init(wsSend, showTab, wsGoto);
     if (typeof HarmonicModule !== 'undefined') HarmonicModule.init();
+    if (typeof BodeModule !== 'undefined') BodeModule.init();
+    if (typeof SyncModule !== 'undefined') SyncModule.init();
     // Restaure snapshot équilibrage même avant WS (pause / refresh)
     if (typeof BalanceModule !== 'undefined') BalanceModule.init(wsSend);
     if (typeof showPwaInstallUi === 'function') showPwaInstallUi();

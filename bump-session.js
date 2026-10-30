@@ -33,7 +33,14 @@ const BumpSession = (() => {
   }
 
   function _sendBump(cmd) {
-    if (typeof DualSession !== 'undefined' && DualSession.sendBoth) {
+    // Comme temporel : A + B explicites si duo (ne dépend pas seulement de _active)
+    const dual = _dual ||
+      (typeof DualSession !== 'undefined' && DualSession.available && DualSession.available());
+    if (dual) {
+      if (typeof DualSession !== 'undefined' && DualSession.begin) DualSession.begin();
+      if (typeof wsSend === 'function') wsSend(cmd);
+      if (typeof wsSendB === 'function') wsSendB(cmd);
+    } else if (typeof DualSession !== 'undefined' && DualSession.sendBoth) {
       DualSession.sendBoth(cmd);
     } else if (typeof wsSend === 'function') {
       wsSend(cmd);
@@ -81,7 +88,14 @@ const BumpSession = (() => {
   /** Entrée module (menu / NAV_ACK=bumptest) — panneau prêt, pas encore de stream. */
   function enter() {
     // NAV_ACK + DualSession.onReady appellent souvent enter() 2× — ignorer le doublon
-    if (_state === S.READY || _state === S.STREAMING) return;
+    // mais toujours réaffirmer le duo (failDual peut avoir DualSession.end()).
+    if (_state === S.READY || _state === S.STREAMING) {
+      if (_isDualWanted() && typeof DualSession !== 'undefined') {
+        DualSession.begin();
+        _dual = DualSession.is() || DualSession.available();
+      }
+      return;
+    }
 
     reset(true);
     if (typeof analyseArmDual === 'function') analyseArmDual();
@@ -89,12 +103,17 @@ const BumpSession = (() => {
 
     _dual = _isDualWanted();
     if (_dual && typeof DualSession !== 'undefined') DualSession.begin();
-    _dual = (typeof DualSession !== 'undefined') ? DualSession.is() : _dual;
+    // available() si begin a échoué momentanément (ws B reconnect)
+    _dual = (typeof DualSession !== 'undefined')
+      ? (DualSession.is() || DualSession.available())
+      : _dual;
 
     if (typeof anShowA !== 'undefined') anShowA = true;
     if (typeof anShowB !== 'undefined') anShowB = true;
 
     anMode = 'bump_wait';
+    const tempoBar = document.getElementById('an-tempo-cmdbar');
+    if (tempoBar) tempoBar.style.display = 'none';
     bumpLiveRunning = false;
     if (typeof _bumpResetLive === 'function') _bumpResetLive();
     if (typeof _bumpStopAnim === 'function') _bumpStopAnim();
@@ -130,7 +149,9 @@ const BumpSession = (() => {
     if (typeof analyseArmDual === 'function') analyseArmDual();
     _dual = _isDualWanted();
     if (_dual && typeof DualSession !== 'undefined') DualSession.begin();
-    _dual = (typeof DualSession !== 'undefined') ? DualSession.is() : _dual;
+    _dual = (typeof DualSession !== 'undefined')
+      ? (DualSession.is() || DualSession.available())
+      : _dual;
 
     _binA = _binB = false;
     _sendBump('BUMP_START');
