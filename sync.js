@@ -8,6 +8,7 @@ const SyncModule = (() => {
 
   let _initialized = false;
   let _view = 'trace'; // 'trace' | 'fft'
+  let _shape = 'polar'; // 'polar' | 'linear' (vue tour moyen)
   let _gRange = 2;
   let _fs = 4000;
   let _nCfg = 45000;
@@ -24,6 +25,13 @@ const SyncModule = (() => {
   let _rawSamples = null;
   let _rawMeta = null;
   let _tachUs = [];
+
+  // Vue linéaire : zoom + curseur (degrés)
+  let _linZMin = 0;
+  let _linZMax = 360;
+  let _linCursorDeg = null;
+  let _linPad = { l: 48, r: 12, t: 18, b: 28 };
+  let _linPtr = null; // { x0, z0, z1 } pan
 
   function init() {
     if (_initialized) return;
@@ -49,9 +57,39 @@ const SyncModule = (() => {
         }
       });
     }
+    const shapeBtn = document.getElementById('btn-sync-shape');
+    if (shapeBtn) {
+      shapeBtn.addEventListener('click', function () {
+        toggleShape();
+      });
+    }
+    _bindLinearInteractions();
     window.addEventListener('resize', resize);
     _applyLayout();
     resize();
+  }
+
+  function _updateShapeBtn() {
+    const shapeBtn = document.getElementById('btn-sync-shape');
+    if (!shapeBtn) return;
+    const show = _view === 'trace' && !!_avg;
+    shapeBtn.style.display = show ? 'inline-block' : 'none';
+    // Label = action (passer à l'autre vue)
+    shapeBtn.textContent = _shape === 'polar' ? 'Linéaire' : 'Polaire';
+  }
+
+  function toggleShape() {
+    if (_view !== 'trace' || !_avg) return;
+    _shape = (_shape === 'polar') ? 'linear' : 'polar';
+    if (_shape === 'linear') {
+      _linZMin = 0;
+      _linZMax = 360;
+      _linCursorDeg = null;
+    }
+    _applyLayout();
+    _updateShapeBtn();
+    resize();
+    _updateCursorLine();
   }
 
   function setConfig(g, fs, n) {
@@ -71,17 +109,26 @@ const SyncModule = (() => {
     }
   }
 
+  function getAcqTiming() {
+    return { fs: _fs, n: _nCfg, g: _gRange };
+  }
+
   function _applyLayout() {
     const tw = document.getElementById('sync-trace-wrap');
     const fw = document.getElementById('sync-fft-wrap');
-    if (tw) tw.style.display = _view === 'trace' ? 'flex' : 'none';
+    if (tw) {
+      tw.style.display = _view === 'trace' ? 'flex' : 'none';
+      tw.classList.toggle('sync-trace-wrap--linear', _view === 'trace' && _shape === 'linear');
+    }
     if (fw) fw.style.display = _view === 'fft' ? 'flex' : 'none';
+    _updateShapeBtn();
   }
 
   function showTrace() {
     _view = 'trace';
     _applyLayout();
     resize();
+    _updateCursorLine();
   }
 
   function showOrderFft() {
@@ -90,6 +137,8 @@ const SyncModule = (() => {
     _applyLayout();
     resize();
   }
+
+  function getShape() { return _shape; }
 
   function setStatus(text) {
     const el = document.getElementById('sync-status');
@@ -152,6 +201,7 @@ const SyncModule = (() => {
         '  FS=' + Math.round(fs);
     }
     showTrace();
+    _updateShapeBtn();
     setStatus(_nRevs
       ? ('TSA — ' + _nRevs + ' tours moyennés')
       : 'Pas assez de tours tach');
@@ -237,11 +287,236 @@ const SyncModule = (() => {
     }
   }
 
+  function _ampMax() {
+    let aMax = 0.1;
+    if (_avg) {
+      for (let i = 0; i < _avg.length; i++) {
+        const a = Math.abs(_avg[i]);
+        if (a > aMax) aMax = a;
+      }
+      aMax *= 1.15;
+    }
+    return aMax;
+  }
+
+  function _updateCursorLine() {
+    const el = document.getElementById('sync-cursor-line');
+    if (!el) return;
+    if (_view !== 'trace' || _shape !== 'linear' || !_avg) {
+      el.textContent = '—';
+      return;
+    }
+    if (_linCursorDeg == null) {
+      el.textContent = 'Toucher / molette — zoom & curseur (°)';
+      return;
+    }
+    const n = _avg.length;
+    const idx = Math.max(0, Math.min(n - 1, Math.round((_linCursorDeg / 360) * n) % n));
+    const g = _avg[idx];
+    el.textContent = 'Curseur  ' + _linCursorDeg.toFixed(1) + '°  |  ' +
+      g.toFixed(4) + ' g  |  zoom ' +
+      _linZMin.toFixed(0) + '–' + _linZMax.toFixed(0) + '°';
+  }
+
+  function _bindLinearInteractions() {
+    if (!_traceCanvas) return;
+    const cnv = _traceCanvas;
+
+    function degFromClientX(clientX) {
+      const rect = cnv.getBoundingClientRect();
+      if (rect.width < 8) return null;
+      const x = (clientX - rect.left) * (cnv.width / rect.width);
+      const gW = cnv.width - _linPad.l - _linPad.r;
+      let t = (x - _linPad.l) / gW;
+      if (t < 0) t = 0;
+      if (t > 1) t = 1;
+      return _linZMin + t * (_linZMax - _linZMin);
+    }
+
+    cnv.addEventListener('pointerdown', function (e) {
+      if (_view !== 'trace' || _shape !== 'linear' || !_avg) return;
+      e.preventDefault();
+      try { cnv.setPointerCapture(e.pointerId); } catch (err) {}
+      _linPtr = { x0: e.clientX, z0: _linZMin, z1: _linZMax };
+      _linCursorDeg = degFromClientX(e.clientX);
+      _drawTrace();
+      _updateCursorLine();
+    });
+    cnv.addEventListener('pointermove', function (e) {
+      if (_view !== 'trace' || _shape !== 'linear' || !_avg) return;
+      if (_linPtr && (e.buttons || e.pointerType === 'touch')) {
+        e.preventDefault();
+        const rect = cnv.getBoundingClientRect();
+        const gW = Math.max(1, rect.width - (_linPad.l + _linPad.r) * (rect.width / cnv.width));
+        const span0 = _linPtr.z1 - _linPtr.z0;
+        const dDeg = -((e.clientX - _linPtr.x0) / gW) * span0;
+        let z0 = _linPtr.z0 + dDeg;
+        let z1 = _linPtr.z1 + dDeg;
+        if (z0 < 0) { z1 -= z0; z0 = 0; }
+        if (z1 > 360) { z0 -= (z1 - 360); z1 = 360; }
+        if (z0 < 0) z0 = 0;
+        _linZMin = z0;
+        _linZMax = z1;
+        _linCursorDeg = degFromClientX(e.clientX);
+        _drawTrace();
+        _updateCursorLine();
+      }
+    });
+    cnv.addEventListener('pointerup', function () { _linPtr = null; });
+    cnv.addEventListener('pointercancel', function () { _linPtr = null; });
+
+    cnv.addEventListener('wheel', function (e) {
+      if (_view !== 'trace' || _shape !== 'linear' || !_avg) return;
+      e.preventDefault();
+      const deg = degFromClientX(e.clientX);
+      if (deg == null) return;
+      const span = _linZMax - _linZMin;
+      const factor = e.deltaY > 0 ? 1.15 : (1 / 1.15);
+      let newSpan = span * factor;
+      if (newSpan < 8) newSpan = 8;
+      if (newSpan > 360) newSpan = 360;
+      const t = (deg - _linZMin) / (span || 1);
+      let z0 = deg - t * newSpan;
+      let z1 = z0 + newSpan;
+      if (z0 < 0) { z1 -= z0; z0 = 0; }
+      if (z1 > 360) { z0 -= (z1 - 360); z1 = 360; }
+      if (z0 < 0) z0 = 0;
+      _linZMin = z0;
+      _linZMax = z1;
+      _linCursorDeg = deg;
+      _drawTrace();
+      _updateCursorLine();
+    }, { passive: false });
+
+    cnv.addEventListener('dblclick', function () {
+      if (_view !== 'trace' || _shape !== 'linear') return;
+      _linZMin = 0;
+      _linZMax = 360;
+      _drawTrace();
+      _updateCursorLine();
+    });
+  }
+
+  function _drawLinear() {
+    if (!_traceCtx || !_traceCanvas) return;
+    const c = _traceCtx;
+    const W = _traceCanvas.width, H = _traceCanvas.height;
+    if (W < 10 || H < 10) return;
+    const P = _linPad;
+    const gW = W - P.l - P.r, gH = H - P.t - P.b;
+    const z0 = _linZMin, z1 = _linZMax;
+    const span = Math.max(1e-6, z1 - z0);
+    const aMax = _ampMax();
+
+    c.clearRect(0, 0, W, H);
+    c.fillStyle = '#fff';
+    c.fillRect(0, 0, W, H);
+    c.strokeStyle = '#555';
+    c.strokeRect(P.l, P.t, gW, gH);
+    c.fillStyle = '#444';
+    c.font = '11px "Courier New", monospace';
+    c.textAlign = 'left';
+    c.fillText('TSA — tour moyen (linéaire °)', P.l, 12);
+
+    function xOf(deg) { return P.l + ((deg - z0) / span) * gW; }
+    function yOf(g) { return P.t + gH / 2 - (g / aMax) * (gH / 2); }
+
+    // Grille Y
+    for (let i = 0; i <= 4; i++) {
+      const gv = -aMax + (2 * aMax * i / 4);
+      const y = yOf(gv);
+      if (i !== 2) {
+        c.strokeStyle = '#eee';
+        c.beginPath(); c.moveTo(P.l, y); c.lineTo(P.l + gW, y); c.stroke();
+      }
+      c.fillStyle = '#666';
+      c.font = '9px Arial';
+      c.textAlign = 'right';
+      c.fillText(gv.toFixed(3), P.l - 4, y + 3);
+    }
+    c.strokeStyle = '#bbb';
+    c.beginPath(); c.moveTo(P.l, yOf(0)); c.lineTo(P.l + gW, yOf(0)); c.stroke();
+
+    c.save();
+    c.translate(12, P.t + gH / 2);
+    c.rotate(-Math.PI / 2);
+    c.textAlign = 'center';
+    c.font = '10px Arial';
+    c.fillStyle = '#333';
+    c.fillText('g', 0, 0);
+    c.restore();
+
+    // Ticks X degrés
+    const nTick = Math.min(8, Math.max(2, Math.floor(gW / 50)));
+    for (let t = 0; t <= nTick; t++) {
+      const deg = z0 + span * t / nTick;
+      const x = xOf(deg);
+      c.strokeStyle = '#eee';
+      c.beginPath(); c.moveTo(x, P.t); c.lineTo(x, P.t + gH); c.stroke();
+      c.fillStyle = '#333';
+      c.font = '9px Arial';
+      c.textAlign = 'center';
+      c.fillText(deg.toFixed(0) + '°', x, H - 6);
+    }
+    c.fillStyle = '#555';
+    c.font = '10px Arial';
+    c.textAlign = 'center';
+    c.fillText('Angle (°)', P.l + gW / 2, H);
+
+    if (!_avg) {
+      c.fillStyle = '#aaa';
+      c.textAlign = 'center';
+      c.fillText('—', P.l + gW / 2, P.t + gH / 2);
+      return;
+    }
+
+    c.save();
+    c.beginPath(); c.rect(P.l, P.t, gW, gH); c.clip();
+    // Marqueur 0° (tach) si dans la fenêtre
+    if (0 >= z0 && 0 <= z1) {
+      const xT = xOf(0);
+      c.strokeStyle = '#e07000';
+      c.lineWidth = 1.5;
+      c.beginPath(); c.moveTo(xT, P.t); c.lineTo(xT, P.t + gH); c.stroke();
+    }
+
+    const n = _avg.length;
+    const i0 = Math.max(0, Math.floor((z0 / 360) * n));
+    const i1 = Math.min(n - 1, Math.ceil((z1 / 360) * n));
+    c.strokeStyle = COL;
+    c.lineWidth = 1.6;
+    c.beginPath();
+    let first = true;
+    for (let i = i0; i <= i1; i++) {
+      const deg = (i / n) * 360;
+      const x = xOf(deg);
+      const y = yOf(_avg[i]);
+      if (first) { c.moveTo(x, y); first = false; }
+      else c.lineTo(x, y);
+    }
+    c.stroke();
+
+    if (_linCursorDeg != null && _linCursorDeg >= z0 && _linCursorDeg <= z1) {
+      const xc = xOf(_linCursorDeg);
+      c.strokeStyle = '#cc3300';
+      c.lineWidth = 1.2;
+      c.setLineDash([4, 3]);
+      c.beginPath(); c.moveTo(xc, P.t); c.lineTo(xc, P.t + gH); c.stroke();
+      c.setLineDash([]);
+      const idx = Math.max(0, Math.min(n - 1, Math.round((_linCursorDeg / 360) * n) % n));
+      c.fillStyle = '#cc3300';
+      c.beginPath();
+      c.arc(xc, yOf(_avg[idx]), 3.5, 0, 2 * Math.PI);
+      c.fill();
+    }
+    c.restore();
+  }
+
   /**
    * Polaire TSA : angle = position tach (0° en haut, sens horaire comme Balance/Phase),
    * rayon = amplitude g autour d'un cercle de base (signal bipolaire).
    */
-  function _drawTrace() {
+  function _drawPolar() {
     if (!_traceCtx || !_traceCanvas) return;
     const c = _traceCtx;
     const W = _traceCanvas.width, H = _traceCanvas.height;
@@ -259,14 +534,7 @@ const SyncModule = (() => {
     c.textAlign = 'left';
     c.fillText('TSA — tour moyen (polaire °)', 8, 14);
 
-    let aMax = 0.1;
-    if (_avg) {
-      for (let i = 0; i < _avg.length; i++) {
-        const a = Math.abs(_avg[i]);
-        if (a > aMax) aMax = a;
-      }
-      aMax *= 1.15;
-    }
+    const aMax = _ampMax();
 
     // Cercles de référence (échelle ±aMax autour du rayon milieu)
     [0.25, 0.5, 0.75, 1.0].forEach(function (f) {
@@ -356,6 +624,11 @@ const SyncModule = (() => {
     c.fill();
   }
 
+  function _drawTrace() {
+    if (_shape === 'linear') _drawLinear();
+    else _drawPolar();
+  }
+
   function _drawFft() {
     if (!_fftCtx || !_fftCanvas) return;
     const c = _fftCtx;
@@ -412,10 +685,14 @@ const SyncModule = (() => {
     if (_view === 'trace' && _traceCanvas) {
       const wrap = document.getElementById('sync-trace-wrap');
       if (wrap && wrap.clientWidth > 0) {
-        // Carré centré (polaire), comme Harmonic
-        const sz = Math.max(160, Math.min(wrap.clientWidth, wrap.clientHeight || wrap.clientWidth));
-        _traceCanvas.width = sz;
-        _traceCanvas.height = sz;
+        if (_shape === 'linear') {
+          _traceCanvas.width = wrap.clientWidth;
+          _traceCanvas.height = Math.max(160, wrap.clientHeight || 220);
+        } else {
+          const sz = Math.max(160, Math.min(wrap.clientWidth, wrap.clientHeight || wrap.clientWidth));
+          _traceCanvas.width = sz;
+          _traceCanvas.height = sz;
+        }
       }
       _drawTrace();
     } else if (_fftCanvas) {
@@ -437,8 +714,13 @@ const SyncModule = (() => {
     _rawSamples = null;
     _tachUs = [];
     _rawMeta = null;
+    _linZMin = 0;
+    _linZMax = 360;
+    _linCursorDeg = null;
     const info = document.getElementById('sync-mod-info');
     if (info) info.textContent = '—';
+    _updateShapeBtn();
+    _updateCursorLine();
   }
 
   setInterval(function () {
@@ -453,8 +735,11 @@ const SyncModule = (() => {
   return {
     init: init,
     setConfig: setConfig,
+    getAcqTiming: getAcqTiming,
     showTrace: showTrace,
     showOrderFft: showOrderFft,
+    toggleShape: toggleShape,
+    getShape: getShape,
     setStatus: setStatus,
     onTachPeriod: onTachPeriod,
     updateRpmBar: updateRpmBar,

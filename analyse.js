@@ -2,6 +2,8 @@
 // Modes : anMode = 'time' | 'fft' | 'demod' | 'bump_wait' | 'bump_stream'
 let anData = null;
 let anDataB = null; // 2e sonde (mode DOUBLE) — même G/Fs
+/** Indices sample des pulses tach (marqueurs 1X sur tracé temporel). */
+let anTachMarks = [];
 let anP    = { g:2, fs:1000, n:0, t:0 };
 let _anDualArm = false;
 let _anGotA = false;
@@ -752,6 +754,7 @@ function _analyseAfterReceive(t, fromB) {
   anMode = 'time'; anZMin = 0; anZMax = t; anYZoom = 1; anYPan = 0;
   anMag = null; anMagVel = null; anMagDisp = null;
   anMagB = null; anMagVelB = null; anMagDispB = null; anCursorX = -1;
+  // Ne pas vider anTachMarks ici : ANAL_TACH_* arrive juste après le binaire
   _anClearTimeCursors();
   anUnit = 'g'; anDataDisplay = null; anDataDisplayB = null; anFilterInfo = '';
   _anInvalidateTimeIntegrated();
@@ -764,6 +767,13 @@ function _analyseAfterReceive(t, fromB) {
   analyseDraw();
   if (!fromB) _anPersistSave();
 }
+
+/** Reçoit les indices sample des pulses tach (1X) après BINARY_MODE. */
+function analyseSetTachMarks(idxList) {
+  anTachMarks = Array.isArray(idxList) ? idxList.slice() : [];
+  if (anMode === 'time' && anData) analyseDraw();
+}
+window.analyseSetTachMarks = analyseSetTachMarks;
 
 /** DOUBLE temporel : afficher A+B ensemble (pas A seul puis B en retard). */
 let _anDualDrawTimer = null;
@@ -814,6 +824,7 @@ function analyseReceiveBloc(g, fs, t, n, raw) {
   bumpLiveRunning = false;
   _bumpStopAnim();
   _bumpResetLive();
+  anTachMarks = []; // sera rempli par ANAL_TACH_* juste après
   bumpLiveG = g;
   const btn = document.getElementById('btn-bump-start');
   if (btn) {
@@ -1493,6 +1504,29 @@ function anDrawTime() {
   if (_anVisA()) _strokeSig(_sig, dualTime ? AN_COLOR_A : _anPrimaryColor(), 1.2);
   const _sigB = _anTimeSigB();
   if (_anVisB() && _sigB && _sigB.length) _strokeSig(_sigB, AN_COLOR_B, 1.2);
+
+  // Marqueurs tach 1X (pulses laser) — traits orange verticaux
+  if (anTachMarks && anTachMarks.length && fs > 0 && span > 0) {
+    ctx.strokeStyle = 'rgba(224, 112, 0, 0.55)';
+    ctx.lineWidth = 1;
+    let nDrawn = 0;
+    for (let k = 0; k < anTachMarks.length; k++) {
+      const ts = anTachMarks[k] / fs;
+      if (ts < anZMin || ts > anZMax) continue;
+      const x = P.l + (ts - anZMin) / span * pW;
+      ctx.beginPath();
+      ctx.moveTo(x, P.t);
+      ctx.lineTo(x, P.t + pH);
+      ctx.stroke();
+      nDrawn++;
+    }
+    if (nDrawn > 0) {
+      ctx.fillStyle = '#e07000';
+      ctx.font = 'bold 9px Arial';
+      ctx.textAlign = 'left';
+      ctx.fillText('1X tach ×' + anTachMarks.length, P.l + 6, P.t + pH - 4);
+    }
+  }
   ctx.restore();
   // Légende (mono B → orange « B », pas bleu « A »)
   ctx.font = 'bold 10px Arial';

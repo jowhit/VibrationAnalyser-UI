@@ -1385,6 +1385,18 @@ function handleTextB(raw) {
       }
       return;
     }
+    // Preview RPM Phase B — ne pas spammer le terminal
+    if (line.startsWith('HARM_RPM=')) {
+      if (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB() &&
+          typeof HarmonicModule !== 'undefined' && HarmonicModule.onLiveRpm) {
+        HarmonicModule.onLiveRpm(parseFloat(line.slice(9)));
+      }
+      return;
+    }
+    if (line.startsWith('BODE_TACH=') || line.startsWith('SYNC_TACH=') ||
+        line.startsWith('BAL_RPM=')) {
+      return;
+    }
     if (line.startsWith('WIFI_READY=') || line.startsWith('WIFI_IP=')) return;
     termAddLine('[B] ' + line, 'sys');
   });
@@ -1759,13 +1771,40 @@ function handleText(raw) {
       return;
     }
 
-    // RPM preview Phase (avant HARM_START)
+    // RPM preview Phase (avant HARM_START) — silencieux (pas de termAddLine)
     if (line.startsWith('HARM_RPM=')) {
       const rpm = parseFloat(line.slice(9));
       if (typeof HarmonicModule !== 'undefined' && HarmonicModule.onLiveRpm) {
         HarmonicModule.onLiveRpm(rpm);
       }
       return;
+    }
+
+    // Marqueurs tach post-temporel (indices sample)
+    if (rxState === 'an_tach') {
+      if (line === 'ANAL_TACH_BEGIN') {
+        rxHeaders.tachIdx = [];
+        return;
+      }
+      if (line.startsWith('NTACH=')) return;
+      if (line === 'ANAL_TACH_END') {
+        if (typeof analyseSetTachMarks === 'function') {
+          analyseSetTachMarks(rxHeaders.tachIdx || []);
+        }
+        rxState = 'text';
+        return;
+      }
+      if (/^\d+$/.test(line.trim())) {
+        if (!rxHeaders.tachIdx) rxHeaders.tachIdx = [];
+        rxHeaders.tachIdx.push(parseInt(line.trim(), 10));
+        return;
+      }
+      // Message hors liste → clore et laisser retomber (évite blocage)
+      if (typeof analyseSetTachMarks === 'function') {
+        analyseSetTachMarks(rxHeaders.tachIdx || []);
+      }
+      rxState = 'text';
+      // ne pas return : retraiter la ligne comme texte normal
     }
 
     // ── HARM_BIN → mode binaire harmonique (doit être avant BAL_ général) ──
@@ -1956,9 +1995,13 @@ function handleBinary(buf) {
     fftReceiveBloc(h.g, h.fs, h.n, samplesA);
 
   } else if (rxState === 'an_bin') {
-    rxState = 'text';
+    // Attendre ANAL_TACH_* éventuel (sinon reste text au prochain message)
+    rxState = 'an_tach';
+    rxHeaders.tachIdx = [];
     analyseReceiveBloc(h.g, h.fs, h.t || (h.n / h.fs), h.n, samplesA);
     if (typeof _dualOnBinaryA === 'function') _dualOnBinaryA();
+    // Si pas de tach, le prochain texte hors ANAL_TACH_ remettra rxState
+    // via le handler an_tach (lignes non numériques → text)
 
   } else if (rxState === 'bal_bin') {
     rxState = 'text';

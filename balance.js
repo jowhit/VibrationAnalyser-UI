@@ -36,6 +36,11 @@ const BalanceModule = (() => {
   let _satPendingContinue = false;
   /** Historique résultats (1P / 2P / Sat) — accessible via ☰ */
   let _resultHist = [];
+  /** Saisie manuelle amp/phase : ne pas écraser si l'opérateur tape */
+  let _measEditDirty = false;
+
+  /** Δ phasor relatif min (Run1→Run2 / Cond) — sous ce seuil → avertissement */
+  const PHASOR_MIN_REL = 0.15;
 
   const CLIP_THRESH = 30000;
   const CLIP_WARN_FRAC = 0.02;
@@ -131,6 +136,54 @@ const BalanceModule = (() => {
 
   function _isFiniteNum(x) {
     return typeof x === 'number' && Number.isFinite(x);
+  }
+
+  /** Parse nombre FR/EN (virgule ou point). null si vide/invalide. */
+  function _parseNum(s) {
+    if (s == null) return null;
+    const t = String(s).trim().replace(/\s/g, '').replace(',', '.');
+    if (!t) return null;
+    const v = parseFloat(t);
+    return Number.isFinite(v) ? v : null;
+  }
+
+  function _normPhase(ph) {
+    let p = ph % 360;
+    if (p < 0) p += 360;
+    return p;
+  }
+
+  /** Magnitude |V1 − V0| (mm/s) du phasor complexe. */
+  function _phasorDeltaMag(v0, v1) {
+    if (!v0 || !v1 || !_isFiniteNum(v0.amp) || !_isFiniteNum(v1.amp)) return null;
+    const r0 = v0.phase * Math.PI / 180;
+    const r1 = v1.phase * Math.PI / 180;
+    const dx = v1.amp * Math.cos(r1) - v0.amp * Math.cos(r0);
+    const dy = v1.amp * Math.sin(r1) - v0.amp * Math.sin(r0);
+    return Math.hypot(dx, dy);
+  }
+
+  /**
+   * checks: [{ label, v0, v1 }]
+   * return true = continuer, false = abandonner l'acceptation.
+   */
+  function _warnPhasorIfWeak(checks) {
+    const weak = [];
+    for (let i = 0; i < (checks || []).length; i++) {
+      const c = checks[i];
+      const d = _phasorDeltaMag(c.v0, c.v1);
+      if (d == null || !c.v0) continue;
+      const rel = d / Math.max(c.v0.amp, 1e-6);
+      if (rel < PHASOR_MIN_REL) {
+        weak.push((c.label || '?') + ': Δ=' + d.toFixed(3) + ' mm/s (' +
+          (rel * 100).toFixed(0) + '% de R1)');
+      }
+    }
+    if (!weak.length) return true;
+    const msg = 'Changement de phasor faible — masse d\'essai trop petite ?\n\n' +
+      weak.join('\n') + '\n\nContinuer quand même ?';
+    log('⚠ Phasor faible: ' + weak.join(' | '));
+    return confirm(msg);
   }
   function _cxOk(z) {
     return z && typeof z === 'object' && _isFiniteNum(z.r) && _isFiniteNum(z.i);
@@ -838,6 +891,7 @@ const BalanceModule = (() => {
       log('T' + tag + _tourCountFor(ch) + '  ' + _fmtTourLine(amp, phase, sat) +
           '  →  Moy(' + _tourCountFor(ch) + '/' + _winMax + '): ' +
           _fmtTourLine(avg.amp, avg.phase, avg.satPct));
+      _syncMeasEditFromLive();
     }
     return avg;
   }
@@ -1005,7 +1059,9 @@ const BalanceModule = (() => {
   function _doRun1P() {
     if (state===S.R2_CONFIG) {
       if (_measMode === 'clip') return; // auto BAL_R2 dummy
-      const mass=parseFloat(inMass.value), ang=parseFloat(inAngle.value)||0;
+      _bindTrialInputs();
+      const mass=_parseNum(inMass && inMass.value);
+      const ang=_parseNum(inAngle && inAngle.value) || 0;
       if (!mass||mass<=0){setStatus('Entrez une masse > 0','err');return;}
       _testMass1P=mass; _testAngle1P=ang;
       // Empêche spam / gel si l'opérateur reclique avant BAL_STATE=RUN2_READY
@@ -1212,18 +1268,25 @@ const BalanceModule = (() => {
   }
 
   function _accept1P() {
-    const avg=_getLiveAvg();
-    if (!avg||_tourCount<1){setStatus('Attendre au moins 1 tour','err');return;}
+    let avg = _resolveMeas1P();
+    if (!avg) {
+      setStatus(_tourCount < 1 ? 'Attendre au moins 1 tour ou saisir Amp/Phase' : 'Amp/Phase invalides', 'err');
+      return;
+    }
     if (_measMode === 'clip') { _accept1PSat(avg); return; }
     if (state===S.RUN1_RUNNING) {
       _run1=avg; _pushPts(_runs1P,1,avg.amp,avg.phase,'#1a6fc4');
       log('✓ R1: '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
+      _pushResultHist('R1', '', avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
       _suppressLiveTour = true;
+      _hideMeasEdit();
       _resetAvg(); _balSend('BAL_ACCEPT'); _showMassInput('Masse et angle essai');
       persistSession();
     } else if (state===S.RUN2_RUNNING) {
+      if (!_warnPhasorIfWeak([{ label: '1 Plan R1→R2', v0: _run1, v1: avg }])) return;
       _run2=avg; _pushPts(_runs1P,2,avg.amp,avg.phase,'#2a8a3e');
       log('✓ R2: '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
+      _pushResultHist('R2', '', avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
       const icm=_icm1P(_run1,_run2,_testMass1P,_testAngle1P);
       _influenceRatio=icm.ratio; _phaseShift=icm.pSh;
       log('✓ Correction: '+icm.corrMass.toFixed(1)+'g @ '+icm.corrAngle.toFixed(1)+'°');
@@ -1233,7 +1296,7 @@ const BalanceModule = (() => {
       if (resultEl) resultEl.innerHTML=htmlR12;
       _pushResultHist('Correction 1 Plan', htmlR12,
         icm.corrMass.toFixed(1)+'g @ '+icm.corrAngle.toFixed(1)+'°  |  '+detR12);
-      _drawPolar1P(); _hideMassInput(); _suppressLiveTour = true; _resetAvg(); _balSend('BAL_ACCEPT');
+      _drawPolar1P(); _hideMassInput(); _hideMeasEdit(); _suppressLiveTour = true; _resetAvg(); _balSend('BAL_ACCEPT');
       persistSession();
       _maybeOfferSave();
     } else if (state===S.RUNX_RUNNING) {
@@ -1247,7 +1310,7 @@ const BalanceModule = (() => {
       if (resultEl) resultEl.innerHTML=htmlX;
       _pushResultHist('Run '+_runXcount+' — Correction', htmlX,
         corrMass.toFixed(1)+'g @ '+corrAngle.toFixed(1)+'°  |  '+avg.amp.toFixed(3)+' mm/s @'+avg.phase.toFixed(1)+'°');
-      _drawPolar1P(); _suppressLiveTour = true; _resetAvg(); _balSend('BAL_ACCEPT');
+      _drawPolar1P(); _hideMeasEdit(); _suppressLiveTour = true; _resetAvg(); _balSend('BAL_ACCEPT');
       persistSession();
     }
     _updateUI();
@@ -1261,7 +1324,9 @@ const BalanceModule = (() => {
 
     // ── type mass : valider formulaire ────────────────────────
     if (def.type==='mass') {
-      const mass=parseFloat(inMass.value), ang=parseFloat(inAngle.value)||0;
+      _bindTrialInputs();
+      const mass=_parseNum(inMass && inMass.value);
+      const ang=_parseNum(inAngle && inAngle.value) || 0;
       if (!mass||mass<=0){setStatus('Entrez une masse > 0','err');return;}
       _trialMasses[def.massIdx]={mass,angle:ang};
       log('Masse Plan '+(def.massIdx===0?'A':'B')+': '+mass.toFixed(1)+'g @ '+ang.toFixed(1)+'°');
@@ -1322,13 +1387,15 @@ const BalanceModule = (() => {
 
       // Duo : un Capturer fige A et B
       if (_isDuo2P() && (def.both || (pend && (pend.kind === 'both' || pend.kind === 'runxBoth')))) {
-        const avgA=_getLiveAvg(), avgB=_getLiveAvgB();
-        if (!avgA||_tourCount<1||!avgB||_tourCountB<1) {
-          setStatus('Attendre tours A et B (A='+_tourCount+' B='+_tourCountB+')','err');
+        const pair = _resolveMeas2PBoth();
+        if (!pair) {
+          setStatus('Attendre tours A et B ou saisir Amp/Phase (A='+_tourCount+' B='+_tourCountB+')','err');
           return;
         }
+        const avgA = pair.A, avgB = pair.B;
         if (!runningOk) { setStatus('Attendre acquisition (tours)...','wait'); return; }
         if (pend && pend.kind === 'both') {
+          if (!_maybeWarn2PCond(pend.keys, avgA, avgB)) return;
           const condLabels=['C1','C2','C3'];
           const colors=['#1a6fc4','#2a8a3e','#c45a00'];
           pend.keys.forEach(function (kb) {
@@ -1338,9 +1405,12 @@ const BalanceModule = (() => {
             _meas[cond][plane]=avg;
             _pushPts(plane==='A'?_polarPtsA:_polarPtsB, condLabels[cond], avg.amp, avg.phase, colors[cond]);
             log('✓ Cond.'+(cond+1)+' Palier '+plane+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  ('+n+' tours)');
+            _pushResultHist('C'+(cond+1)+' '+plane, '',
+              avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
           });
           _drawAll2P();
           _suppressLiveTour = true;
+          _hideMeasEdit();
           _balSend('BAL_ACCEPT');
           _resetAvg();
           if (pend.computeICM) _doComputeICM();
@@ -1355,7 +1425,11 @@ const BalanceModule = (() => {
           _drawAll2P();
           log('✓ Run '+num+' A: '+avgA.amp.toFixed(3)+' mm/s @ '+avgA.phase.toFixed(1)+'°');
           log('✓ Run '+num+' B: '+avgB.amp.toFixed(3)+' mm/s @ '+avgB.phase.toFixed(1)+'°');
+          _pushResultHist('Run '+num+' A+B', '',
+            'A '+avgA.amp.toFixed(3)+' @'+avgA.phase.toFixed(1)+'° | B '+
+            avgB.amp.toFixed(3)+' @'+avgB.phase.toFixed(1)+'°');
           _suppressLiveTour = true;
+          _hideMeasEdit();
           _balSend('BAL_ACCEPT');
           _resetAvg();
           if (pend.showResult) _doShowRunXResult(num);
@@ -1365,14 +1439,15 @@ const BalanceModule = (() => {
         return;
       }
 
-      const avg=_getLiveAvg();
-      if (!avg||_tourCount<1){setStatus('Attendre au moins 1 tour','err');return;}
-      if (!runningOk && !(_mode==='2P' && _tourCount>=1)) {
+      const avg=_resolveMeas2PMono();
+      if (!avg){setStatus(_tourCount<1?'Attendre au moins 1 tour ou saisir Amp/Phase':'Amp/Phase invalides','err');return;}
+      if (!runningOk && !(_mode==='2P' && (_tourCount>=1 || avg))) {
         setStatus('Attendre acquisition (tours)...','wait');
         return;
       }
       if (pend && pend.kind === 'key') {
         const cond = pend.key[0], plane = pend.key[1];
+        if (!_maybeWarn2PSingle(cond, plane, avg)) return;
         _meas[cond][plane]=avg;
         const condLabels=['C1','C2','C3'];
         const colors=['#1a6fc4','#2a8a3e','#c45a00'];
@@ -1380,7 +1455,10 @@ const BalanceModule = (() => {
         if(plane==='A') _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA);
         else            _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
         log('✓ Cond.'+(cond+1)+' Palier '+plane+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
+        _pushResultHist('C'+(cond+1)+' '+plane, '',
+          avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
         _suppressLiveTour = true;
+        _hideMeasEdit();
         _balSend('BAL_ACCEPT');
         _resetAvg();
         if (pend.computeICM) _doComputeICM();
@@ -1394,7 +1472,10 @@ const BalanceModule = (() => {
         if(plane==='A') _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA);
         else            _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
         log('✓ Run '+num+' Palier '+plane+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
+        _pushResultHist('Run '+num+' '+plane, '',
+          avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
         _suppressLiveTour = true;
+        _hideMeasEdit();
         _balSend('BAL_ACCEPT');
         _resetAvg();
         if (pend.showResult) _doShowRunXResult(num);
@@ -1402,6 +1483,7 @@ const BalanceModule = (() => {
         _advanceStep();
       } else if (def.key) {
         const [cond,plane]=def.key;
+        if (!_maybeWarn2PSingle(cond, plane, avg)) return;
         _meas[cond][plane]=avg;
         const condLabels=['C1','C2','C3'];
         const colors=['#1a6fc4','#2a8a3e','#c45a00'];
@@ -1409,7 +1491,10 @@ const BalanceModule = (() => {
         if(plane==='A') _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA);
         else            _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
         log('✓ Cond.'+(cond+1)+' Palier '+plane+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
+        _pushResultHist('C'+(cond+1)+' '+plane, '',
+          avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
         _suppressLiveTour = true;
+        _hideMeasEdit();
         _balSend('BAL_ACCEPT');
         _resetAvg();
         if (def.computeICM) _doComputeICM();
@@ -1422,13 +1507,46 @@ const BalanceModule = (() => {
         if(plane==='A') _drawPolarWithPts(_ctxA,_canvasA,_polarPtsA);
         else            _drawPolarWithPts(_ctxB,_canvasB,_polarPtsB);
         log('✓ Run '+num+' Palier '+plane+': '+avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°  ('+_tourCount+' tours)');
+        _pushResultHist('Run '+num+' '+plane, '',
+          avg.amp.toFixed(3)+' mm/s @ '+avg.phase.toFixed(1)+'°');
         _suppressLiveTour = true;
+        _hideMeasEdit();
         _balSend('BAL_ACCEPT');
         _resetAvg();
         if (def.showResult) _doShowRunXResult(num);
         _advanceStep();
       }
     }
+  }
+
+  /** Warn C2 vs C1 (masse A) / C3 vs C1 (masse B) for associated planes. */
+  function _maybeWarn2PCond(keys, avgA, avgB) {
+    const checks = [];
+    (keys || []).forEach(function (kb) {
+      const cond = kb[0], plane = kb[1];
+      if (cond < 1) return;
+      const v0 = _meas[0][plane];
+      const v1 = plane === 'A' ? avgA : avgB;
+      if (!v0 || !v1) return;
+      const tag = cond === 1 ? 'masse A' : 'masse B';
+      checks.push({ label: 'Palier ' + plane + ' C1→C' + (cond + 1) + ' (' + tag + ')', v0: v0, v1: v1 });
+    });
+    return _warnPhasorIfWeak(checks);
+  }
+
+  function _maybeWarn2PSingle(cond, plane, avg) {
+    if (cond < 1) return true;
+    const v0 = _meas[0][plane];
+    if (!v0) return true;
+    // Warn when this capture completes the pair for that condition (both planes stored)
+    const other = plane === 'A' ? 'B' : 'A';
+    const otherDone = !!_meas[cond][other];
+    if (!otherDone) return true;
+    const checks = [
+      { label: 'Palier ' + plane + ' C1→C' + (cond + 1), v0: v0, v1: avg },
+      { label: 'Palier ' + other + ' C1→C' + (cond + 1), v0: _meas[0][other], v1: _meas[cond][other] }
+    ];
+    return _warnPhasorIfWeak(checks);
   }
 
   // ── Calculer et afficher ICM 2P ──────────────────────────────
@@ -1635,6 +1753,9 @@ const BalanceModule = (() => {
     if([S.RUN1_RUNNING,S.RUN2_RUNNING,S.RUNX_RUNNING].includes(state)) {
       _suppressLiveTour = false;
       _resetAvg();
+      _showMeasEdit();
+    } else {
+      _hideMeasEdit();
     }
 
     if (_mode==='1P') {
@@ -1913,6 +2034,145 @@ const BalanceModule = (() => {
       const el = document.getElementById(id);
       if (el) el.style.display = 'none';
     });
+  }
+
+  function _measIds1P() {
+    return {
+      amp: document.getElementById('bal-meas-amp-1p'),
+      ph: document.getElementById('bal-meas-ph-1p'),
+      panel: document.getElementById('bal-meas-1p')
+    };
+  }
+  function _measIds2P() {
+    return {
+      ampA: document.getElementById('bal-meas-amp-2p-a'),
+      phA: document.getElementById('bal-meas-ph-2p-a'),
+      ampB: document.getElementById('bal-meas-amp-2p-b'),
+      phB: document.getElementById('bal-meas-ph-2p-b'),
+      panel: document.getElementById('bal-meas-2p')
+    };
+  }
+  function _bindMeasEditDirty() {
+    const ids = ['bal-meas-amp-1p','bal-meas-ph-1p',
+      'bal-meas-amp-2p-a','bal-meas-ph-2p-a','bal-meas-amp-2p-b','bal-meas-ph-2p-b'];
+    ids.forEach(function (id) {
+      const el = document.getElementById(id);
+      if (!el || el._balMeasBound) return;
+      el._balMeasBound = true;
+      el.addEventListener('input', function () { _measEditDirty = true; });
+    });
+  }
+  function _setInputVal(el, v, digits) {
+    if (!el) return;
+    el.value = (v == null || !Number.isFinite(v)) ? '' : Number(v).toFixed(digits);
+  }
+  function _showMeasEdit() {
+    _bindMeasEditDirty();
+    _measEditDirty = false;
+    if (_mode === '1P') {
+      const m = _measIds1P();
+      if (m.panel) m.panel.style.display = 'block';
+      const avg = _getLiveAvg();
+      if (avg) {
+        _setInputVal(m.amp, avg.amp, 3);
+        _setInputVal(m.ph, avg.phase, 1);
+      }
+    } else {
+      const m = _measIds2P();
+      if (m.panel) m.panel.style.display = 'block';
+      const duo = _isDuo2P();
+      document.querySelectorAll('.bal-meas-2p-b-row').forEach(function (row) {
+        row.style.display = duo ? 'flex' : 'none';
+      });
+      const la = document.querySelector('label[for="bal-meas-amp-2p-a"]');
+      const lp = document.querySelector('label[for="bal-meas-ph-2p-a"]');
+      if (la) la.textContent = duo ? 'Amp A' : 'Amp';
+      if (lp) lp.textContent = duo ? 'Phase A' : 'Phase';
+      const avgA = _getLiveAvg();
+      if (avgA) {
+        _setInputVal(m.ampA, avgA.amp, 3);
+        _setInputVal(m.phA, avgA.phase, 1);
+      }
+      if (duo) {
+        const avgB = _getLiveAvgB();
+        if (avgB) {
+          _setInputVal(m.ampB, avgB.amp, 3);
+          _setInputVal(m.phB, avgB.phase, 1);
+        }
+      }
+    }
+  }
+  function _hideMeasEdit() {
+    _measEditDirty = false;
+    ['bal-meas-1p', 'bal-meas-2p'].forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'none';
+    });
+  }
+  function _syncMeasEditFromLive() {
+    if (_measEditDirty) return;
+    const running = [S.RUN1_RUNNING, S.RUN2_RUNNING, S.RUNX_RUNNING];
+    if (!running.includes(state)) return;
+    if (_mode === '1P') {
+      const m = _measIds1P();
+      if (!m.panel || m.panel.style.display === 'none') return;
+      const avg = _getLiveAvg();
+      if (!avg) return;
+      _setInputVal(m.amp, avg.amp, 3);
+      _setInputVal(m.ph, avg.phase, 1);
+    } else {
+      const m = _measIds2P();
+      if (!m.panel || m.panel.style.display === 'none') return;
+      const avgA = _getLiveAvg();
+      if (avgA) {
+        _setInputVal(m.ampA, avgA.amp, 3);
+        _setInputVal(m.phA, avgA.phase, 1);
+      }
+      if (_isDuo2P()) {
+        const avgB = _getLiveAvgB();
+        if (avgB) {
+          _setInputVal(m.ampB, avgB.amp, 3);
+          _setInputVal(m.phB, avgB.phase, 1);
+        }
+      }
+    }
+  }
+  function _readMeasPair(ampEl, phEl) {
+    const amp = _parseNum(ampEl && ampEl.value);
+    const ph = _parseNum(phEl && phEl.value);
+    if (amp == null || amp < 0 || ph == null) return null;
+    return { amp: amp, phase: _normPhase(ph) };
+  }
+  function _resolveMeas1P() {
+    const m = _measIds1P();
+    const manual = _readMeasPair(m.amp, m.ph);
+    if (manual) return manual;
+    const avg = _getLiveAvg();
+    if (avg && _tourCount >= 1) return avg;
+    return null;
+  }
+  function _resolveMeas2PMono() {
+    const m = _measIds2P();
+    const manual = _readMeasPair(m.ampA, m.phA);
+    if (manual) return manual;
+    const avg = _getLiveAvg();
+    if (avg && _tourCount >= 1) return avg;
+    return null;
+  }
+  function _resolveMeas2PBoth() {
+    const m = _measIds2P();
+    let avgA = _readMeasPair(m.ampA, m.phA);
+    let avgB = _readMeasPair(m.ampB, m.phB);
+    if (!avgA) {
+      const live = _getLiveAvg();
+      if (live && _tourCount >= 1) avgA = live;
+    }
+    if (!avgB) {
+      const live = _getLiveAvgB();
+      if (live && _tourCountB >= 1) avgB = live;
+    }
+    if (!avgA || !avgB) return null;
+    return { A: avgA, B: avgB };
   }
   function _pushPts(arr,label,amp,phase,color) {
     const idx=arr.findIndex(p=>p.label===label);

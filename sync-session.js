@@ -14,6 +14,12 @@ const SyncSession = (() => {
   let _state = S.IDLE;
   let _acqTimer = null;
 
+  // Overlay rotatif dédié (#page-sync) — ne touche pas an-acq-overlay
+  let _ovRaf = null;
+  let _ovStartMs = 0;
+  let _ovDurMs = 8000;
+  let _ovTransfer = false;
+
   function _log(msg) {
     if (typeof termAddLine === 'function') termAddLine(msg, 'sys');
   }
@@ -38,6 +44,128 @@ const SyncSession = (() => {
     }
   }
 
+  function _ovDraw(progress) {
+    const canvas = document.getElementById('sync-acq-ring');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const w = canvas.width, h = canvas.height;
+    const cx = w / 2, cy = h / 2, R = 46;
+    ctx.clearRect(0, 0, w, h);
+
+    ctx.strokeStyle = '#ddd';
+    ctx.lineWidth = 7;
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, 0, 2 * Math.PI);
+    ctx.stroke();
+
+    if (_ovTransfer) {
+      const spin = (Date.now() % 1200) / 1200 * 2 * Math.PI;
+      ctx.strokeStyle = '#0066cc';
+      ctx.lineWidth = 7;
+      ctx.lineCap = 'round';
+      ctx.setLineDash([10, 14]);
+      ctx.lineDashOffset = -spin * 8;
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, spin, spin + Math.PI * 1.35);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      return;
+    }
+
+    const p = Math.max(0, Math.min(1, progress));
+    const start = -Math.PI / 2;
+    const end = start + p * 2 * Math.PI;
+    const spin = (Date.now() % 1800) / 1800 * 2 * Math.PI;
+
+    if (p > 0.002) {
+      ctx.fillStyle = 'rgba(0, 102, 204, 0.18)';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, R, start, end);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.strokeStyle = '#0066cc';
+      ctx.lineWidth = 7;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(cx, cy, R, start, end);
+      ctx.stroke();
+
+      const tip = end;
+      const wedge = Math.PI / 7;
+      ctx.fillStyle = 'rgba(0, 102, 204, 0.42)';
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.arc(cx, cy, R * 0.92, tip + spin - wedge / 2, tip + spin + wedge / 2);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+
+  function _ovUpdateLabel(progress) {
+    const lbl = document.getElementById('sync-acq-label');
+    if (!lbl) return;
+    if (_ovTransfer) {
+      lbl.textContent = 'Transfert des données…';
+      return;
+    }
+    const pct = Math.round(Math.max(0, Math.min(1, progress)) * 100);
+    const remain = Math.max(0, _ovDurMs - (Date.now() - _ovStartMs));
+    lbl.textContent = remain <= 0
+      ? 'Finalisation…'
+      : ('Acquisition ' + pct + '%  ' + (remain / 1000).toFixed(1) + 's');
+  }
+
+  function _ovAnimFrame() {
+    if (_state !== S.ACQUIRING && _state !== S.FINALIZE) {
+      _ovHide();
+      return;
+    }
+    const elapsed = Date.now() - _ovStartMs;
+    if (!_ovTransfer && elapsed >= _ovDurMs) _ovTransfer = true;
+    const progress = _ovTransfer ? 1 : Math.min(1, elapsed / _ovDurMs);
+    _ovDraw(progress);
+    _ovUpdateLabel(progress);
+    _ovRaf = requestAnimationFrame(_ovAnimFrame);
+  }
+
+  function _ovShow() {
+    let fs = 4000, n = 45000;
+    if (typeof SyncModule !== 'undefined' && SyncModule.getAcqTiming) {
+      const tmg = SyncModule.getAcqTiming();
+      if (tmg) {
+        if (tmg.fs > 0) fs = tmg.fs;
+        if (tmg.n > 0) n = tmg.n;
+      }
+    }
+    _ovDurMs = Math.max(800, Math.round(n * 1000 / fs) + 600);
+    _ovStartMs = Date.now();
+    _ovTransfer = false;
+    const ov = document.getElementById('sync-acq-overlay');
+    if (ov) {
+      ov.style.display = 'flex';
+      ov.setAttribute('aria-hidden', 'false');
+    }
+    if (_ovRaf) cancelAnimationFrame(_ovRaf);
+    _ovRaf = requestAnimationFrame(_ovAnimFrame);
+  }
+
+  function _ovHide() {
+    _ovTransfer = false;
+    if (_ovRaf) { cancelAnimationFrame(_ovRaf); _ovRaf = null; }
+    const ov = document.getElementById('sync-acq-overlay');
+    if (ov) {
+      ov.style.display = 'none';
+      ov.setAttribute('aria-hidden', 'true');
+    }
+    const ring = document.getElementById('sync-acq-ring');
+    if (ring) {
+      const ctx = ring.getContext('2d');
+      if (ctx) ctx.clearRect(0, 0, ring.width, ring.height);
+    }
+  }
+
   function getState() { return _state; }
   function isActive() {
     return _state !== S.IDLE;
@@ -45,8 +173,8 @@ const SyncSession = (() => {
 
   function reset(silent) {
     _clearAcqTimer();
+    _ovHide();
     _state = S.IDLE;
-    if (typeof acqHideProgress === 'function') acqHideProgress();
     if (typeof SyncModule !== 'undefined') {
       SyncModule.clearResult();
       SyncModule.showTrace();
@@ -54,6 +182,8 @@ const SyncSession = (() => {
     _setBtnRunning(false);
     const fftBtn = document.getElementById('btn-sync-fft');
     if (fftBtn) fftBtn.style.display = 'none';
+    const shapeBtn = document.getElementById('btn-sync-shape');
+    if (shapeBtn) shapeBtn.style.display = 'none';
     if (!silent) _log('[SYNC] reset → IDLE');
   }
 
@@ -72,7 +202,7 @@ const SyncSession = (() => {
   }
 
   function _start() {
-    if (typeof acqHideProgress === 'function') acqHideProgress();
+    _ovHide();
     if (typeof SyncModule !== 'undefined') {
       SyncModule.clearResult();
       SyncModule.showTrace();
@@ -81,11 +211,13 @@ const SyncSession = (() => {
     if (typeof wsSend === 'function') wsSend('SYNC_START\n');
     _state = S.ACQUIRING;
     _setBtnRunning(true);
+    _ovShow();
     _clearAcqTimer();
     // Buffer ~45k @ 1k–32k Hz + transfert : marge large, évite bouton bloqué
     _acqTimer = setTimeout(function () {
       _acqTimer = null;
       if (_state !== S.ACQUIRING && _state !== S.FINALIZE) return;
+      _ovHide();
       _log('[SYNC] !! timeout — pas de payload');
       _state = S.READY;
       _setBtnRunning(false);
@@ -106,7 +238,7 @@ const SyncSession = (() => {
 
   function onPayloadReady() {
     _clearAcqTimer();
-    if (typeof acqHideProgress === 'function') acqHideProgress();
+    _ovHide();
     if (_state !== S.FINALIZE && _state !== S.ACQUIRING) {
       _state = S.FINALIZE;
     }
@@ -121,6 +253,8 @@ const SyncSession = (() => {
       fftBtn.style.display = ok ? 'inline-block' : 'none';
       fftBtn.textContent = (typeof t === 'function') ? t('sync.fft') : 'FFT ordres';
     }
+    const shapeBtn = document.getElementById('btn-sync-shape');
+    if (shapeBtn) shapeBtn.style.display = ok ? 'inline-block' : 'none';
     if (typeof showTab === 'function') showTab('sync');
     _log('[SYNC] VIEW' + (ok ? '' : ' (peu de tours)'));
   }
@@ -134,7 +268,7 @@ const SyncSession = (() => {
     if (/^Pret/i.test(String(txt || '')) &&
         (_state === S.ACQUIRING || _state === S.FINALIZE)) {
       _clearAcqTimer();
-      if (typeof acqHideProgress === 'function') acqHideProgress();
+      _ovHide();
       if (_state !== S.VIEW) {
         _state = S.READY;
         _setBtnRunning(false);
@@ -149,7 +283,9 @@ const SyncSession = (() => {
       }
       _state = S.ORDER_FFT;
       const fftBtn = document.getElementById('btn-sync-fft');
-      if (fftBtn) fftBtn.textContent = (typeof t === 'function') ? t('sync.trace') : 'Polaire';
+      if (fftBtn) fftBtn.textContent = (typeof t === 'function') ? t('sync.trace') : 'Tour moyen';
+      const shapeBtn = document.getElementById('btn-sync-shape');
+      if (shapeBtn) shapeBtn.style.display = 'none';
     } else if (_state === S.ORDER_FFT) {
       if (typeof SyncModule !== 'undefined' && SyncModule.showTrace) {
         SyncModule.showTrace();

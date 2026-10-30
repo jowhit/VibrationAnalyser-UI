@@ -264,8 +264,8 @@ body { display: flex; flex-direction: column; }
   background: rgba(248, 248, 248, 0.88);
   pointer-events: none;
 }
-#an-acq-ring, #fft-wait-ring { width: 96px; height: 96px; display: block; }
-#an-acq-label, #fft-wait-label {
+#an-acq-ring, #fft-wait-ring, #sync-acq-ring { width: 96px; height: 96px; display: block; }
+#an-acq-label, #fft-wait-label, #sync-acq-label {
   margin-top: 10px; font-size: 11px; color: #444;
   font-family: 'Courier New', monospace; text-align: center; line-height: 1.35;
 }
@@ -1503,13 +1503,25 @@ body { display: flex; flex-direction: column; }
   overflow: hidden;
 }
 .sync-trace-wrap {
+  position: relative;
   display: flex; align-items: center; justify-content: center;
+}
+.sync-trace-wrap.sync-trace-wrap--linear {
+  align-items: stretch; justify-content: stretch;
 }
 #sync-trace-canvas {
   display: block; background: #fff; max-width: 100%; max-height: 100%;
 }
+.sync-trace-wrap--linear #sync-trace-canvas {
+  width: 100%; height: 100%; max-width: none; max-height: none;
+  touch-action: none;
+}
 #sync-fft-canvas {
   width: 100%; height: 100%; display: block; background: #fafafa;
+}
+.sync-cursor-line {
+  font-family: 'Courier New', monospace; font-size: 11px;
+  color: #444; text-align: center; padding: 2px 6px; min-height: 16px;
 }
 .sync-mod-info {
   font-family: 'Courier New', monospace; font-size: 11px;
