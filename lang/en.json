@@ -17,6 +17,7 @@
   "common.reset": "Reset",
   "common.cancel": "Cancel",
   "common.ok": "OK",
+  "common.leaveConfirm": "Are you sure you want to leave?",
   "common.calculate": "Calculate",
   "common.copy": "Copy",
   "common.undefined": "not set",

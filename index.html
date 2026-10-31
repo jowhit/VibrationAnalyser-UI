@@ -20,7 +20,7 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=109">
+<link rel="stylesheet" href="style.css?v=116">
 <link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   // Bump à chaque release UI — invalide l'ancien « Compris »
@@ -272,9 +272,10 @@
       <span id="an-fs" data-i18n="an.waiting">En attente d'acquisition...</span>
     </div>
     <div id="an-stats">
-      <span>RMS: <b id="an-rms">—</b></span>
-      <span><span data-i18n="an.peak">Pic</span>: <b id="an-peak">—</b></span>
-      <span>Crest: <b id="an-crest">—</b></span>
+      <span id="an-stat-rms" class="an-stat">RMS: <b id="an-rms">—</b></span>
+      <span id="an-stat-peak" class="an-stat an-stat--active"><span data-i18n="an.peak">Pic</span>: <b id="an-peak">—</b></span>
+      <span id="an-stat-pp" class="an-stat">P-P: <b id="an-pp">—</b></span>
+      <span id="an-stat-crest" class="an-stat">Crest: <b id="an-crest">—</b></span>
       <span id="an-filter-label" style="display:none"></span>
     </div>
     <div id="an-time-cursors" class="an-time-cursors" style="display:none;" aria-live="polite"></div>
@@ -315,11 +316,24 @@
           <button id="btn-an-sel-mode" class="ham-vis-btn" onclick="analyseToggleSelMode()" title="Souris: glisser=sélection, Ctrl+glisser=pan. Android: appui long=sélection." data-i18n="an.sel" data-i18n-title="an.selTitle">⬚ Sél</button>
           <button id="btn-an-vis-a" class="ham-vis-btn active" onclick="analyseToggleVis('A')">👁 A</button>
           <button id="btn-an-vis-b" class="ham-vis-btn active" onclick="analyseToggleVis('B')">👁 B</button>
+          <button id="btn-an-vis-tach" class="ham-vis-btn active" onclick="analyseToggleVis('tach')"
+                  title="Marqueurs 1X tach (temporel + FFT)">1X</button>
           <button onclick="analyseFilter()" data-i18n="an.filter">🎸 Filtre</button>
           <button id="btn-an-reset" onclick="analyseFilterReset()" style="display:none">✗ Reset</button>
           <button id="btn-an-fft-sel" onclick="analyseFFTSel()" style="display:none">FFT Sél</button>
           <button id="btn-an-sel-clear" onclick="analyseSelClear()" style="display:none">✗ Sél</button>
         </div>
+        <div class="ham-divider"></div>
+        <div class="ham-title">AMPLITUDE</div>
+        <div class="ham-row" style="gap:0;">
+          <button type="button" id="btn-an-amp-rms" class="ham-band-toggle"
+                  onclick="anSetAmpMetric('rms')">RMS</button>
+          <button type="button" id="btn-an-amp-peak" class="ham-band-toggle active"
+                  onclick="anSetAmpMetric('peak')">Peak</button>
+          <button type="button" id="btn-an-amp-pp" class="ham-band-toggle"
+                  onclick="anSetAmpMetric('pp')">P-P</button>
+        </div>
+        <p class="ham-hint">Courbe temporelle = instantané. Stats / FFT / curseur suivent RMS, Peak (0-p) ou P-P.</p>
         <div class="ham-divider"></div>
         <div class="ham-title" data-i18n="an.fftCursors">CURSEURS FFT</div>
         <div class="ham-row" style="gap:0;">
@@ -345,6 +359,24 @@
           </div>
         </div>
         <p class="ham-hint" data-i18n="an.cursorHint">Harm : 1×…N×. Sidebands : glisser une raie ±Δ (ou champ Écart). Appui long = poser / bouger la porteuse.</p>
+        <div class="ham-divider"></div>
+        <div class="ham-title">AXE X FFT</div>
+        <div class="ham-row" style="gap:0;">
+          <button type="button" id="btn-an-x-rpm" class="ham-band-toggle active"
+                  onclick="anSetFftXMode('rpm')">RPM</button>
+          <button type="button" id="btn-an-x-hz" class="ham-band-toggle"
+                  onclick="anSetFftXMode('hz')">Hz</button>
+          <button type="button" id="btn-an-x-ord" class="ham-band-toggle"
+                  onclick="anSetFftXMode('order')">Ordre</button>
+        </div>
+        <div id="an-order-rpm-fields" class="ham-cursor-fields" style="display:none;">
+          <div class="ham-field ham-field-col">
+            <label for="an-order-rpm">1X réf (RPM)</label>
+            <input id="an-order-rpm" type="number" min="1" step="1" placeholder="ex: 1450"
+                   onchange="anOnOrderRefChange()" oninput="anOnOrderRefChange()">
+          </div>
+          <p class="ham-hint">Si vide : RPM tach 1X si disponible.</p>
+        </div>
         <div class="ham-divider"></div>
         <div class="ham-title" data-i18n="an.demodBand">BANDE DE DÉMODULATION</div>
         <div class="ham-row" style="gap:0;">
@@ -668,6 +700,8 @@
       <button type="button" id="btn-bode-toggle" class="bal-btn bal-btn-run mod-start-btn">&#9654; Démarrer</button>
       <button type="button" id="btn-bode-save" class="bal-btn" style="display:none;"
               onclick="bodeSave()" data-i18n="common.save">Sauv</button>
+      <button type="button" id="btn-bode-open" class="bal-btn"
+              onclick="bodeLoad()" data-i18n="common.open">Ouvrir</button>
     </div>
   </div>
 
@@ -702,6 +736,11 @@
 
     <div class="bal-cmdbar mod-cmdbar">
       <button type="button" id="btn-sync-toggle" class="bal-btn bal-btn-run mod-start-btn">&#9654; Démarrer</button>
+      <div id="sync-src-row" class="sync-src-row" style="display:none;" role="group" aria-label="Source">
+        <button type="button" id="btn-sync-src-brut" class="bal-btn ham-band-toggle">Brut</button>
+        <button type="button" id="btn-sync-src-tsa" class="bal-btn ham-band-toggle active">TSA</button>
+        <button type="button" id="btn-sync-src-res" class="bal-btn ham-band-toggle">Résiduel</button>
+      </div>
       <button type="button" id="btn-sync-shape" class="bal-btn" style="display:none;">Linéaire</button>
       <button type="button" id="btn-sync-fft" class="bal-btn" style="display:none;" data-i18n="sync.fft">FFT ordres</button>
     </div>
@@ -914,7 +953,7 @@
               <button type="button" class="bal-btn bal-mode-toggle bal-mode-toggle--active" data-bal-win="16">16</button>
               <button type="button" class="bal-btn bal-mode-toggle" data-bal-win="32">32</button>
             </div>
-            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v109</div>
+            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v116</div>
           </div>
         </div>
         <button id="btn-bal-run" class="bal-btn bal-btn-run" disabled>&#9654; Démarrer</button>
@@ -1007,24 +1046,24 @@
 
 </div><!-- #main -->
 
-<script src="i18n.js?v=109"></script>
-<script src="terminal.js?v=109"></script>
-<script src="fft.js?v=109"></script>
-<script src="fft-session.js?v=109"></script>
+<script src="i18n.js?v=116"></script>
+<script src="terminal.js?v=116"></script>
+<script src="fft.js?v=116"></script>
+<script src="fft-session.js?v=116"></script>
 <script src="demod.js?v=16"></script>
-<script src="analyse.js?v=109"></script>
-<script src="anal-session.js?v=109"></script>
-<script src="bump-session.js?v=109"></script>
-<script src="calc.js?v=109"></script>
-<script src="balance.js?v=109"></script>
+<script src="analyse.js?v=116"></script>
+<script src="anal-session.js?v=116"></script>
+<script src="bump-session.js?v=116"></script>
+<script src="calc.js?v=116"></script>
+<script src="balance.js?v=116"></script>
 <script src="balance-session.js?v=70"></script>
-<script src="harmonic.js?v=109"></script>
-<script src="phase-session.js?v=109"></script>
-<script src="bode.js?v=109"></script>
-<script src="bode-session.js?v=109"></script>
-<script src="sync.js?v=109"></script>
-<script src="sync-session.js?v=109"></script>
-<script src="menu.js?v=109"></script>
-<script src="app.js?v=109"></script>
+<script src="harmonic.js?v=116"></script>
+<script src="phase-session.js?v=116"></script>
+<script src="bode.js?v=116"></script>
+<script src="bode-session.js?v=116"></script>
+<script src="sync.js?v=116"></script>
+<script src="sync-session.js?v=116"></script>
+<script src="menu.js?v=116"></script>
+<script src="app.js?v=116"></script>
 </body>
 </html>

@@ -1,5 +1,6 @@
 // sync-session.js — SM module Analyse synchrone (TSA)
 // IDLE → READY → ACQUIRING → FINALIZE → VIEW ↔ ORDER_FFT
+//                                          └→ HANDOFF (buffer → AnalSession)
 
 const SyncSession = (() => {
   const S = {
@@ -9,6 +10,8 @@ const SyncSession = (() => {
     FINALIZE: 'FINALIZE',
     VIEW: 'VIEW',
     ORDER_FFT: 'ORDER_FFT',
+    /** Buffer envoyé à AnalSession — ESP Sync intact, UI Analyse */
+    HANDOFF: 'HANDOFF',
   };
 
   let _state = S.IDLE;
@@ -35,7 +38,7 @@ const SyncSession = (() => {
       btn.textContent = (typeof t === 'function') ? t('common.stop') : '◼ Arrêter';
       btn.classList.add('bal-btn-stop');
       btn.classList.remove('bal-btn-run');
-      btn.disabled = true; // acq one-shot : pas d'arrêt mid-buffer
+      btn.disabled = true;
     } else {
       btn.textContent = (typeof t === 'function') ? t('common.start') : '▶ Démarrer';
       btn.classList.remove('bal-btn-stop');
@@ -184,6 +187,8 @@ const SyncSession = (() => {
     if (fftBtn) fftBtn.style.display = 'none';
     const shapeBtn = document.getElementById('btn-sync-shape');
     if (shapeBtn) shapeBtn.style.display = 'none';
+    const srcRow = document.getElementById('sync-src-row');
+    if (srcRow) srcRow.style.display = 'none';
     if (!silent) _log('[SYNC] reset → IDLE');
   }
 
@@ -213,7 +218,6 @@ const SyncSession = (() => {
     _setBtnRunning(true);
     _ovShow();
     _clearAcqTimer();
-    // Buffer ~45k @ 1k–32k Hz + transfert : marge large, évite bouton bloqué
     _acqTimer = setTimeout(function () {
       _acqTimer = null;
       if (_state !== S.ACQUIRING && _state !== S.FINALIZE) return;
@@ -230,7 +234,8 @@ const SyncSession = (() => {
 
   function toggleStart() {
     if (_state === S.ACQUIRING || _state === S.FINALIZE) return;
-    if (_state === S.READY || _state === S.VIEW || _state === S.ORDER_FFT || _state === S.IDLE) {
+    if (_state === S.READY || _state === S.VIEW || _state === S.ORDER_FFT ||
+        _state === S.HANDOFF || _state === S.IDLE) {
       if (_state === S.IDLE) enter();
       _start();
     }
@@ -251,48 +256,111 @@ const SyncSession = (() => {
     const fftBtn = document.getElementById('btn-sync-fft');
     if (fftBtn) {
       fftBtn.style.display = ok ? 'inline-block' : 'none';
-      fftBtn.textContent = (typeof t === 'function') ? t('sync.fft') : 'FFT ordres';
+      fftBtn.textContent = _fftBtnLabel(S.VIEW);
     }
     const shapeBtn = document.getElementById('btn-sync-shape');
     if (shapeBtn) shapeBtn.style.display = ok ? 'inline-block' : 'none';
+    const srcRow = document.getElementById('sync-src-row');
+    if (srcRow) srcRow.style.display = ok ? 'flex' : 'none';
     if (typeof showTab === 'function') showTab('sync');
     _log('[SYNC] VIEW' + (ok ? '' : ' (peu de tours)'));
   }
 
-  /** SYNC_STATUS depuis ESP — recovery si overlay / état coincé. */
+  function _fftBtnLabel(forState) {
+    if (forState === S.VIEW) {
+      return (typeof t === 'function') ? t('sync.fft') : 'FFT ordres';
+    }
+    if (forState === S.ORDER_FFT) return '→ Analyse';
+    return (typeof t === 'function') ? t('sync.fft') : 'FFT ordres';
+  }
+
   function onStatus(txt) {
     if (typeof SyncModule !== 'undefined' && SyncModule.setStatus) {
       SyncModule.setStatus(txt);
     }
-    // Fin acq côté ESP sans payload exploitable
     if (/^Pret/i.test(String(txt || '')) &&
         (_state === S.ACQUIRING || _state === S.FINALIZE)) {
       _clearAcqTimer();
       _ovHide();
-      if (_state !== S.VIEW) {
+      if (_state !== S.VIEW && _state !== S.HANDOFF) {
         _state = S.READY;
         _setBtnRunning(false);
       }
     }
   }
 
+  /**
+   * Handoff SM : Sync → AnalSession.importBuffer (pas de WS_GOTO).
+   * VIEW | ORDER_FFT → HANDOFF
+   */
+  function openAnalyse() {
+    if (_state !== S.VIEW && _state !== S.ORDER_FFT && _state !== S.HANDOFF) {
+      _log('[SYNC] openAnalyse refusé (état=' + _state + ')');
+      return false;
+    }
+    if (typeof SyncModule === 'undefined') {
+      _log('[SYNC] !! SyncModule manquant');
+      return false;
+    }
+    const exportFn = SyncModule.exportForAnalyse || SyncModule.exportRaw;
+    if (!exportFn) {
+      _log('[SYNC] !! export manquant');
+      return false;
+    }
+    const payload = exportFn.call(SyncModule);
+    if (!payload) {
+      _log('[SYNC] !! pas de buffer à exporter');
+      return false;
+    }
+    const src = (typeof SyncModule.getSource === 'function')
+      ? SyncModule.getSource()
+      : 'tsa';
+    payload.source = (src === 'res') ? 'sync-res' : 'sync';
+    payload.view = 'fft';
+    if (typeof AnalSession === 'undefined' || !AnalSession.importBuffer) {
+      _log('[SYNC] !! AnalSession.importBuffer manquant');
+      return false;
+    }
+    const ok = AnalSession.importBuffer(payload);
+    if (!ok) return false;
+    _state = S.HANDOFF;
+    _log('[SYNC] HANDOFF → AnalSession (' + payload.source + ')');
+    return true;
+  }
+
+  /** Cycle UI : Tour ↔ Ordres ; depuis Ordres → Analyse (handoff). */
   function toggleFft() {
+    const fftBtn = document.getElementById('btn-sync-fft');
+    const shapeBtn = document.getElementById('btn-sync-shape');
+
     if (_state === S.VIEW) {
       if (typeof SyncModule !== 'undefined' && SyncModule.showOrderFft) {
         SyncModule.showOrderFft();
       }
       _state = S.ORDER_FFT;
-      const fftBtn = document.getElementById('btn-sync-fft');
-      if (fftBtn) fftBtn.textContent = (typeof t === 'function') ? t('sync.trace') : 'Tour moyen';
-      const shapeBtn = document.getElementById('btn-sync-shape');
+      if (fftBtn) fftBtn.textContent = _fftBtnLabel(S.ORDER_FFT);
       if (shapeBtn) shapeBtn.style.display = 'none';
-    } else if (_state === S.ORDER_FFT) {
+      return;
+    }
+    if (_state === S.ORDER_FFT) {
+      openAnalyse();
+      return;
+    }
+    if (_state === S.HANDOFF) {
+      // Retour page Sync sans perdre le buffer TSA
       if (typeof SyncModule !== 'undefined' && SyncModule.showTrace) {
         SyncModule.showTrace();
       }
       _state = S.VIEW;
-      const fftBtn = document.getElementById('btn-sync-fft');
-      if (fftBtn) fftBtn.textContent = (typeof t === 'function') ? t('sync.fft') : 'FFT ordres';
+      if (typeof showTab === 'function') showTab('sync');
+      if (fftBtn) {
+        fftBtn.style.display = 'inline-block';
+        fftBtn.textContent = _fftBtnLabel(S.VIEW);
+      }
+      if (shapeBtn) shapeBtn.style.display = 'inline-block';
+      const srcRow = document.getElementById('sync-src-row');
+      if (srcRow) srcRow.style.display = 'flex';
+      _log('[SYNC] VIEW ← retour HANDOFF');
     }
   }
 
@@ -303,6 +371,7 @@ const SyncSession = (() => {
     enter: enter,
     toggleStart: toggleStart,
     toggleFft: toggleFft,
+    openAnalyse: openAnalyse,
     onPayloadReady: onPayloadReady,
     onStatus: onStatus,
     reset: reset,

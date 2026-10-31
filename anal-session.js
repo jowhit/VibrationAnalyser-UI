@@ -71,9 +71,24 @@ const AnalSession = (() => {
     if (bar) bar.style.display = on ? 'flex' : 'none';
     if (btn) {
       btn.disabled = !on;
-      btn.textContent = (typeof t === 'function') ? t('common.start') : '▶ Démarrer';
+      btn.style.display = on ? '' : 'none';
+      const label = (typeof t === 'function') ? t('common.start') : '';
+      btn.textContent = (label && label !== 'common.start') ? label : '▶ Démarrer';
       btn.classList.add('bal-btn-run');
       btn.classList.remove('bal-btn-stop');
+    }
+  }
+
+  /** Réaffirme le bouton si ARMED (showTab / visibility / glitch layout). */
+  function syncUi() {
+    _showTempoStart(_state === S.ARMED);
+    if (_state === S.ARMED) {
+      const bumpPanel = document.getElementById('an-bump-panel');
+      if (bumpPanel) bumpPanel.style.display = 'none';
+      if (typeof anMode !== 'undefined' && anMode !== 'time' &&
+          anMode !== 'fft' && anMode !== 'demod') {
+        anMode = 'time';
+      }
     }
   }
 
@@ -112,6 +127,9 @@ const AnalSession = (() => {
       el.textContent = 'Prêt — ' + gLbl + '  FS=' + _fs + ' — Démarrer';
     }
     if (typeof showTab === 'function') showTab('analyse');
+    // Re-assert après showTab (layout / bump panel / i18n)
+    setTimeout(syncUi, 0);
+    setTimeout(syncUi, 350);
     _log('[TEMPO] ARMED — appuyer Démarrer');
   }
 
@@ -285,6 +303,48 @@ const AnalSession = (() => {
     start({ g: g, fs: fs });
   }
 
+  /**
+   * Import buffer déjà acquis (ex. Sync → Analyse) sans WS_GOTO / sans acq ESP.
+   * Transition : * → READY. Affiche l'onglet Analyse (outils FFT/curseurs/zoom).
+   * @param {{ g:number, fs:number, n:number, t?:number, samples:Int16Array|Array,
+   *           tachIdx?:number[], view?:'time'|'fft', source?:string }} opts
+   */
+  function importBuffer(opts) {
+    opts = opts || {};
+    const samples = opts.samples;
+    const n = opts.n || (samples && samples.length) || 0;
+    const fs = parseFloat(opts.fs);
+    const g = parseFloat(opts.g);
+    if (!samples || n < 64 || !(fs > 0) || !(g > 0)) {
+      _log('[TEMPO] importBuffer: payload invalide');
+      return false;
+    }
+    reset(true);
+    _g = String(g);
+    _fs = String(Math.round(fs));
+    _dual = false;
+    _showTempoStart(false);
+
+    const tSec = (opts.t != null && opts.t > 0) ? opts.t : (n / fs);
+    const raw = (samples instanceof Int16Array) ? samples : Int16Array.from(samples);
+
+    if (typeof analyseReceiveBloc === 'function') {
+      analyseReceiveBloc(g, fs, tSec, n, raw);
+    }
+    if (opts.tachIdx && opts.tachIdx.length && typeof analyseSetTachMarks === 'function') {
+      analyseSetTachMarks(opts.tachIdx);
+    }
+    const view = (opts.view === 'time') ? 'time' : 'fft';
+    if (typeof analyseSetView === 'function') analyseSetView(view);
+    else if (typeof anMode !== 'undefined') anMode = view;
+
+    _setState(S.READY);
+    if (typeof showTab === 'function') showTab('analyse');
+    _log('[TEMPO] READY ← import ' + (opts.source || 'externe') +
+      ' N=' + n + ' FS=' + Math.round(fs) + ' G=' + g);
+    return true;
+  }
+
   return {
     S: S,
     getState: getState,
@@ -294,8 +354,10 @@ const AnalSession = (() => {
     toggleStart: toggleStart,
     start: start,
     startAnalTemporal: startAnalTemporal,
+    importBuffer: importBuffer,
     reset: reset,
     abort: abort,
+    syncUi: syncUi,
     onArmOk: onArmOk,
     onCapOk: onCapOk,
     onBinaryA: onBinaryA,

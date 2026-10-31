@@ -245,6 +245,20 @@ function _rtcLocalIpv4s() {
     const found = [];
     const seen = {};
     let done = false;
+    function addIp(ip) {
+      if (!ip || seen[ip]) return;
+      if (ip.indexOf('127.') === 0 || ip === '0.0.0.0') return;
+      // Lien local IPv4 inutilisable pour scan /24
+      if (ip.indexOf('169.254.') === 0) return;
+      seen[ip] = true;
+      found.push(ip);
+    }
+    function harvestSdp(sdp) {
+      if (!sdp) return;
+      const re = /([0-9]{1,3}(?:\.[0-9]{1,3}){3})/g;
+      let m;
+      while ((m = re.exec(sdp)) !== null) addIp(m[1]);
+    }
     function finish() {
       if (done) return;
       done = true;
@@ -258,7 +272,7 @@ function _rtcLocalIpv4s() {
       resolve([]);
       return;
     }
-    const t = setTimeout(finish, 1500);
+    const t = setTimeout(finish, 2800);
     pc.createDataChannel('x');
     pc.onicecandidate = function (ev) {
       if (!ev || !ev.candidate || !ev.candidate.candidate) {
@@ -269,14 +283,13 @@ function _rtcLocalIpv4s() {
         return;
       }
       const m = /([0-9]{1,3}(?:\.[0-9]{1,3}){3})/.exec(ev.candidate.candidate);
-      if (!m) return;
-      const ip = m[1];
-      if (seen[ip]) return;
-      if (ip.indexOf('127.') === 0) return;
-      seen[ip] = true;
-      found.push(ip);
+      if (m) addIp(m[1]);
     };
-    pc.createOffer().then(function (o) { return pc.setLocalDescription(o); }).catch(finish);
+    pc.createOffer().then(function (o) {
+      return pc.setLocalDescription(o).then(function () {
+        try { harvestSdp(pc.localDescription && pc.localDescription.sdp); } catch (e2) {}
+      });
+    }).catch(finish);
   });
 }
 
@@ -300,14 +313,17 @@ function cancelEspScan() {
 
 async function scanEspSubnet(opts) {
   opts = opts || {};
-  const timeoutMs = opts.timeoutMs || 900;
-  const concurrency = opts.concurrency || 24;
+  const timeoutMs = opts.timeoutMs || 500;
+  const concurrency = opts.concurrency || 32;
+  /** Arrêt dès N ESP trouvés (2 = A+B) — évite scan complet /24 inutile. */
+  const stopAfter = opts.stopAfter != null ? opts.stopAfter : 0;
   const isAborted = typeof opts.isAborted === 'function'
     ? opts.isAborted
     : function () { return !!(opts.signal && opts.signal.aborted); };
   const bases = {};
   const hosts = [];
   const seenH = {};
+  let stopScan = false;
 
   function addHost(h) {
     if (!h || !_isEspIpv4(h) || seenH[h]) return;
@@ -318,37 +334,52 @@ async function scanEspSubnet(opts) {
     if (!b || bases[b]) return;
     bases[b] = true;
   }
-
-  // Bases : IP locales WebRTC + IP mémorisée + hôtes connus
-  const rtc = await _rtcLocalIpv4s();
-  if (isAborted()) return [];
-  rtc.forEach(function (ip) { addBase(_subnetBase(ip)); });
-  const stored = (localStorage.getItem('esp32ip') || '').trim();
-  if (_isEspIpv4(stored)) {
-    addBase(_subnetBase(stored));
-    const last = parseInt(stored.split('.')[3], 10);
-    // Priorité : voisinage de l'ancienne IP (DHCP ±30)
-    for (let d = 0; d <= 30; d++) {
-      if (last + d <= 254) addHost(_subnetBase(stored) + '.' + (last + d));
-      if (d > 0 && last - d >= 1) addHost(_subnetBase(stored) + '.' + (last - d));
+  function prioritizeAround(ip) {
+    if (!_isEspIpv4(ip)) return;
+    addBase(_subnetBase(ip));
+    const last = parseInt(ip.split('.')[3], 10);
+    for (let d = 0; d <= 40; d++) {
+      if (last + d <= 254) addHost(_subnetBase(ip) + '.' + (last + d));
+      if (d > 0 && last - d >= 1) addHost(_subnetBase(ip) + '.' + (last - d));
     }
   }
-  if (_isEspIpv4(ESP32_HOST)) addBase(_subnetBase(ESP32_HOST));
-  // Hotspots Android / Windows fréquents
-  ['192.168.43', '192.168.137', '10.42.0', '192.168.173', '192.168.1'].forEach(addBase);
+
+  // Bases : IP locales WebRTC + IP mémorisées A/B + hôtes connus
+  const rtc = await _rtcLocalIpv4s();
+  if (isAborted()) return [];
+  if (typeof termAddLine === 'function' && rtc.length) {
+    termAddLine('[scan] interfaces: ' + rtc.join(', '), 'sys');
+  }
+  rtc.forEach(function (ip) { addBase(_subnetBase(ip)); });
+  prioritizeAround((localStorage.getItem('esp32ip') || '').trim());
+  prioritizeAround((localStorage.getItem('esp32ip_a') || '').trim());
+  prioritizeAround((localStorage.getItem('esp32ip_b') || '').trim());
+  if (_isEspIpv4(ESP32_HOST)) prioritizeAround(ESP32_HOST);
+  if (_isEspIpv4(ESP32_HOST_B)) prioritizeAround(ESP32_HOST_B);
+  // Hotspots Android / Windows / Linux fréquents (+ 10.x SoftAP Android aléatoire via WebRTC)
+  ['192.168.43', '192.168.137', '10.42.0', '192.168.173', '192.168.1',
+   '192.168.0', '192.168.44', '192.168.49', '172.20.10'].forEach(addBase);
 
   Object.keys(bases).forEach(function (b) {
     for (let i = 1; i <= 254; i++) addHost(b + '.' + i);
   });
 
+  if (typeof termAddLine === 'function') {
+    termAddLine('[scan] ' + hosts.length + ' hôtes, ' + Object.keys(bases).length +
+      ' sous-réseau(x)' + (stopAfter ? (', stop@' + stopAfter) : ''), 'sys');
+  }
+
   const found = [];
   let idx = 0;
   async function worker() {
     while (idx < hosts.length) {
-      if (isAborted()) return;
+      if (isAborted() || stopScan) return;
       const i = idx++;
       const h = hosts[i];
-      if (await pingEspHost(h, timeoutMs)) found.push(h);
+      if (await pingEspHost(h, timeoutMs)) {
+        if (found.indexOf(h) < 0) found.push(h);
+        if (stopAfter > 0 && found.length >= stopAfter) stopScan = true;
+      }
     }
   }
   const nW = Math.min(concurrency, hosts.length);
@@ -394,11 +425,23 @@ async function discoverEspHost() {
     termAddLine(t('app.scanNet'), 'sys');
   }
   try {
-    const found = await scanEspSubnet({ timeoutMs: 700, concurrency: 28 });
+    const found = await scanEspSubnet({
+      timeoutMs: 450,
+      concurrency: 36,
+      stopAfter: 2
+    });
     if (found.length) {
       const h = found[0];
       ESP32_IP = h;
       localStorage.setItem('esp32ip', h);
+      // 2e IP → B si libre
+      if (found.length > 1 && (!ESP32_HOST_B || ESP32_HOST_B === h)) {
+        const b = found[1];
+        if (b !== h) {
+          ESP32_HOST_B = b;
+          localStorage.setItem('esp32ip_b', b);
+        }
+      }
       if (typeof termAddLine === 'function') {
         termAddLine(t('app.espFound', { list: found.join(', ') }), 'ok');
       }
@@ -410,9 +453,8 @@ async function discoverEspHost() {
     }
   }
 
-  if (storedIp && _isEspIpv4(storedIp)) return storedIp;
-  if (pageIp) return pageIp;
-  return ESP_MDNS_HOST;
+  // Ne pas réutiliser une IP morte (sinon boucle 1006)
+  return '';
 }
 
 /** Menu Connexion — scan manuel ; résultats dans le terminal (copier-coller). */
@@ -430,8 +472,9 @@ async function findEspAndPrompt() {
   let found = [];
   try {
     found = await scanEspSubnet({
-      timeoutMs: 800,
-      concurrency: 28,
+      timeoutMs: 450,
+      concurrency: 36,
+      stopAfter: 2,
       isAborted: function () { return !!abort.aborted; }
     });
   } catch (e) {
@@ -446,6 +489,7 @@ async function findEspAndPrompt() {
   }
   if (!found.length) {
     line(t('app.noneFound'), 'sys');
+    line('Astuce: entre l\'IP affichée au Serial USB (WIFI_IP=…) — le scan a besoin du bon /24 (WebRTC).', 'sys');
     return { empty: true };
   }
   line(t('app.foundList', { n: found.length }), 'ok');
@@ -453,11 +497,22 @@ async function findEspAndPrompt() {
     line('  ' + found[i], 'ok');
   }
   const host = found[0];
+  _wsFailCount = 0;
   if (typeof applyEspIp === 'function') applyEspIp(host, true);
   else {
     ESP32_IP = host;
     localStorage.setItem('esp32ip', host);
     _wsConnectTo(host);
+  }
+  if (found.length > 1) {
+    const b = found[1];
+    if (b !== host) {
+      ESP32_HOST_B = b;
+      localStorage.setItem('esp32ip_b', b);
+      _wsFailCountB = 0;
+      setTimeout(function () { wsConnectB(); }, 400);
+      line('[B] IP auto: ' + b, 'ok');
+    }
   }
   line(found.length > 1
     ? t('app.connectedAMore', { host: host })
@@ -1152,6 +1207,17 @@ function _wsConnectTo(host) {
       termAddLine('[A] -- deconnecte — entre l\'IP si besoin --', 'sys');
       showIpReconnectBanner();
       if (window.location.protocol === 'https:') return;
+      // IP probablement morte (DHCP changé) — invalider + rediscover
+      if (_wsFailCount >= WS_FAIL_BEFORE_IP_PROMPT && _isEspIpv4(ESP32_HOST)) {
+        const dead = ESP32_HOST;
+        ESP32_HOST = '';
+        if (ESP32_IP === dead) ESP32_IP = '';
+        localStorage.removeItem('esp32ip');
+        localStorage.removeItem('esp32host');
+        _wsFailCount = 0;
+        setTimeout(function () { wsConnect(); }, 500);
+        return;
+      }
     } else {
       termAddLine('[A] deconnecte code=' + e.code + ' retry ' + Math.round(_wsBackoffMs / 1000) + 's', 'sys');
     }
@@ -1236,6 +1302,30 @@ function handleTextB(raw) {
     if (line === 'WS_PONG' || line === 'PONG') {
       _markWsAliveB();
       return;
+    }
+
+    // Marqueurs tach post-temporel B — ignorer le bruit jusqu'à END
+    if (rxStateB === 'an_tach') {
+      if (line === 'ANAL_TACH_BEGIN') {
+        rxHeadersB.tachIdx = [];
+        rxHeadersB.tachStarted = true;
+        return;
+      }
+      if (line.startsWith('NTACH=')) return;
+      if (line === 'ANAL_TACH_END') {
+        const idx = rxHeadersB.tachIdx || [];
+        const monoB = (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB());
+        if (monoB && typeof analyseSetTachMarks === 'function') analyseSetTachMarks(idx);
+        else if (typeof analyseSetTachMarksB === 'function') analyseSetTachMarksB(idx);
+        rxStateB = 'text';
+        return;
+      }
+      if (rxHeadersB.tachStarted && /^\d+$/.test(line)) {
+        if (!rxHeadersB.tachIdx) rxHeadersB.tachIdx = [];
+        rxHeadersB.tachIdx.push(parseInt(line, 10));
+        return;
+      }
+      return; // ne pas abort sur lignes parasites (OK / ACQ…)
     }
 
     // Mode mono B : NAV_ACK / SYS_STATE comme sur A
@@ -1409,12 +1499,15 @@ function handleBinaryB(buf) {
     return;
   }
   const h = rxHeadersB;
-  rxStateB = 'text';
-  if (!_crcCheck(buf, h.crc)) return;
+  if (!_crcCheck(buf, h.crc)) {
+    rxStateB = 'text';
+    return;
+  }
   const samples = applyAxisInvertIfNeeded('B', new Int16Array(buf));
   // Mode mono B : B alimente les handlers « A » (UI mono classique)
   const monoB = (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB());
   if (st === 'bal_bin') {
+    rxStateB = 'text';
     if (monoB && typeof BalanceModule !== 'undefined' && BalanceModule.onTourBinary) {
       BalanceModule.onTourBinary(h.rpm, h.range, h.n, samples);
     } else if (typeof BalanceModule !== 'undefined' && BalanceModule.onTourBinaryB) {
@@ -1423,6 +1516,7 @@ function handleBinaryB(buf) {
     return;
   }
   if (st === 'fft_bin') {
+    rxStateB = 'text';
     if (monoB && typeof fftReceiveBloc === 'function') {
       fftReceiveBloc(h.g, h.fs, h.n, samples);
     } else if (typeof fftReceiveBlocB === 'function') {
@@ -1431,6 +1525,7 @@ function handleBinaryB(buf) {
     return;
   }
   if (st === 'harm_bin') {
+    rxStateB = 'text';
     if (monoB && typeof HarmonicModule !== 'undefined' && HarmonicModule.onHarmBinary) {
       HarmonicModule.onHarmBinary(h.g, h.fs, h.rpm, h.n, samples);
     } else if (typeof HarmonicModule !== 'undefined' && HarmonicModule.onHarmBinaryB) {
@@ -1438,6 +1533,10 @@ function handleBinaryB(buf) {
     }
     return;
   }
+  // an_bin : attendre ANAL_TACH_BEGIN…END (comme canal A)
+  rxStateB = 'an_tach';
+  rxHeadersB.tachIdx = [];
+  rxHeadersB.tachStarted = false;
   if (monoB && typeof analyseReceiveBloc === 'function') {
     analyseReceiveBloc(h.g, h.fs, h.t || (h.n / h.fs), h.n, samples);
   } else if (typeof analyseReceiveBlocB === 'function') {
@@ -1484,25 +1583,51 @@ async function wsConnect() {
   }
 
   syncHostFromPage();
-  if (!ESP32_HOST) {
+  _wsConnecting = true;
+  var host = ESP32_HOST;
+
+  // App Android / cache : toujours vérifier / rediscover (pas seulement si page = ESP)
+  if (window.location.protocol !== 'https:') {
+    try {
+      if (!host) {
+        if (typeof termAddLine === 'function') {
+          termAddLine('[A] pas d\'IP mémorisée — recherche…', 'sys');
+        }
+        host = await discoverEspHost();
+      } else if (_isEspIpv4(host)) {
+        // IP stale ? ping rapide avant WS (évite boucle 1006)
+        const ok = await pingEspHost(host, 600);
+        if (!ok) {
+          if (typeof termAddLine === 'function') {
+            termAddLine('[A] ' + host + ' ne répond pas — scan…', 'sys');
+          }
+          // Invalider IP morte pour forcer un vrai scan (pas re-ping de la même)
+          const dead = host;
+          if (ESP32_HOST === dead) ESP32_HOST = '';
+          if (ESP32_IP === dead) ESP32_IP = '';
+          try {
+            if ((localStorage.getItem('esp32ip') || '') === dead) {
+              localStorage.removeItem('esp32ip');
+            }
+            if ((localStorage.getItem('esp32host') || '') === dead) {
+              localStorage.removeItem('esp32host');
+            }
+          } catch (e2) {}
+          host = await discoverEspHost();
+        }
+      } else {
+        host = await discoverEspHost();
+      }
+    } catch (e) {}
+  }
+  _wsConnecting = false;
+
+  if (!host) {
     updateConnStatus();
     showIpReconnectBanner();
     if (typeof termAddLine === 'function') {
       termAddLine('[A] pas d\'IP — interface locale seulement --', 'sys');
     }
-    return;
-  }
-
-  var host = ESP32_HOST;
-  if (_pageServedByEsp() && window.location.protocol !== 'https:') {
-    _wsConnecting = true;
-    try { host = await discoverEspHost(); } catch (e) {}
-    _wsConnecting = false;
-  }
-
-  if (!host) {
-    updateConnStatus();
-    showIpReconnectBanner();
     return;
   }
   _wsConnectTo(host);
@@ -1780,10 +1905,12 @@ function handleText(raw) {
       return;
     }
 
-    // Marqueurs tach post-temporel (indices sample)
+    // Marqueurs tach post-temporel — ignorer le bruit jusqu'à END
+    // (sinon OK/ACQ_PROGRESS abortaient an_tach trop tôt → mono A/B sans 1X)
     if (rxState === 'an_tach') {
       if (line === 'ANAL_TACH_BEGIN') {
         rxHeaders.tachIdx = [];
+        rxHeaders.tachStarted = true;
         return;
       }
       if (line.startsWith('NTACH=')) return;
@@ -1794,17 +1921,12 @@ function handleText(raw) {
         rxState = 'text';
         return;
       }
-      if (/^\d+$/.test(line.trim())) {
+      if (rxHeaders.tachStarted && /^\d+$/.test(line.trim())) {
         if (!rxHeaders.tachIdx) rxHeaders.tachIdx = [];
         rxHeaders.tachIdx.push(parseInt(line.trim(), 10));
         return;
       }
-      // Message hors liste → clore et laisser retomber (évite blocage)
-      if (typeof analyseSetTachMarks === 'function') {
-        analyseSetTachMarks(rxHeaders.tachIdx || []);
-      }
-      rxState = 'text';
-      // ne pas return : retraiter la ligne comme texte normal
+      return;
     }
 
     // ── HARM_BIN → mode binaire harmonique (doit être avant BAL_ général) ──
@@ -1995,13 +2117,12 @@ function handleBinary(buf) {
     fftReceiveBloc(h.g, h.fs, h.n, samplesA);
 
   } else if (rxState === 'an_bin') {
-    // Attendre ANAL_TACH_* éventuel (sinon reste text au prochain message)
+    // Attendre ANAL_TACH_BEGIN…END (toujours envoyé par ESP, même NTACH=0)
     rxState = 'an_tach';
     rxHeaders.tachIdx = [];
+    rxHeaders.tachStarted = false;
     analyseReceiveBloc(h.g, h.fs, h.t || (h.n / h.fs), h.n, samplesA);
     if (typeof _dualOnBinaryA === 'function') _dualOnBinaryA();
-    // Si pas de tach, le prochain texte hors ANAL_TACH_ remettra rxState
-    // via le handler an_tach (lignes non numériques → text)
 
   } else if (rxState === 'bal_bin') {
     rxState = 'text';
@@ -2077,7 +2198,13 @@ function showTab(name) {
     t.classList.toggle('active', id === name);
   });
   if (name === 'fft')      setTimeout(fftDraw,     50);
-  if (name === 'analyse')  setTimeout(analyseDraw,  50);
+  if (name === 'analyse') {
+    setTimeout(analyseDraw, 50);
+    // Réaffiche Démarrer si session ARMED (évite glitch layout / bump)
+    if (typeof AnalSession !== 'undefined' && AnalSession.syncUi) {
+      setTimeout(function () { AnalSession.syncUi(); }, 60);
+    }
+  }
   if (name === 'bode') setTimeout(() => {
     if (typeof BodeModule !== 'undefined') BodeModule.resize();
   }, 50);
@@ -2349,12 +2476,54 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /** Demande confirmation avant refresh (Android : parfois sans dialogue — localStorage sauve quand même). */
 window.addEventListener('beforeunload', function (e) {
-  if (typeof BalanceModule === 'undefined') return;
-  if (typeof BalanceModule.hasProgress !== 'function' || !BalanceModule.hasProgress()) return;
-  if (typeof BalanceModule.persistSession === 'function') BalanceModule.persistSession();
+  if (typeof BalanceModule !== 'undefined' &&
+      typeof BalanceModule.hasProgress === 'function' && BalanceModule.hasProgress() &&
+      typeof BalanceModule.persistSession === 'function') {
+    BalanceModule.persistSession();
+  }
   e.preventDefault();
   e.returnValue = '';
 });
+
+/**
+ * Android : swipe edge / bouton retour quitte la page trop facilement.
+ * Trap history → confirm « Sur de vouloir quitter ? »
+ */
+(function _installLeaveConfirm() {
+  let _leaveArmed = false;
+  let _allowLeave = false;
+
+  function _pushGuard() {
+    try {
+      history.pushState({ vaGuard: 1 }, '', location.href);
+      _leaveArmed = true;
+    } catch (err) { /* ignore */ }
+  }
+
+  function _askLeave() {
+    const msg = (typeof t === 'function')
+      ? (t('common.leaveConfirm') || 'Sur de vouloir quitter ?')
+      : 'Sur de vouloir quitter ?';
+    return confirm(msg);
+  }
+
+  window.addEventListener('load', function () {
+    // Double push : le 1er back intercepte, le 2e (si confirm) sort vraiment
+    setTimeout(_pushGuard, 0);
+    setTimeout(_pushGuard, 50);
+  });
+
+  window.addEventListener('popstate', function () {
+    if (_allowLeave) return;
+    if (!_askLeave()) {
+      _pushGuard();
+      return;
+    }
+    _allowLeave = true;
+    _leaveArmed = false;
+    try { history.back(); } catch (err) { /* ignore */ }
+  });
+})();
 
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
@@ -2370,6 +2539,9 @@ document.addEventListener('visibilitychange', () => {
   setTimeout(() => {
     if (_activeTab === 'analyse' && typeof analyseDraw === 'function') {
       analyseDraw();
+    }
+    if (_activeTab === 'analyse' && typeof AnalSession !== 'undefined' && AnalSession.syncUi) {
+      AnalSession.syncUi();
     }
     if (_activeTab === 'fft' && typeof fftDraw === 'function') {
       fftDraw();

@@ -628,6 +628,84 @@ const BodeModule = (() => {
     URL.revokeObjectURL(url);
   }
 
+  /** Parse CSV Bode (Sauv) → points {rpm,amp,phase}. null si format inconnu. */
+  function parseBodeCsv(text) {
+    if (!text || typeof text !== 'string') return null;
+    const lines = text.split(/\r?\n/);
+    let headerSeen = false;
+    let looksBode = /Bode\s*1X/i.test(text) || /Amp_g\s*,\s*Phase/i.test(text);
+    const pts = [];
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i].trim();
+      if (!raw) continue;
+      if (raw.charAt(0) === '#') {
+        if (/Bode/i.test(raw)) looksBode = true;
+        continue;
+      }
+      if (/^RPM\s*,\s*Amp/i.test(raw)) {
+        headerSeen = true;
+        looksBode = true;
+        continue;
+      }
+      if (!headerSeen && !looksBode) continue;
+      // Accepter données après en-tête, ou lignes numériques si signature Bode
+      const parts = raw.split(/[,;\t]/);
+      if (parts.length < 3) continue;
+      const rpm = parseFloat(parts[0]);
+      const amp = parseFloat(parts[1]);
+      const phase = parseFloat(parts[2]);
+      if (!(rpm >= 0) || !isFinite(amp) || !isFinite(phase)) continue;
+      pts.push({ rpm: rpm, amp: amp, phase: phase });
+    }
+    if (!pts.length || !looksBode) return null;
+    pts.sort(function (a, b) { return a.rpm - b.rpm; });
+    return pts;
+  }
+
+  /** Charge une courbe Bode sauvegardée (sans re-passer par Analyse). */
+  function loadFromText(text, fileName) {
+    const pts = parseBodeCsv(text);
+    if (!pts) return false;
+    stopLiveAnim();
+    _ptsA = pts;
+    _rawSamples = null;
+    _tachUs = [];
+    _cursorRpm = null;
+    _mode = 'bode';
+    _applyLayout();
+    const saveBtn = document.getElementById('btn-bode-save');
+    if (saveBtn) saveBtn.style.display = '';
+    setStatus('Chargé' + (fileName ? (': ' + fileName) : '') + ' — ' + pts.length + ' pts');
+    const cfg = document.getElementById('bode-cfg-line');
+    if (cfg) cfg.textContent = 'Bode chargé — ' + pts.length + ' points 1X';
+    showBodeResult();
+    return true;
+  }
+
+  function loadFile() {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.csv,.txt,text/csv,text/plain';
+    inp.onchange = function (e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function (ev) {
+        if (!loadFromText(ev.target.result, file.name)) {
+          alert(
+            'Format Bode non reconnu.\n\n' +
+            'Attendu : CSV « Sauv » Bode (# VibrationAnalyser — Bode 1X + RPM,Amp_g,Phase_deg)'
+          );
+        } else if (typeof showTab === 'function') {
+          showTab('bode');
+        }
+      };
+      reader.onerror = function () { alert('Lecture fichier impossible'); };
+      reader.readAsText(file);
+    };
+    inp.click();
+  }
+
   // Stale RPM
   setInterval(function () {
     if (_lastTachMs && Date.now() - _lastTachMs > TACH_STALE_MS) {
@@ -654,12 +732,19 @@ const BodeModule = (() => {
     finalizeFromRaw: finalizeFromRaw,
     clearResult: clearResult,
     saveFile: saveFile,
+    parseBodeCsv: parseBodeCsv,
+    loadFromText: loadFromText,
+    loadFile: loadFile,
     resize: resize,
   };
 })();
 
 window.bodeSave = function () {
   if (typeof BodeModule !== 'undefined' && BodeModule.saveFile) BodeModule.saveFile();
+};
+
+window.bodeLoad = function () {
+  if (typeof BodeModule !== 'undefined' && BodeModule.loadFile) BodeModule.loadFile();
 };
 
 window.BodeModule = BodeModule;

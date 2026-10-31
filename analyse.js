@@ -2,8 +2,12 @@
 // Modes : anMode = 'time' | 'fft' | 'demod' | 'bump_wait' | 'bump_stream'
 let anData = null;
 let anDataB = null; // 2e sonde (mode DOUBLE) — même G/Fs
-/** Indices sample des pulses tach (marqueurs 1X sur tracé temporel). */
+/** Indices sample des pulses tach (marqueurs 1X sur tracé temporel + FFT). */
 let anTachMarks = [];
+/** Tach ESP B (dual) — pour aligner A/B sur le même pulse. */
+let anTachMarksB = [];
+/** Décalage samples appliqué à B pour aligner sur tach A (0 = pas d'align). */
+let anAlignShiftB = 0;
 let anP    = { g:2, fs:1000, n:0, t:0 };
 let _anDualArm = false;
 let _anGotA = false;
@@ -41,13 +45,19 @@ let anDataDisplayB = null;
 let anDataVel = null, anDataVelB = null;
 let anDataDispMm = null, anDataDispMmB = null;
 
-// Visibilité traces A/B (hamburger 👁) — indépendante du flush données
+// Visibilité traces A/B + marqueurs tach (hamburger) — indépendante du flush données
 let anShowA = true;
 let anShowB = true;
+let anShowTach = true;
+
+/** Axe X FFT : 'rpm' | 'hz' | 'order' — zoom interne reste en RPM */
+let anFftXMode = 'rpm';
+let anOrderRefRpm = 0; // 0 = auto (tach)
 
 function analyseToggleVis(which) {
   if (which === 'A') anShowA = !anShowA;
   else if (which === 'B') anShowB = !anShowB;
+  else if (which === 'tach') anShowTach = !anShowTach;
   // Au moins une visible si les deux existent
   if (!anShowA && !anShowB) {
     if (which === 'A') anShowB = true;
@@ -61,6 +71,7 @@ window.analyseToggleVis = analyseToggleVis;
 function _anUpdateVisBtns() {
   const ba = document.getElementById('btn-an-vis-a');
   const bb = document.getElementById('btn-an-vis-b');
+  const bt = document.getElementById('btn-an-vis-tach');
   // Bouton B visible dès session DOUBLE (pas seulement quand la trame B arrive)
   const dualUi = _anIsDualUi();
   const monoB = (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB());
@@ -75,6 +86,13 @@ function _anUpdateVisBtns() {
     bb.style.display = dualUi ? '' : 'none';
     bb.classList.toggle('active', anShowB && dualUi);
     bb.classList.toggle('off', !anShowB || !dualUi);
+  }
+  if (bt) {
+    const hasTach = (anTachMarks && anTachMarks.length > 0) ||
+                    (anTachMarksB && anTachMarksB.length > 0);
+    bt.style.display = hasTach ? '' : 'none';
+    bt.classList.toggle('active', anShowTach && hasTach);
+    bt.classList.toggle('off', !anShowTach || !hasTach);
   }
 }
 
@@ -120,6 +138,8 @@ function analyseFlushB() {
   anMagB = null;
   anMagVelB = null;
   anDemodResultB = null;
+  anTachMarksB = [];
+  anAlignShiftB = 0;
   _anGotB = false;
 }
 window.analyseFlushB = analyseFlushB;
@@ -130,7 +150,9 @@ window.analyseFlushB = analyseFlushB;
  * pour ne jamais garder une vieille trace B.
  */
 function analyseResetDualSession() {
-  if (typeof AnalSession !== 'undefined') AnalSession.reset(true);
+  // Ne PAS reset AnalSession ici — sinon un flush B après arm()
+  // fait disparaître le bouton Démarrer (ARMED). Les callers
+  // (wsGoto / ProbeMode / load) resetent AnalSession explicitement.
   _anDualArm = false;
   _anGotA = false;
   analyseFlushB();
@@ -768,12 +790,73 @@ function _analyseAfterReceive(t, fromB) {
   if (!fromB) _anPersistSave();
 }
 
-/** Reçoit les indices sample des pulses tach (1X) après BINARY_MODE. */
+/** RPM moyen depuis indices tach (samples) @ Fs. */
+function _anTachRpmFromMarks(marks, fs) {
+  if (!marks || marks.length < 2 || !(fs > 0)) return 0;
+  let sum = 0, n = 0;
+  for (let i = 1; i < marks.length; i++) {
+    const d = marks[i] - marks[i - 1];
+    if (d > 0) { sum += d; n++; }
+  }
+  if (!n) return 0;
+  const meanSamples = sum / n;
+  return (60 * fs) / meanSamples;
+}
+
+/**
+ * Décale B pour aligner son 1er pulse tach sur celui de A
+ * (même arbre / même laser → périodes proches).
+ */
+function _anComputeAlignShiftB() {
+  anAlignShiftB = 0;
+  const a = anTachMarks, b = anTachMarksB;
+  if (!a || !b || a.length < 1 || b.length < 1) return;
+  // Cherche paire (ia, ib) dont les périodes locales sont proches, sinon 1er pulse
+  let bestDa = a[0], bestDb = b[0], bestScore = Infinity;
+  const nA = Math.min(a.length - 1, 8);
+  const nB = Math.min(b.length - 1, 8);
+  if (nA >= 1 && nB >= 1) {
+    for (let i = 0; i < nA; i++) {
+      const pa = a[i + 1] - a[i];
+      if (pa <= 0) continue;
+      for (let j = 0; j < nB; j++) {
+        const pb = b[j + 1] - b[j];
+        if (pb <= 0) continue;
+        const score = Math.abs(pa - pb) / Math.max(pa, pb);
+        if (score < bestScore) {
+          bestScore = score;
+          bestDa = a[i];
+          bestDb = b[j];
+        }
+      }
+    }
+  }
+  // shift > 0 : B commence plus tôt → avancer B (lire B[i+shift] à t_i)
+  // draw: t_B_display = (i - shift) / fs  ⇒  x uses i_eff = i + shift for B sample at time of A
+  anAlignShiftB = Math.round(bestDa - bestDb);
+  if (typeof termAddLine === 'function' && anAlignShiftB !== 0) {
+    termAddLine('[TACH] Align A/B: Δ=' + anAlignShiftB + ' samples (' +
+      (anAlignShiftB / (anP.fs || 1) * 1000).toFixed(2) + ' ms)', 'sys');
+  }
+}
+
+/** Reçoit les indices sample des pulses tach (1X) après BINARY_MODE — canal A. */
 function analyseSetTachMarks(idxList) {
   anTachMarks = Array.isArray(idxList) ? idxList.slice() : [];
-  if (anMode === 'time' && anData) analyseDraw();
+  _anComputeAlignShiftB();
+  _anUpdateVisBtns();
+  if (anData) analyseDraw();
 }
 window.analyseSetTachMarks = analyseSetTachMarks;
+
+/** Idem canal B (dual). */
+function analyseSetTachMarksB(idxList) {
+  anTachMarksB = Array.isArray(idxList) ? idxList.slice() : [];
+  _anComputeAlignShiftB();
+  _anUpdateVisBtns();
+  if (anData || anDataB) analyseDraw();
+}
+window.analyseSetTachMarksB = analyseSetTachMarksB;
 
 /** DOUBLE temporel : afficher A+B ensemble (pas A seul puis B en retard). */
 let _anDualDrawTimer = null;
@@ -825,6 +908,7 @@ function analyseReceiveBloc(g, fs, t, n, raw) {
   _bumpStopAnim();
   _bumpResetLive();
   anTachMarks = []; // sera rempli par ANAL_TACH_* juste après
+  anAlignShiftB = 0;
   bumpLiveG = g;
   const btn = document.getElementById('btn-bump-start');
   if (btn) {
@@ -870,6 +954,8 @@ function analyseReceiveBlocB(g, fs, t, n, raw) {
   anDataDisplayB = null;
   anMagB = null; anMagVelB = null; anMagDispB = null; anDemodResultB = null;
   anDataVelB = null; anDataDispMmB = null;
+  anTachMarksB = []; // rempli par ANAL_TACH_* canal B
+  anAlignShiftB = 0;
   _anGotB = true;
   if (typeof termAddLine === 'function') {
     termAddLine('[B] acquis. reçue' + (_anGotA ? ' — DOUBLE OK' : ' — attente A…'), 'sys');
@@ -920,19 +1006,89 @@ function anUpdateBtnStates() {
 }
 
 function _anUnitLabel() {
+  let base;
   if (typeof t === 'function') {
-    if (anUnit === 'mm/s') return t('an.unit.vel');
-    if (anUnit === 'mm') return t('an.unit.disp');
-    return t('an.unit.g');
+    if (anUnit === 'mm/s') base = t('an.unit.vel');
+    else if (anUnit === 'mm') base = t('an.unit.disp');
+    else base = t('an.unit.g');
+  } else if (anUnit === 'mm/s') base = 'Vitesse (mm/s)';
+  else if (anUnit === 'mm') base = 'Déplacement (mm)';
+  else base = 'Amplitude (g)';
+  // Suffixe métrique seulement en FFT / démod (temporel = instantané)
+  if (anMode === 'fft' || anMode === 'demod') {
+    return base + ' ' + _anAmpMetricTag();
   }
-  if (anUnit === 'mm/s') return 'Vitesse (mm/s)';
-  if (anUnit === 'mm') return 'Déplacement (mm)';
-  return 'Amplitude (g)';
+  return base;
 }
 function _anUnitShort() {
   if (anUnit === 'mm/s') return 'mm/s';
   if (anUnit === 'mm') return 'mm';
   return 'g';
+}
+
+/** Métrique d'amplitude lecture : 'rms' | 'peak' | 'pp' (défaut peak = FFT actuelle). */
+let anAmpMetric = 'peak';
+try {
+  const _ampPref = localStorage.getItem('va_an_amp_metric');
+  if (_ampPref === 'rms' || _ampPref === 'peak' || _ampPref === 'pp') anAmpMetric = _ampPref;
+} catch (e) {}
+
+/** Peak (0-p) → valeur affichée selon métrique (FFT bins = peak). */
+function _anAmpScaleFromPeak() {
+  if (anAmpMetric === 'rms') return 1 / Math.SQRT2;
+  if (anAmpMetric === 'pp') return 2;
+  return 1;
+}
+function _anAmpFromPeak(peakAmp) {
+  return (Number(peakAmp) || 0) * _anAmpScaleFromPeak();
+}
+function _anAmpMetricTag() {
+  if (anAmpMetric === 'rms') return 'RMS';
+  if (anAmpMetric === 'pp') return 'P-P';
+  return 'pk';
+}
+function _anAmpMetricUnit() {
+  return _anUnitShort() + ' ' + _anAmpMetricTag();
+}
+
+function anSetAmpMetric(mode) {
+  if (mode !== 'rms' && mode !== 'peak' && mode !== 'pp') return;
+  anAmpMetric = mode;
+  try { localStorage.setItem('va_an_amp_metric', mode); } catch (e) {}
+  const br = document.getElementById('btn-an-amp-rms');
+  const bp = document.getElementById('btn-an-amp-peak');
+  const bpp = document.getElementById('btn-an-amp-pp');
+  if (br) br.classList.toggle('active', mode === 'rms');
+  if (bp) bp.classList.toggle('active', mode === 'peak');
+  if (bpp) bpp.classList.toggle('active', mode === 'pp');
+  _anHighlightAmpStats();
+  if (anData) analyseDraw();
+  else anUpdateStats();
+}
+window.anSetAmpMetric = anSetAmpMetric;
+
+function _anHighlightAmpStats() {
+  const map = { rms: 'an-stat-rms', peak: 'an-stat-peak', pp: 'an-stat-pp' };
+  ['an-stat-rms', 'an-stat-peak', 'an-stat-pp'].forEach(function (id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('an-stat--active', id === map[anAmpMetric]);
+  });
+}
+
+function _anFillAmpStats(rms, peak, pp, crest, unitStr) {
+  const u = unitStr || _anUnitShort();
+  const elR = document.getElementById('an-rms');
+  const elP = document.getElementById('an-peak');
+  const elPp = document.getElementById('an-pp');
+  const elC = document.getElementById('an-crest');
+  if (elR) elR.textContent = (rms != null && isFinite(rms) ? rms : 0).toFixed(_anAmpDec()) + ' ' + u;
+  if (elP) elP.textContent = (peak != null && isFinite(peak) ? peak : 0).toFixed(_anAmpDec()) + ' ' + u;
+  if (elPp) elPp.textContent = (pp != null && isFinite(pp) ? pp : 0).toFixed(_anAmpDec()) + ' ' + u;
+  if (elC) elC.textContent = (crest != null && isFinite(crest) ? crest : 0).toFixed(2);
+  _anHighlightAmpStats();
+}
+function _anAmpDec() {
+  return anUnit === 'g' ? 4 : 3;
 }
 
 /** Signal temporel A/B selon unité (g brut ou intégré). */
@@ -985,30 +1141,27 @@ function _btnSet(id, active) {
 function anUpdateStats() {
   if (anMode === 'bump_wait') return;
   const sig = anDataDisplay || anData;
+  _anSyncAmpMetricBtns();
 
   if (anMode === 'demod' && anDemodResult) {
     const { rmsEnv, crestEnv, fLow, fHigh, amps } = anDemodResult;
     let pkAmp = 0;
     for (let i = 1; i < amps.length; i++) if (amps[i] > pkAmp) pkAmp = amps[i];
-    document.getElementById('an-rms').textContent   = rmsEnv.toFixed(4) + ' g';
-    document.getElementById('an-peak').textContent  = pkAmp.toFixed(4);
-    document.getElementById('an-crest').textContent = crestEnv.toFixed(2);
+    _anFillAmpStats(rmsEnv, pkAmp, pkAmp * 2, crestEnv, 'g');
     document.getElementById('an-fs').textContent    =
-      `Démod  Bande: ${fLow.toFixed(0)}–${fHigh.toFixed(0)} Hz  Fs=${anP.fs} Hz`;
+      `Démod  Bande: ${fLow.toFixed(0)}–${fHigh.toFixed(0)} Hz  Fs=${anP.fs} Hz  [` + _anAmpMetricTag() + ']';
 
   } else if (anMode === 'fft' && anUnit === 'mm/s' && anMagVel) {
     const nFFT  = anMagVel.length * 2;
     const rpmPB = (anP.fs / nFFT) * 60;
     const maxB  = Math.min(anMagVel.length-1, Math.floor(fftMaxRpmVel(anP.fs)/rpmPB));
-    let pkBin=0, pkAmp=0;
-    for (let i=1;i<=maxB;i++) if(anMagVel[i]>pkAmp){pkAmp=anMagVel[i];pkBin=i;}
+    let pkAmp=0;
+    for (let i=1;i<=maxB;i++) if(anMagVel[i]>pkAmp) pkAmp=anMagVel[i];
     const rmsIso = (typeof calcRmsIso==='function')
       ? calcRmsIso(sig.slice(0,anP.n), anP.fs, anP.n) : 0;
-    document.getElementById('an-rms').textContent   = rmsIso.toFixed(3)+' mm/s';
-    document.getElementById('an-peak').textContent  = pkAmp.toFixed(3)+' mm/s';
-    document.getElementById('an-crest').textContent = (rmsIso>0?pkAmp/rmsIso:0).toFixed(2);
+    _anFillAmpStats(rmsIso, pkAmp, pkAmp * 2, rmsIso > 0 ? pkAmp / rmsIso : 0, 'mm/s');
     document.getElementById('an-fs').textContent    =
-      anP.fs+' Hz  N='+anP.n+'  T='+anP.t.toFixed(3)+'s  ±'+anP.g+'g';
+      anP.fs+' Hz  N='+anP.n+'  T='+anP.t.toFixed(3)+'s  ±'+anP.g+'g  [' + _anAmpMetricTag() + ']';
 
   } else if (anMode === 'fft' && (anUnit === 'g' || anUnit === 'mm') && anMag) {
     _anEnsureFftA();
@@ -1017,43 +1170,49 @@ function anUpdateStats() {
     const nFFT  = mag.length * 2;
     const rpmPB = (anP.fs / nFFT) * 60;
     const maxB  = Math.min(mag.length-1, Math.floor(_anMaxVal()/rpmPB));
-    let pkBin=0, pkAmp=0;
-    for (let i=1;i<=maxB;i++) if(mag[i]>pkAmp){pkAmp=mag[i];pkBin=i;}
+    let pkAmp=0;
+    for (let i=1;i<=maxB;i++) if(mag[i]>pkAmp) pkAmp=mag[i];
     let rmsS=0;
     for (let i=1;i<=maxB;i++) rmsS+=mag[i]*mag[i];
     rmsS=Math.sqrt(rmsS*2);
-    const dec = anUnit === 'g' ? 4 : 3;
-    document.getElementById('an-rms').textContent   = rmsS.toFixed(dec)+' '+u;
-    document.getElementById('an-peak').textContent  = pkAmp.toFixed(dec)+' '+u;
-    document.getElementById('an-crest').textContent = (rmsS>0?pkAmp/rmsS:0).toFixed(2);
+    _anFillAmpStats(rmsS, pkAmp, pkAmp * 2, rmsS > 0 ? pkAmp / rmsS : 0, u);
     document.getElementById('an-fs').textContent    =
-      anP.fs+' Hz  N='+anP.n+'  T='+anP.t.toFixed(3)+'s  ±'+anP.g+'g';
+      anP.fs+' Hz  N='+anP.n+'  T='+anP.t.toFixed(3)+'s  ±'+anP.g+'g  [' + _anAmpMetricTag() + ']';
 
   } else {
-    // Temporel (g / mm/s / mm)
+    // Temporel : courbe = instantané ; stats = RMS / Peak / P-P
     _anEnsureTimeIntegrated();
     const tSig = _anTimeSigA() || sig;
     const u = _anUnitShort();
-    const dec = anUnit === 'g' ? 4 : 3;
     const rms  = anCalcRMS(tSig);
     const peak = anCalcPeak(tSig);
-    document.getElementById('an-rms').textContent   = rms.toFixed(dec)+' '+u;
-    document.getElementById('an-peak').textContent  = peak.toFixed(dec)+' '+u;
-    document.getElementById('an-crest').textContent = (peak/rms).toFixed(2);
+    const pp   = anCalcPP(tSig);
+    _anFillAmpStats(rms, peak, pp, rms > 0 ? peak / rms : 0, u);
     let dual = '';
     if (anDataB && anDataB.length) {
       const tSigB = _anTimeSigB();
       if (anUnit === 'g') {
-        const meanA = anCalcMean(tSig);
-        const meanB = anCalcMean(tSigB);
-        dual = '  |  Ā=' + meanA.toFixed(2) + 'g  B̄=' + meanB.toFixed(2) + 'g';
+        dual = '  |  Ā=' + anCalcMean(tSig).toFixed(2) + 'g  B̄=' + anCalcMean(tSigB).toFixed(2) + 'g';
       }
-      dual += '  B RMS ' + anCalcRMS(tSigB).toFixed(dec) + ' ' + u;
+      const bRms = anCalcRMS(tSigB), bPk = anCalcPeak(tSigB), bPp = anCalcPP(tSigB);
+      let bVal = bRms, bTag = 'RMS';
+      if (anAmpMetric === 'peak') { bVal = bPk; bTag = 'pk'; }
+      else if (anAmpMetric === 'pp') { bVal = bPp; bTag = 'P-P'; }
+      dual += '  B ' + bTag + ' ' + bVal.toFixed(_anAmpDec()) + ' ' + u;
     }
     document.getElementById('an-fs').textContent    =
       anP.fs+' Hz  N='+anP.n+'  T='+anP.t.toFixed(3)+'s  ±'+anP.g+'g' +
       (anDataB && anDataB.length ? '  DOUBLE' : '') + dual;
   }
+}
+
+function _anSyncAmpMetricBtns() {
+  const br = document.getElementById('btn-an-amp-rms');
+  const bp = document.getElementById('btn-an-amp-peak');
+  const bpp = document.getElementById('btn-an-amp-pp');
+  if (br) br.classList.toggle('active', anAmpMetric === 'rms');
+  if (bp) bp.classList.toggle('active', anAmpMetric === 'peak');
+  if (bpp) bpp.classList.toggle('active', anAmpMetric === 'pp');
 }
 
 // ── Dessin principal ──────────────────────────────────────
@@ -1238,6 +1397,70 @@ function anSetCursorKind(kind) {
 }
 window.anSetCursorKind = anSetCursorKind;
 
+function _anOrderRefRpm() {
+  if (anOrderRefRpm > 0) return anOrderRefRpm;
+  const el = document.getElementById('an-order-rpm');
+  const typed = el ? parseFloat(el.value) : NaN;
+  if (typed > 0) return typed;
+  const fs = (anP && anP.fs) || 0;
+  return _anTachRpmFromMarks(anTachMarks, fs) ||
+         _anTachRpmFromMarks(anTachMarksB, fs) || 0;
+}
+
+function _anFftXFromRpm(rpm) {
+  if (anFftXMode === 'hz') return rpm / 60;
+  if (anFftXMode === 'order') {
+    const ref = _anOrderRefRpm();
+    return ref > 0 ? rpm / ref : rpm;
+  }
+  return rpm;
+}
+
+function _anFftXAxisLabel() {
+  if (anFftXMode === 'hz') return 'Fréquence (Hz)';
+  if (anFftXMode === 'order') {
+    const ref = _anOrderRefRpm();
+    return ref > 0 ? ('Ordre (1X=' + ref.toFixed(0) + ' RPM)') : 'Ordre (saisir 1X RPM)';
+  }
+  return 'Fréquence (RPM)';
+}
+
+function _anFmtFftX(rpm, digits) {
+  const v = _anFftXFromRpm(rpm);
+  if (anFftXMode === 'order') {
+    if (!(_anOrderRefRpm() > 0)) return rpm.toFixed(0) + ' RPM';
+    return (digits != null ? v.toFixed(digits) : (v >= 10 ? v.toFixed(1) : v.toFixed(2))) + '×';
+  }
+  if (anFftXMode === 'hz') {
+    return (digits != null ? v.toFixed(digits) : (v >= 100 ? v.toFixed(0) : v.toFixed(1))) + ' Hz';
+  }
+  if (v >= 1000) return (v / 1000).toFixed(1) + 'k';
+  return v.toFixed(digits != null ? digits : 0) + ' RPM';
+}
+
+function anSetFftXMode(mode) {
+  if (mode !== 'rpm' && mode !== 'hz' && mode !== 'order') return;
+  anFftXMode = mode;
+  const br = document.getElementById('btn-an-x-rpm');
+  const bh = document.getElementById('btn-an-x-hz');
+  const bo = document.getElementById('btn-an-x-ord');
+  if (br) br.classList.toggle('active', mode === 'rpm');
+  if (bh) bh.classList.toggle('active', mode === 'hz');
+  if (bo) bo.classList.toggle('active', mode === 'order');
+  const fields = document.getElementById('an-order-rpm-fields');
+  if (fields) fields.style.display = mode === 'order' ? '' : 'none';
+  if (anMode === 'fft' || anMode === 'demod') analyseDraw();
+}
+window.anSetFftXMode = anSetFftXMode;
+
+function anOnOrderRefChange() {
+  const el = document.getElementById('an-order-rpm');
+  const v = el ? parseFloat(el.value) : NaN;
+  anOrderRefRpm = (v > 0) ? v : 0;
+  if (anFftXMode === 'order' && (anMode === 'fft' || anMode === 'demod')) analyseDraw();
+}
+window.anOnOrderRefChange = anOnOrderRefChange;
+
 function analyseToggleSelMode() {
   anSelMode = !anSelMode;
   const btn = document.getElementById('btn-an-sel-mode');
@@ -1277,7 +1500,8 @@ function anDrawCursorFFT(ctx, xPx, rpm, amp, unit, pH, W, mag, rpmPB, zMin, span
     if (L.rpm < zMin || L.rpm > zMin + span) return;
     const hX = APAD.l + (L.rpm - zMin) / span * pW;
     const bin = Math.round(L.rpm / rpmPB);
-    const hAmp = (mag && bin >= 1 && bin < mag.length) ? mag[bin] : amp;
+    const hAmpPeak = (mag && bin >= 1 && bin < mag.length) ? mag[bin] : (amp / (_anAmpScaleFromPeak() || 1));
+    const hAmp = _anAmpFromPeak(hAmpPeak);
     ctx.strokeStyle = L.color;
     ctx.lineWidth = L.kind === 'harm' && L.bold ? 1.4 : 1;
     ctx.setLineDash(L.dash);
@@ -1288,11 +1512,12 @@ function anDrawCursorFFT(ctx, xPx, rpm, amp, unit, pH, W, mag, rpmPB, zMin, span
       let line1;
       if (L.kind === 'sb') {
         const dRpm = L.rpm - rpm;
-        line1 = (dRpm >= 0 ? '+' : '') + dRpm.toFixed(0) + ' RPM';
+        line1 = (dRpm >= 0 ? '+' : '−') + _anFmtFftX(Math.abs(dRpm));
       } else {
-        line1 = L.label + ' ' + L.rpm.toFixed(0) + ' RPM';
+        line1 = L.label + ' ' + _anFmtFftX(L.rpm);
       }
-      const txt = [line1, hAmp.toFixed(L.label === '1x' ? 4 : 3) + ' ' + unit];
+      const uLbl = _anAmpMetricUnit();
+      const txt = [line1, hAmp.toFixed(L.label === '1x' ? 4 : 3) + ' ' + uLbl];
       ctx.font = (L.bold ? 'bold ' : '') + '9px Arial';
       const tw = Math.max(...txt.map(t => ctx.measureText(t).width));
       const bw = tw + 6, bh = txt.length * 12 + 3;
@@ -1487,31 +1712,37 @@ function anDrawTime() {
   ctx.fillText('Temps (s)',P.l+pW/2,H);
   ctx.save();ctx.beginPath();ctx.rect(P.l,P.t,pW,pH);ctx.clip();
   const step=Math.max(1,Math.floor((i1-i0)/pW/2));
-  function _strokeSig(sig, color, width) {
+  function _strokeSig(sig, color, width, sampleShift) {
     if (!sig || !sig.length) return;
     const nS = sig.length;
-    const i1s = Math.min(nS - 1, i1);
+    const sh = sampleShift || 0;
     ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath();
     let first = true;
-    for (let i = i0; i <= i1s; i += step) {
+    for (let i = i0; i <= i1; i += step) {
+      const j = i - sh; // align tach : B[j] à t = i/fs
+      if (j < 0 || j >= nS) continue;
       const x = P.l + ((i / fs) - anZMin) / span * pW;
-      const y = yPix(sig[i]);
+      const y = yPix(sig[j]);
       if (first) { ctx.moveTo(x, y); first = false; } else ctx.lineTo(x, y);
     }
     ctx.stroke();
   }
   const dualTime = !!(anDataB && anDataB.length);
-  if (_anVisA()) _strokeSig(_sig, dualTime ? AN_COLOR_A : _anPrimaryColor(), 1.2);
+  if (_anVisA()) _strokeSig(_sig, dualTime ? AN_COLOR_A : _anPrimaryColor(), 1.2, 0);
   const _sigB = _anTimeSigB();
-  if (_anVisB() && _sigB && _sigB.length) _strokeSig(_sigB, AN_COLOR_B, 1.2);
+  if (_anVisB() && _sigB && _sigB.length) {
+    _strokeSig(_sigB, AN_COLOR_B, 1.2, anAlignShiftB || 0);
+  }
 
-  // Marqueurs tach 1X (pulses laser) — traits orange verticaux
-  if (anTachMarks && anTachMarks.length && fs > 0 && span > 0) {
-    ctx.strokeStyle = 'rgba(224, 112, 0, 0.55)';
+  // Marqueurs tach 1X — vert (≠ orange B). Mono B : marks dans anTachMarks ou B.
+  const _tachDraw = (anTachMarks && anTachMarks.length) ? anTachMarks
+    : ((anTachMarksB && anTachMarksB.length) ? anTachMarksB : null);
+  if (anShowTach && _tachDraw && fs > 0 && span > 0) {
+    ctx.strokeStyle = 'rgba(34, 139, 34, 0.65)';
     ctx.lineWidth = 1;
     let nDrawn = 0;
-    for (let k = 0; k < anTachMarks.length; k++) {
-      const ts = anTachMarks[k] / fs;
+    for (let k = 0; k < _tachDraw.length; k++) {
+      const ts = _tachDraw[k] / fs;
       if (ts < anZMin || ts > anZMax) continue;
       const x = P.l + (ts - anZMin) / span * pW;
       ctx.beginPath();
@@ -1521,10 +1752,14 @@ function anDrawTime() {
       nDrawn++;
     }
     if (nDrawn > 0) {
-      ctx.fillStyle = '#e07000';
+      ctx.fillStyle = '#228b22';
       ctx.font = 'bold 9px Arial';
       ctx.textAlign = 'left';
-      ctx.fillText('1X tach ×' + anTachMarks.length, P.l + 6, P.t + pH - 4);
+      const rpm = _anTachRpmFromMarks(_tachDraw, fs);
+      ctx.fillText('1X tach ×' + _tachDraw.length +
+        (rpm > 0 ? ('  ' + rpm.toFixed(0) + ' RPM') : '') +
+        (anAlignShiftB ? ('  ΔB=' + anAlignShiftB) : ''),
+        P.l + 6, P.t + pH - 4);
     }
   }
   ctx.restore();
@@ -1690,16 +1925,19 @@ function anDrawFFT() {
   const pW = W - P.l - P.r, pH = H - P.t - P.b;
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, W, H);
   ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.strokeRect(P.l, P.t, pW, pH);
-  let maxA = 0;
+  let maxPeak = 0;
   if (_anVisA() && mag) {
-    for (let i = minB; i <= maxB; i++) if (mag[i] > maxA) maxA = mag[i];
+    for (let i = minB; i <= maxB; i++) if (mag[i] > maxPeak) maxPeak = mag[i];
   }
   if (_anVisB() && magB) {
     const lim = Math.min(maxB, magB.length - 1);
-    for (let i = minB; i <= lim; i++) if (magB[i] > maxA) maxA = magB[i];
+    for (let i = minB; i <= lim; i++) if (magB[i] > maxPeak) maxPeak = magB[i];
   }
-  if (maxA === 0) maxA = 1;
+  if (maxPeak === 0) maxPeak = 1;
+  const ampK = _anAmpScaleFromPeak();
+  const maxA = maxPeak * ampK; // échelle Y selon métrique
   const aS = pH / (maxA * 1.1);
+  const aSDraw = aS * ampK; // mag[] reste en peak → multiplie à l'affichage
   for (let g = 0; g <= 5; g++) {
     const av = maxA * g / 5, y = P.t + pH - av * aS;
     if (g > 0) {
@@ -1718,20 +1956,29 @@ function anDrawFFT() {
     ctx.strokeStyle = '#888'; ctx.lineWidth = 1;
     ctx.beginPath(); ctx.moveTo(x, P.t + pH); ctx.lineTo(x, P.t + pH + 4); ctx.stroke();
     ctx.fillStyle = '#333'; ctx.font = '9px Arial'; ctx.textAlign = 'center';
-    ctx.fillText(rpm >= 1000 ? (rpm / 1000).toFixed(1) + 'k' : rpm.toFixed(0), x, H - 2);
+    const xv = _anFftXFromRpm(rpm);
+    let tick;
+    if (anFftXMode === 'order' && _anOrderRefRpm() > 0) {
+      tick = xv >= 10 ? xv.toFixed(1) : xv.toFixed(2);
+    } else if (anFftXMode === 'hz') {
+      tick = xv >= 100 ? xv.toFixed(0) : xv.toFixed(1);
+    } else {
+      tick = rpm >= 1000 ? (rpm / 1000).toFixed(1) + 'k' : rpm.toFixed(0);
+    }
+    ctx.fillText(tick, x, H - 2);
   }
   ctx.fillStyle = '#555'; ctx.font = '10px Arial'; ctx.textAlign = 'center';
-  ctx.fillText('Fréquence (RPM)', P.l + pW / 2, H);
+  ctx.fillText(_anFftXAxisLabel(), P.l + pW / 2, H);
   const dualFft = !!magB;
   ctx.save(); ctx.beginPath(); ctx.rect(P.l, P.t, pW, pH); ctx.clip();
   if (_anVisB() && magB) {
     const maxBB = Math.min(maxB, magB.length - 1);
-    _anStrokeMag(ctx, magB, minB, maxBB, rpmPB, zMin, span, pW, pH, aS, AN_COLOR_B, AN_FILL_B, maxA);
+    _anStrokeMag(ctx, magB, minB, maxBB, rpmPB, zMin, span, pW, pH, aSDraw, AN_COLOR_B, AN_FILL_B, maxPeak);
   }
   if (_anVisA() && mag) {
-    _anStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aS,
+    _anStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aSDraw,
       dualFft ? AN_COLOR_A : _anPrimaryColor(),
-      dualFft ? AN_FILL_A : _anPrimaryFill(), maxA);
+      dualFft ? AN_FILL_A : _anPrimaryFill(), maxPeak);
   }
   // Pic sur la 1re sonde visible
   const magPk = _anVisA() && mag ? mag : (_anVisB() && magB ? magB : null);
@@ -1743,7 +1990,32 @@ function anDrawFFT() {
       ctx.beginPath(); ctx.moveTo(xP, P.t); ctx.lineTo(xP, P.t + pH); ctx.stroke();
       ctx.setLineDash([]);
       ctx.fillStyle = '#666'; ctx.font = 'bold 10px Arial'; ctx.textAlign = 'left';
-      ctx.fillText((pkB * rpmPB).toFixed(0) + ' RPM', Math.min(xP + 3, W - 70), P.t + 12);
+      ctx.fillText(_anFmtFftX(pkB * rpmPB), Math.min(xP + 3, W - 70), P.t + 12);
+    }
+  }
+  // Marqueurs 1X / 2X / 3X / 4X depuis tach — vert
+  if (anShowTach) {
+    const tachRpm = _anTachRpmFromMarks(anTachMarks, fs) ||
+                    _anTachRpmFromMarks(anTachMarksB, fs);
+    if (tachRpm > 1 && span > 0) {
+      ctx.strokeStyle = 'rgba(34, 139, 34, 0.7)';
+      ctx.fillStyle = '#228b22';
+      ctx.font = 'bold 9px Arial';
+      ctx.textAlign = 'left';
+      for (let h = 1; h <= 4; h++) {
+        const rpmH = tachRpm * h;
+        if (rpmH < zMin || rpmH > zMin + span) continue;
+        const xH = P.l + (rpmH - zMin) / span * pW;
+        ctx.lineWidth = (h === 1) ? 1.5 : 1;
+        ctx.setLineDash(h === 1 ? [] : [3, 3]);
+        ctx.beginPath();
+        ctx.moveTo(xH, P.t);
+        ctx.lineTo(xH, P.t + pH);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillText(h + 'X', Math.min(xH + 3, W - 40), P.t + pH - 4 - (h - 1) * 11);
+      }
+      ctx.fillText(_anFmtFftX(tachRpm) + ' tach', P.l + 6, P.t + pH - 4);
     }
   }
   ctx.restore();
@@ -1762,7 +2034,7 @@ function anDrawFFT() {
     const rpm = zMin + ((anCursorX - P.l) / pW) * span;
     const bin = Math.round(rpm / rpmPB);
     if (bin >= 1 && bin < magPk.length)
-      anDrawCursorFFT(ctx, anCursorX, rpm, magPk[bin], anUnit, pH, W, magPk, rpmPB, zMin, span, pW);
+      anDrawCursorFFT(ctx, anCursorX, rpm, _anAmpFromPeak(magPk[bin]), anUnit, pH, W, magPk, rpmPB, zMin, span, pW);
   }
 }
 
@@ -1797,18 +2069,21 @@ function anDrawDemod() {
   const minB = Math.max(0,          Math.floor(zMin / rpmPerBin));
   const maxB = Math.min(freqsRpm.length - 1, Math.ceil(zMax  / rpmPerBin));
 
-  // Auto-échelle Y sur la vue courante (A + B visibles)
-  let maxA = 0;
+  // Auto-échelle Y (amps démod = peak) → métrique RMS/Peak/P-P
+  let maxPeak = 0;
   if (_anVisA()) {
-    for (let i = minB; i <= maxB; i++) if (amps[i] > maxA) maxA = amps[i];
+    for (let i = minB; i <= maxB; i++) if (amps[i] > maxPeak) maxPeak = amps[i];
   }
   if (_anVisB() && anDemodResultB && anDemodResultB.amps) {
     const ampsB = anDemodResultB.amps;
     const lim = Math.min(maxB, ampsB.length - 1);
-    for (let i = minB; i <= lim; i++) if (ampsB[i] > maxA) maxA = ampsB[i];
+    for (let i = minB; i <= lim; i++) if (ampsB[i] > maxPeak) maxPeak = ampsB[i];
   }
-  if (!maxA) maxA = 1;
+  if (!maxPeak) maxPeak = 1;
+  const ampK = _anAmpScaleFromPeak();
+  const maxA = maxPeak * ampK;
   const aS = pH / (maxA * 1.1);
+  const aSDraw = aS * ampK;
 
   // ── Grille H + labels Y ──────────────────────────────
   for (let g = 0; g <= 5; g++) {
@@ -1822,7 +2097,7 @@ function anDrawDemod() {
   }
   ctx.save(); ctx.translate(11, P.t+pH/2); ctx.rotate(-Math.PI/2);
   ctx.textAlign = 'center'; ctx.font = '10px Arial'; ctx.fillStyle = '#333';
-  ctx.fillText('Ampl. env.', 0, 0); ctx.restore();
+  ctx.fillText('Ampl. env. ' + _anAmpMetricTag(), 0, 0); ctx.restore();
 
   // ── Grille V + labels X (RPM) ────────────────────────
   const xticks = Math.min(8, Math.floor(pW/55));
@@ -1882,7 +2157,7 @@ function anDrawDemod() {
     ctx.beginPath(); let fi = true;
     for (let i = minB; i <= lim; i++) {
       const x = P.l + (freqsRpm[i] - zMin) / span * pW;
-      const y = P.t + pH - ampsArr[i] * aS;
+      const y = P.t + pH - ampsArr[i] * aSDraw;
       if (fi) { ctx.moveTo(x, P.t + pH); ctx.lineTo(x, y); fi = false; }
       else ctx.lineTo(x, y);
     }
@@ -1895,7 +2170,7 @@ function anDrawDemod() {
     ctx.beginPath(); fi = true;
     for (let i = minB; i <= lim; i++) {
       const x = P.l + (freqsRpm[i] - zMin) / span * pW;
-      const y = P.t + pH - ampsArr[i] * aS;
+      const y = P.t + pH - ampsArr[i] * aSDraw;
       if (fi) { ctx.moveTo(x, y); fi = false; } else ctx.lineTo(x, y);
     }
     ctx.stroke();
@@ -3184,6 +3459,7 @@ function _anApplyLoadedCapture(parsed, fileName) {
   };
   anUpdateStats();
   if (_wavSource) analysePause();
+  if (typeof AnalSession !== 'undefined' && AnalSession.reset) AnalSession.reset(true);
   analyseResetDualSession();
   anMode = 'time'; anZMin = 0; anZMax = anP.t; anYZoom = 1; anYPan = 0;
   anMag = null; anMagVel = null; anCursorX = -1;
@@ -3209,12 +3485,25 @@ function analyseLoad() {
     if (!file) return;
     const reader = new FileReader();
     reader.onload = function (ev) {
-      const parsed = _anParseCaptureText(ev.target.result);
+      const text = ev.target.result;
+      // CSV Bode → onglet Bode (pas le parseur temporel Analyse)
+      if (typeof BodeModule !== 'undefined' && BodeModule.parseBodeCsv &&
+          BodeModule.parseBodeCsv(text) && BodeModule.loadFromText) {
+        if (BodeModule.loadFromText(text, file.name)) {
+          if (typeof showTab === 'function') showTab('bode');
+          if (typeof termAddLine === 'function') {
+            termAddLine('[bode] chargé depuis Analyse: ' + (file.name || ''), 'sys');
+          }
+          return;
+        }
+      }
+      const parsed = _anParseCaptureText(text);
       if (!parsed) {
         alert(
           'Format non reconnu.\n\n' +
           '• Recharge : fichier .txt de « Sauv » (G=/F=/ + données)\n' +
-          '• Ou CSV de « CSV » (# Fs / # Range + Time_s,Accel_g)\n\n' +
+          '• Ou CSV de « CSV » (# Fs / # Range + Time_s,Accel_g)\n' +
+          '• Courbe Bode : CSV « Sauv » Bode → ouvrir ici ou via onglet Bode\n\n' +
           'Renommer .csv → .txt ne change pas le contenu.'
         );
         return;
@@ -3231,6 +3520,16 @@ function analyseLoad() {
 function anCalcRMS(d){let s=0;for(let i=0;i<d.length;i++)s+=d[i]*d[i];return Math.sqrt(s/d.length);}
 function anCalcMean(d){if(!d||!d.length)return 0;let s=0;for(let i=0;i<d.length;i++)s+=d[i];return s/d.length;}
 function anCalcPeak(d){let m=0;for(let i=0;i<d.length;i++)if(Math.abs(d[i])>m)m=Math.abs(d[i]);return m;}
+/** Peak-to-peak = max − min sur la fenêtre. */
+function anCalcPP(d){
+  if (!d || !d.length) return 0;
+  let lo = d[0], hi = d[0];
+  for (let i = 1; i < d.length; i++) {
+    if (d[i] < lo) lo = d[i];
+    if (d[i] > hi) hi = d[i];
+  }
+  return hi - lo;
+}
 
 // ============================================================
 // EXPORT WAV + PLAYBACK

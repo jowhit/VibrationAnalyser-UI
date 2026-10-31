@@ -1291,7 +1291,8 @@ const BalanceModule = (() => {
       _influenceRatio=icm.ratio; _phaseShift=icm.pSh;
       log('✓ Correction: '+icm.corrMass.toFixed(1)+'g @ '+icm.corrAngle.toFixed(1)+'°');
       setStatus('Correction: '+icm.corrMass.toFixed(1)+'g @ '+icm.corrAngle.toFixed(1)+'°','ok');
-      const detR12='R1: '+_run1.amp.toFixed(3)+' mm/s @'+_run1.phase.toFixed(1)+'°  |  R2: '+_run2.amp.toFixed(3)+' mm/s @'+_run2.phase.toFixed(1)+'°';
+      const essai1P='Essai: '+_testMass1P.toFixed(1)+'g @ '+_testAngle1P.toFixed(1)+'°';
+      const detR12='R1: '+_run1.amp.toFixed(3)+' mm/s @'+_run1.phase.toFixed(1)+'°  |  R2: '+_run2.amp.toFixed(3)+' mm/s @'+_run2.phase.toFixed(1)+'°  |  '+essai1P;
       const htmlR12=_html1PCorrResult('Correction 1 Plan',icm.corrMass,icm.corrAngle,detR12);
       if (resultEl) resultEl.innerHTML=htmlR12;
       _pushResultHist('Correction 1 Plan', htmlR12,
@@ -1607,9 +1608,20 @@ const BalanceModule = (() => {
       (detail?'<div class="bal-corr-sep"></div><div class="bal-corr-detail">'+detail+'</div>':'')+
       '</div>';
     rEl.innerHTML = html;
+    let essaiTxt = '';
+    if (_trialMasses[0] && _trialMasses[0].mass > 0) {
+      essaiTxt += 'Essai A: '+_trialMasses[0].mass.toFixed(1)+'g @'+
+        (_trialMasses[0].angle || 0).toFixed(1)+'°';
+    }
+    if (_trialMasses[1] && _trialMasses[1].mass > 0) {
+      essaiTxt += (essaiTxt ? '  |  ' : '') +
+        'Essai B: '+_trialMasses[1].mass.toFixed(1)+'g @'+
+        (_trialMasses[1].angle || 0).toFixed(1)+'°';
+    }
     _pushResultHist('Corrections 2 Plans', html,
       'A '+planA.mass.toFixed(1)+'g @'+planA.angle.toFixed(1)+'°  |  B '+
-      planB.mass.toFixed(1)+'g @'+planB.angle.toFixed(1)+'°');
+      planB.mass.toFixed(1)+'g @'+planB.angle.toFixed(1)+'°' +
+      (essaiTxt ? '  |  ' + essaiTxt : ''));
   }
 
   function _clearResult2P() {
@@ -1906,6 +1918,10 @@ const BalanceModule = (() => {
   }
 
   function doReset() {
+    const msg = (typeof t === 'function')
+      ? t('bal.resetConfirm')
+      : 'Voulez-vous vraiment supprimer ?\n\nLa procédure d\'équilibrage en cours sera effacée.';
+    if (!confirm(msg)) return;
     _procedureResetLocal(_coeffLoaded);
     _sessionPaused = false;
     _clearStorage();

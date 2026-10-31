@@ -7,7 +7,7 @@ const SyncModule = (() => {
   const MAX_ORDER = 32;
 
   let _initialized = false;
-  let _view = 'trace'; // 'trace' | 'fft'
+  let _view = 'trace'; // 'trace' | 'fft_order'
   let _shape = 'polar'; // 'polar' | 'linear' (vue tour moyen)
   let _gRange = 2;
   let _fs = 4000;
@@ -15,16 +15,24 @@ const SyncModule = (() => {
 
   let _traceCanvas, _traceCtx;
   let _fftCanvas, _fftCtx;
-  let _avg = null;      // Float32Array GRID (g)
+  let _avg = null;      // Float32Array GRID (g) — TSA
+  let _avgBrut = null;  // moyenne angulaire tours AC
+  let _avgRes = null;   // moyenne angulaire résidus
   let _orderMag = null; // Float32Array MAX_ORDER+1
   let _nRevs = 0;
   let _meanRpm = 0;
   let _rpm = 0;
   let _lastTachMs = 0;
+  /** 'brut' | 'tsa' | 'res' — source affichée / FFT / handoff */
+  let _source = 'tsa';
+  let _stats = { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 };
 
   let _rawSamples = null;
   let _rawMeta = null;
   let _tachUs = [];
+  /** Int16 résiduel temporel concaténé (tours valides) + indices tach sample */
+  let _residualRaw = null;
+  let _residualTachIdx = null;
 
   // Vue linéaire : zoom + curseur (degrés)
   let _linZMin = 0;
@@ -63,23 +71,64 @@ const SyncModule = (() => {
         toggleShape();
       });
     }
+    ['brut', 'tsa', 'res'].forEach(function (src) {
+      const b = document.getElementById('btn-sync-src-' + src);
+      if (b) {
+        b.addEventListener('click', function () { setSource(src); });
+      }
+    });
     _bindLinearInteractions();
     window.addEventListener('resize', resize);
     _applyLayout();
     resize();
   }
 
+  function _activeAvg() {
+    if (_source === 'brut') return _avgBrut || _avg;
+    if (_source === 'res') return _avgRes || _avg;
+    return _avg;
+  }
+
+  function _sourceLabel() {
+    if (_source === 'brut') return 'Brut';
+    if (_source === 'res') return 'Résiduel';
+    return 'TSA';
+  }
+
+  function setSource(src) {
+    if (src !== 'brut' && src !== 'tsa' && src !== 'res') return;
+    _source = src;
+    _orderMag = null;
+    _updateSourceBtns();
+    _updateInfoLine();
+    if (_view === 'fft_order') _computeOrderFft();
+    resize();
+    _updateCursorLine();
+  }
+
+  function getSource() { return _source; }
+
+  function _updateSourceBtns() {
+    const row = document.getElementById('sync-src-row');
+    const has = !!_avg;
+    if (row) row.style.display = has ? 'flex' : 'none';
+    ['brut', 'tsa', 'res'].forEach(function (src) {
+      const b = document.getElementById('btn-sync-src-' + src);
+      if (b) b.classList.toggle('active', _source === src);
+    });
+  }
+
   function _updateShapeBtn() {
     const shapeBtn = document.getElementById('btn-sync-shape');
     if (!shapeBtn) return;
-    const show = _view === 'trace' && !!_avg;
+    const show = _view === 'trace' && !!_activeAvg();
     shapeBtn.style.display = show ? 'inline-block' : 'none';
     // Label = action (passer à l'autre vue)
     shapeBtn.textContent = _shape === 'polar' ? 'Linéaire' : 'Polaire';
   }
 
   function toggleShape() {
-    if (_view !== 'trace' || !_avg) return;
+    if (_view !== 'trace' || !_activeAvg()) return;
     _shape = (_shape === 'polar') ? 'linear' : 'polar';
     if (_shape === 'linear') {
       _linZMin = 0;
@@ -120,7 +169,7 @@ const SyncModule = (() => {
       tw.style.display = _view === 'trace' ? 'flex' : 'none';
       tw.classList.toggle('sync-trace-wrap--linear', _view === 'trace' && _shape === 'linear');
     }
-    if (fw) fw.style.display = _view === 'fft' ? 'flex' : 'none';
+    if (fw) fw.style.display = _view === 'fft_order' ? 'flex' : 'none';
     _updateShapeBtn();
   }
 
@@ -132,13 +181,75 @@ const SyncModule = (() => {
   }
 
   function showOrderFft() {
-    _view = 'fft';
-    if (!_orderMag && _avg) _computeOrderFft();
+    _view = 'fft_order';
+    if (!_orderMag && _activeAvg()) _computeOrderFft();
     _applyLayout();
     resize();
   }
 
+  function getView() { return _view; }
   function getShape() { return _shape; }
+
+  /**
+   * Payload pour AnalSession.importBuffer — buffer Sync brut + indices tach.
+   * Ne consomme pas / ne vide pas les données Sync.
+   */
+  function exportRaw() {
+    if (!_rawSamples || !_rawSamples.length) return null;
+    const fs = (_rawMeta && _rawMeta.fs) || _fs;
+    const g = (_rawMeta && _rawMeta.g) || _gRange;
+    const t0 = (_rawMeta && _rawMeta.t0) || 0;
+    const n = _rawSamples.length;
+    if (!(fs > 0) || !(g > 0)) return null;
+    const tachIdx = [];
+    if (_tachUs && _tachUs.length) {
+      const periodUs = 1000000 / fs;
+      const t0u = t0 >>> 0;
+      for (let i = 0; i < _tachUs.length; i++) {
+        const tu = _tachUs[i] >>> 0;
+        const rel = (tu - t0u) >>> 0;
+        const si = Math.floor(rel / periodUs);
+        if (si >= 0 && si < n) tachIdx.push(si);
+      }
+    }
+    return {
+      g: g,
+      fs: fs,
+      n: n,
+      t: n / fs,
+      samples: _rawSamples,
+      tachIdx: tachIdx,
+      source: 'sync',
+    };
+  }
+
+  /**
+   * Buffer temporel résiduel (int16) pour handoff Analyse.
+   */
+  function exportResidual() {
+    if (!_residualRaw || !_residualRaw.length) return null;
+    const fs = (_rawMeta && _rawMeta.fs) || _fs;
+    const g = (_rawMeta && _rawMeta.g) || _gRange;
+    if (!(fs > 0) || !(g > 0)) return null;
+    const n = _residualRaw.length;
+    return {
+      g: g,
+      fs: fs,
+      n: n,
+      t: n / fs,
+      samples: _residualRaw,
+      tachIdx: (_residualTachIdx && _residualTachIdx.length)
+        ? _residualTachIdx.slice()
+        : [],
+      source: 'sync-res',
+    };
+  }
+
+  /** Export selon source UI (Résiduel → residual, sinon brut). */
+  function exportForAnalyse() {
+    if (_source === 'res') return exportResidual();
+    return exportRaw();
+  }
 
   function setStatus(text) {
     const el = document.getElementById('sync-status');
@@ -188,34 +299,74 @@ const SyncModule = (() => {
     const t0 = (_rawMeta && _rawMeta.t0) || 0;
     const r = _computeTsa(_rawSamples, fs, g, t0, _tachUs);
     _avg = r.avg;
+    _avgBrut = r.avgBrut;
+    _avgRes = r.avgRes;
+    _residualRaw = r.residualRaw;
+    _residualTachIdx = r.residualTachIdx;
+    _stats = r.stats || { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 };
     _nRevs = r.nRevs;
     _meanRpm = r.meanRpm;
     _orderMag = null;
+    _source = 'tsa';
     if (_meanRpm > 0) updateRpmBar(_meanRpm);
 
-    const info = document.getElementById('sync-mod-info');
-    if (info) {
-      info.textContent = 'Tours=' + _nRevs +
-        '  RPM moy=' + Math.round(_meanRpm) +
-        '  N=' + _rawSamples.length +
-        '  FS=' + Math.round(fs);
-    }
+    _updateInfoLine();
+    _updateSourceBtns();
     showTrace();
     _updateShapeBtn();
     setStatus(_nRevs
-      ? ('TSA — ' + _nRevs + ' tours moyennés')
+      ? ('TSA — ' + _nRevs + ' tours  R%=' + _stats.rPct.toFixed(1))
       : 'Pas assez de tours tach');
     return _nRevs > 0;
   }
 
+  function _updateInfoLine() {
+    const info = document.getElementById('sync-mod-info');
+    if (!info) return;
+    const fs = (_rawMeta && _rawMeta.fs) || _fs;
+    if (!_nRevs) {
+      info.textContent = '—';
+      return;
+    }
+    info.textContent =
+      _sourceLabel() +
+      '  Tours=' + _nRevs +
+      '  RPM=' + Math.round(_meanRpm) +
+      '  RMS_b=' + _stats.rmsBrut.toFixed(4) +
+      '  RMS_t=' + _stats.rmsTsa.toFixed(4) +
+      '  RMS_r=' + _stats.rmsRes.toFixed(4) +
+      '  R%=' + _stats.rPct.toFixed(1) +
+      '  FS=' + Math.round(fs);
+  }
+
+  function _rmsArr(arr) {
+    if (!arr || !arr.length) return 0;
+    let s = 0;
+    for (let i = 0; i < arr.length; i++) s += arr[i] * arr[i];
+    return Math.sqrt(s / arr.length);
+  }
+
+  function _removeDc(buf) {
+    let m = 0;
+    for (let i = 0; i < buf.length; i++) m += buf[i];
+    m /= buf.length;
+    for (let i = 0; i < buf.length; i++) buf[i] -= m;
+    return buf;
+  }
+
   /**
-   * Rééchantillonne chaque tour sur GRID points (0–360°) puis moyenne.
+   * Rééchantillonne chaque tour sur GRID, TSA inchangé, + résidus + residualRaw.
    */
   function _computeTsa(samples, fs, gRange, t0u32, tachAbs) {
     const N = samples.length;
     const periodUs = 1000000 / fs;
     const scale = gRange / 16384; // cohérent Harmonic / Bode (lsbPerG = 16384/g)
-    const out = { avg: null, nRevs: 0, meanRpm: 0 };
+    const out = {
+      avg: null, avgBrut: null, avgRes: null,
+      residualRaw: null, residualTachIdx: null,
+      nRevs: 0, meanRpm: 0,
+      stats: { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 },
+    };
     if (!tachAbs || tachAbs.length < 2) return out;
 
     const pairs = [];
@@ -227,6 +378,8 @@ const SyncModule = (() => {
     }
     pairs.sort(function (a, b) { return a.si - b.si; });
 
+    const revs = [];   // Float32Array GRID (avec DC)
+    const wins = [];   // { i0, nWin }
     const sum = new Float64Array(GRID);
     let nOk = 0;
     let rpmSum = 0;
@@ -241,7 +394,7 @@ const SyncModule = (() => {
       const rpm = 60000000 / dtUs;
       if (!(rpm > 60 && rpm < 100000)) continue;
 
-      // Interpoler linéairement sur grille angulaire
+      const rev = new Float32Array(GRID);
       for (let g = 0; g < GRID; g++) {
         const pos = (g / GRID) * nWin;
         const iA = Math.floor(pos);
@@ -249,37 +402,112 @@ const SyncModule = (() => {
         const f = pos - iA;
         const vA = samples[i0 + iA] * scale;
         const vB = samples[i0 + iB] * scale;
-        sum[g] += vA + (vB - vA) * f;
+        const v = vA + (vB - vA) * f;
+        rev[g] = v;
+        sum[g] += v;
       }
+      revs.push(rev);
+      wins.push({ i0: i0, nWin: nWin });
       nOk++;
       rpmSum += rpm;
     }
 
     if (!nOk) return out;
+
+    // TSA = moyenne puis retrait DC (comportement historique inchangé)
     const avg = new Float32Array(GRID);
     for (let g = 0; g < GRID; g++) avg[g] = sum[g] / nOk;
-    // Retirer DC
-    let mean = 0;
-    for (let g = 0; g < GRID; g++) mean += avg[g];
-    mean /= GRID;
-    for (let g = 0; g < GRID; g++) avg[g] -= mean;
+    _removeDc(avg);
+
+    // Brut = moyenne des tours AC (DC retiré par tour)
+    const sumBrut = new Float64Array(GRID);
+    const sumRes = new Float64Array(GRID);
+    const resRevs = [];
+    for (let k = 0; k < nOk; k++) {
+      const ac = new Float32Array(GRID);
+      let m = 0;
+      for (let g = 0; g < GRID; g++) m += revs[k][g];
+      m /= GRID;
+      for (let g = 0; g < GRID; g++) {
+        ac[g] = revs[k][g] - m;
+        sumBrut[g] += ac[g];
+        const r = ac[g] - avg[g];
+        sumRes[g] += r;
+        ac[g] = r; // réutilise pour stocker résidu tour
+      }
+      resRevs.push(ac);
+    }
+    const avgBrut = new Float32Array(GRID);
+    const avgRes = new Float32Array(GRID);
+    for (let g = 0; g < GRID; g++) {
+      avgBrut[g] = sumBrut[g] / nOk;
+      avgRes[g] = sumRes[g] / nOk;
+    }
+    _removeDc(avgBrut);
+    _removeDc(avgRes);
+
+    // Buffer temporel : brut / TSA / résiduel concaténés (fenêtres valides)
+    let totN = 0;
+    for (let k = 0; k < nOk; k++) totN += wins[k].nWin;
+    const brutF = new Float32Array(totN);
+    const tsaF = new Float32Array(totN);
+    const resF = new Float32Array(totN);
+    const resI16 = new Int16Array(totN);
+    const tachIdx = [];
+    let o = 0;
+    for (let k = 0; k < nOk; k++) {
+      tachIdx.push(o);
+      const i0 = wins[k].i0;
+      const nWin = wins[k].nWin;
+      const resRev = resRevs[k];
+      for (let i = 0; i < nWin; i++) {
+        const rawG = samples[i0 + i] * scale;
+        brutF[o + i] = rawG;
+        // TSA remappé angle → sample
+        const pos = (i / nWin) * GRID;
+        const iA = Math.floor(pos);
+        const iB = Math.min(GRID - 1, iA + 1);
+        const f = pos - iA;
+        const tsaV = avg[iA] + (avg[iB] - avg[iA]) * f;
+        tsaF[o + i] = tsaV;
+        const resV = resRev[iA] + (resRev[iB] - resRev[iA]) * f;
+        resF[o + i] = resV;
+        let q = Math.round(resV / scale);
+        if (q > 32767) q = 32767;
+        if (q < -32768) q = -32768;
+        resI16[o + i] = q;
+      }
+      o += nWin;
+    }
+    tachIdx.push(totN);
+
+    const rmsBrut = _rmsArr(brutF);
+    const rmsTsa = _rmsArr(tsaF);
+    const rmsRes = _rmsArr(resF);
+    const rPct = rmsBrut > 1e-12 ? (100 * rmsRes / rmsBrut) : 0;
 
     out.avg = avg;
+    out.avgBrut = avgBrut;
+    out.avgRes = avgRes;
+    out.residualRaw = resI16;
+    out.residualTachIdx = tachIdx;
     out.nRevs = nOk;
     out.meanRpm = rpmSum / nOk;
+    out.stats = { rmsBrut: rmsBrut, rmsTsa: rmsTsa, rmsRes: rmsRes, rPct: rPct };
     return out;
   }
 
   function _computeOrderFft() {
-    if (!_avg) return;
-    const n = _avg.length;
+    const avg = _activeAvg();
+    if (!avg) return;
+    const n = avg.length;
     _orderMag = new Float32Array(MAX_ORDER + 1);
     for (let k = 1; k <= MAX_ORDER && k < n / 2; k++) {
       let re = 0, im = 0;
       for (let i = 0; i < n; i++) {
         const ang = 2 * Math.PI * k * i / n;
-        re += _avg[i] * Math.cos(ang);
-        im -= _avg[i] * Math.sin(ang);
+        re += avg[i] * Math.cos(ang);
+        im -= avg[i] * Math.sin(ang);
       }
       re /= n;
       im /= n;
@@ -289,9 +517,10 @@ const SyncModule = (() => {
 
   function _ampMax() {
     let aMax = 0.1;
-    if (_avg) {
-      for (let i = 0; i < _avg.length; i++) {
-        const a = Math.abs(_avg[i]);
+    const avg = _activeAvg();
+    if (avg) {
+      for (let i = 0; i < avg.length; i++) {
+        const a = Math.abs(avg[i]);
         if (a > aMax) aMax = a;
       }
       aMax *= 1.15;
@@ -302,7 +531,8 @@ const SyncModule = (() => {
   function _updateCursorLine() {
     const el = document.getElementById('sync-cursor-line');
     if (!el) return;
-    if (_view !== 'trace' || _shape !== 'linear' || !_avg) {
+    const avg = _activeAvg();
+    if (_view !== 'trace' || _shape !== 'linear' || !avg) {
       el.textContent = '—';
       return;
     }
@@ -310,11 +540,11 @@ const SyncModule = (() => {
       el.textContent = 'Toucher / molette — zoom & curseur (°)';
       return;
     }
-    const n = _avg.length;
+    const n = avg.length;
     const idx = Math.max(0, Math.min(n - 1, Math.round((_linCursorDeg / 360) * n) % n));
-    const g = _avg[idx];
+    const g = avg[idx];
     el.textContent = 'Curseur  ' + _linCursorDeg.toFixed(1) + '°  |  ' +
-      g.toFixed(4) + ' g  |  zoom ' +
+      g.toFixed(4) + ' g  |  ' + _sourceLabel() + '  |  zoom ' +
       _linZMin.toFixed(0) + '–' + _linZMax.toFixed(0) + '°';
   }
 
@@ -334,7 +564,7 @@ const SyncModule = (() => {
     }
 
     cnv.addEventListener('pointerdown', function (e) {
-      if (_view !== 'trace' || _shape !== 'linear' || !_avg) return;
+      if (_view !== 'trace' || _shape !== 'linear' || !_activeAvg()) return;
       e.preventDefault();
       try { cnv.setPointerCapture(e.pointerId); } catch (err) {}
       _linPtr = { x0: e.clientX, z0: _linZMin, z1: _linZMax };
@@ -343,7 +573,7 @@ const SyncModule = (() => {
       _updateCursorLine();
     });
     cnv.addEventListener('pointermove', function (e) {
-      if (_view !== 'trace' || _shape !== 'linear' || !_avg) return;
+      if (_view !== 'trace' || _shape !== 'linear' || !_activeAvg()) return;
       if (_linPtr && (e.buttons || e.pointerType === 'touch')) {
         e.preventDefault();
         const rect = cnv.getBoundingClientRect();
@@ -366,7 +596,7 @@ const SyncModule = (() => {
     cnv.addEventListener('pointercancel', function () { _linPtr = null; });
 
     cnv.addEventListener('wheel', function (e) {
-      if (_view !== 'trace' || _shape !== 'linear' || !_avg) return;
+      if (_view !== 'trace' || _shape !== 'linear' || !_activeAvg()) return;
       e.preventDefault();
       const deg = degFromClientX(e.clientX);
       if (deg == null) return;
@@ -416,7 +646,7 @@ const SyncModule = (() => {
     c.fillStyle = '#444';
     c.font = '11px "Courier New", monospace';
     c.textAlign = 'left';
-    c.fillText('TSA — tour moyen (linéaire °)', P.l, 12);
+    c.fillText(_sourceLabel() + ' — tour moyen (linéaire °)', P.l, 12);
 
     function xOf(deg) { return P.l + ((deg - z0) / span) * gW; }
     function yOf(g) { return P.t + gH / 2 - (g / aMax) * (gH / 2); }
@@ -463,7 +693,8 @@ const SyncModule = (() => {
     c.textAlign = 'center';
     c.fillText('Angle (°)', P.l + gW / 2, H);
 
-    if (!_avg) {
+    const avg = _activeAvg();
+    if (!avg) {
       c.fillStyle = '#aaa';
       c.textAlign = 'center';
       c.fillText('—', P.l + gW / 2, P.t + gH / 2);
@@ -480,7 +711,7 @@ const SyncModule = (() => {
       c.beginPath(); c.moveTo(xT, P.t); c.lineTo(xT, P.t + gH); c.stroke();
     }
 
-    const n = _avg.length;
+    const n = avg.length;
     const i0 = Math.max(0, Math.floor((z0 / 360) * n));
     const i1 = Math.min(n - 1, Math.ceil((z1 / 360) * n));
     c.strokeStyle = COL;
@@ -490,7 +721,7 @@ const SyncModule = (() => {
     for (let i = i0; i <= i1; i++) {
       const deg = (i / n) * 360;
       const x = xOf(deg);
-      const y = yOf(_avg[i]);
+      const y = yOf(avg[i]);
       if (first) { c.moveTo(x, y); first = false; }
       else c.lineTo(x, y);
     }
@@ -506,7 +737,7 @@ const SyncModule = (() => {
       const idx = Math.max(0, Math.min(n - 1, Math.round((_linCursorDeg / 360) * n) % n));
       c.fillStyle = '#cc3300';
       c.beginPath();
-      c.arc(xc, yOf(_avg[idx]), 3.5, 0, 2 * Math.PI);
+      c.arc(xc, yOf(avg[idx]), 3.5, 0, 2 * Math.PI);
       c.fill();
     }
     c.restore();
@@ -532,9 +763,10 @@ const SyncModule = (() => {
     c.fillStyle = '#444';
     c.font = '11px "Courier New", monospace';
     c.textAlign = 'left';
-    c.fillText('TSA — tour moyen (polaire °)', 8, 14);
+    c.fillText(_sourceLabel() + ' — tour moyen (polaire °)', 8, 14);
 
     const aMax = _ampMax();
+    const avg = _activeAvg();
 
     // Cercles de référence (échelle ±aMax autour du rayon milieu)
     [0.25, 0.5, 0.75, 1.0].forEach(function (f) {
@@ -575,7 +807,7 @@ const SyncModule = (() => {
     c.fillStyle = '#bbb';
     c.fill();
 
-    if (!_avg) {
+    if (!avg) {
       c.fillStyle = '#aaa';
       c.font = '13px "Courier New", monospace';
       c.textAlign = 'center';
@@ -602,13 +834,13 @@ const SyncModule = (() => {
     c.strokeStyle = COL;
     c.lineWidth = 1.8;
     c.beginPath();
-    const n = _avg.length;
+    const n = avg.length;
     for (let i = 0; i <= n; i++) {
       const idx = i % n;
       const deg = (idx / n) * 360;
       // Convention Balance/Phase : 0° en haut, sens horaire
       const angRad = (deg - 90) * Math.PI / 180;
-      const rr = r0 + (_avg[idx] / aMax) * rSpan;
+      const rr = r0 + (avg[idx] / aMax) * rSpan;
       const px = cx + rr * Math.cos(angRad);
       const py = cy + rr * Math.sin(angRad);
       if (i === 0) c.moveTo(px, py);
@@ -617,7 +849,7 @@ const SyncModule = (() => {
     c.stroke();
 
     // Point 0° sur la courbe
-    const rStart = r0 + (_avg[0] / aMax) * rSpan;
+    const rStart = r0 + (avg[0] / aMax) * rSpan;
     c.beginPath();
     c.arc(cx, cy - rStart, 4, 0, 2 * Math.PI);
     c.fillStyle = '#e07000';
@@ -629,7 +861,7 @@ const SyncModule = (() => {
     else _drawPolar();
   }
 
-  function _drawFft() {
+  function _drawOrderFft() {
     if (!_fftCtx || !_fftCanvas) return;
     const c = _fftCtx;
     const W = _fftCanvas.width, H = _fftCanvas.height;
@@ -644,7 +876,7 @@ const SyncModule = (() => {
     c.fillStyle = '#444';
     c.font = '11px "Courier New", monospace';
     c.textAlign = 'left';
-    c.fillText('Spectre d\'ordres (g)', padL, 12);
+    c.fillText('Spectre d\'ordres — ' + _sourceLabel() + ' (g)', padL, 12);
 
     if (!_orderMag) {
       c.fillStyle = '#aaa';
@@ -681,6 +913,10 @@ const SyncModule = (() => {
     c.fillText('0', padL - 4, padT + gH + 3);
   }
 
+  function _drawFft() {
+    _drawOrderFft();
+  }
+
   function resize() {
     if (_view === 'trace' && _traceCanvas) {
       const wrap = document.getElementById('sync-trace-wrap');
@@ -701,25 +937,33 @@ const SyncModule = (() => {
         _fftCanvas.width = wrap.clientWidth;
         _fftCanvas.height = Math.max(160, wrap.clientHeight || 220);
       }
-      if (!_orderMag && _avg) _computeOrderFft();
+      if (_view === 'fft_order' && !_orderMag && _activeAvg()) _computeOrderFft();
       _drawFft();
     }
   }
 
   function clearResult() {
     _avg = null;
+    _avgBrut = null;
+    _avgRes = null;
     _orderMag = null;
     _nRevs = 0;
     _meanRpm = 0;
     _rawSamples = null;
     _tachUs = [];
     _rawMeta = null;
+    _residualRaw = null;
+    _residualTachIdx = null;
+    _source = 'tsa';
+    _stats = { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 };
+    _view = 'trace';
     _linZMin = 0;
     _linZMax = 360;
     _linCursorDeg = null;
     const info = document.getElementById('sync-mod-info');
     if (info) info.textContent = '—';
     _updateShapeBtn();
+    _updateSourceBtns();
     _updateCursorLine();
   }
 
@@ -738,8 +982,14 @@ const SyncModule = (() => {
     getAcqTiming: getAcqTiming,
     showTrace: showTrace,
     showOrderFft: showOrderFft,
+    exportRaw: exportRaw,
+    exportResidual: exportResidual,
+    exportForAnalyse: exportForAnalyse,
+    setSource: setSource,
+    getSource: getSource,
     toggleShape: toggleShape,
     getShape: getShape,
+    getView: getView,
     setStatus: setStatus,
     onTachPeriod: onTachPeriod,
     updateRpmBar: updateRpmBar,

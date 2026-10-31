@@ -442,24 +442,34 @@ const MenuModule = (() => {
             startAnalTemporal(g, fs);
           }
         };
-        if (_navGoto) {
+        const _tempoReady = () => {
+          _armTempo();
+          setTimeout(() => {
+            if (_switchTab) _switchTab('analyse');
+            if (typeof AnalSession !== 'undefined' && AnalSession.syncUi) {
+              AnalSession.syncUi();
+            }
+          }, 300);
+        };
+        // Duo : même chemin que Bump (A+B NAV_ACK) — évite Start sans B armé
+        if (typeof DualSession !== 'undefined' && DualSession.available &&
+            DualSession.available() && DualSession.startModule) {
+          DualSession.startModule('analyse', 'WS_GOTO=ANAL_TEMP', {
+            label: 'Temporel',
+            onReady: _tempoReady,
+            onFail: _tempoReady,
+          });
+        } else if (_navGoto) {
           _navGoto('analyse', 'WS_GOTO=ANAL_TEMP', {
-            onAck: () => {
-              _armTempo();
-              setTimeout(() => _switchTab('analyse'), 300);
-            },
+            onAck: _tempoReady,
             onTimeout: () => {
               console.warn('NAV timeout pour ANAL_TEMP');
-              _armTempo();
-              _switchTab('analyse');
+              _tempoReady();
             }
           });
         } else {
           _send('WS_GOTO=ANAL_TEMP\n');
-          setTimeout(() => {
-            _armTempo();
-            _switchTab('analyse');
-          }, 500);
+          setTimeout(_tempoReady, 500);
         }
 
         _path = [];
