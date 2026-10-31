@@ -1,7 +1,9 @@
 // sync.js — TSA : moyenne tours 0–360° + FFT ordres (JS only)
+// Mono A / mono B / duo AB (overlay bleu/orange).
 
 const SyncModule = (() => {
   const COL = '#0033cc';
+  const COL_B = '#e67e22';
   const GRID = 256;
   const TACH_STALE_MS = 1500;
   const MAX_ORDER = 32;
@@ -12,27 +14,39 @@ const SyncModule = (() => {
   let _gRange = 2;
   let _fs = 4000;
   let _nCfg = 45000;
+  let _dual = false;
+  let _showA = true;
+  let _showB = true;
 
   let _traceCanvas, _traceCtx;
   let _fftCanvas, _fftCtx;
-  let _avg = null;      // Float32Array GRID (g) — TSA
-  let _avgBrut = null;  // moyenne angulaire tours AC
-  let _avgRes = null;   // moyenne angulaire résidus
+  let _avg = null;      // Float32Array GRID (g) — TSA A
+  let _avgB = null;     // TSA B (duo)
   let _orderMag = null; // Float32Array MAX_ORDER+1
+  let _orderMagB = null;
   let _nRevs = 0;
+  let _nRevsB = 0;
   let _meanRpm = 0;
   let _rpm = 0;
   let _lastTachMs = 0;
-  /** 'brut' | 'tsa' | 'res' — source affichée / FFT / handoff */
-  let _source = 'tsa';
   let _stats = { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 };
+  let _statsB = { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 };
 
   let _rawSamples = null;
   let _rawMeta = null;
   let _tachUs = [];
-  /** Int16 résiduel temporel concaténé (tours valides) + indices tach sample */
+  let _tsaRaw = null;
+  let _tsaTachIdx = null;
   let _residualRaw = null;
   let _residualTachIdx = null;
+
+  let _rawSamplesB = null;
+  let _rawMetaB = null;
+  let _tachUsB = [];
+  let _tsaRawB = null;
+  let _tsaTachIdxB = null;
+  let _residualRawB = null;
+  let _residualTachIdxB = null;
 
   // Vue linéaire : zoom + curseur (degrés)
   let _linZMin = 0;
@@ -71,64 +85,75 @@ const SyncModule = (() => {
         toggleShape();
       });
     }
-    ['brut', 'tsa', 'res'].forEach(function (src) {
-      const b = document.getElementById('btn-sync-src-' + src);
-      if (b) {
-        b.addEventListener('click', function () { setSource(src); });
-      }
-    });
+    const bindAn = function (id, kind) {
+      const b = document.getElementById(id);
+      if (!b) return;
+      b.addEventListener('click', function () {
+        if (typeof SyncSession !== 'undefined' && SyncSession.handoffToAnalyse) {
+          SyncSession.handoffToAnalyse(kind);
+        }
+      });
+    };
+    bindAn('btn-sync-an-brut', 'brut');
+    bindAn('btn-sync-an-tsa', 'tsa');
+    bindAn('btn-sync-an-res', 'res');
+    const visA = document.getElementById('btn-sync-vis-a');
+    const visB = document.getElementById('btn-sync-vis-b');
+    if (visA) visA.addEventListener('click', function () { toggleVis('A'); });
+    if (visB) visB.addEventListener('click', function () { toggleVis('B'); });
     _bindLinearInteractions();
     window.addEventListener('resize', resize);
     _applyLayout();
     resize();
   }
 
-  function _activeAvg() {
-    if (_source === 'brut') return _avgBrut || _avg;
-    if (_source === 'res') return _avgRes || _avg;
-    return _avg;
+  function setDual(on) {
+    _dual = !!on;
+    if (!_dual) { _showA = true; _showB = true; }
+    _syncVisUi();
   }
 
-  function _sourceLabel() {
-    if (_source === 'brut') return 'Brut';
-    if (_source === 'res') return 'Résiduel';
-    return 'TSA';
-  }
-
-  function setSource(src) {
-    if (src !== 'brut' && src !== 'tsa' && src !== 'res') return;
-    _source = src;
-    _orderMag = null;
-    _updateSourceBtns();
-    _updateInfoLine();
-    if (_view === 'fft_order') _computeOrderFft();
-    resize();
+  function toggleVis(ch) {
+    if (ch === 'A') _showA = !_showA;
+    else if (ch === 'B') _showB = !_showB;
+    if (!_showA && !_showB) {
+      if (ch === 'A') _showB = true;
+      else _showA = true;
+    }
+    _syncVisUi();
+    if (_view === 'trace') _drawTrace();
+    else _drawFft();
     _updateCursorLine();
   }
 
-  function getSource() { return _source; }
+  function _syncVisUi() {
+    const row = document.getElementById('sync-vis-row');
+    if (row) row.style.display = _dual ? 'flex' : 'none';
+    const visA = document.getElementById('btn-sync-vis-a');
+    const visB = document.getElementById('btn-sync-vis-b');
+    if (visA) visA.classList.toggle('active', _showA);
+    if (visB) visB.classList.toggle('active', _showB);
+  }
 
-  function _updateSourceBtns() {
-    const row = document.getElementById('sync-src-row');
-    const has = !!_avg;
-    if (row) row.style.display = has ? 'flex' : 'none';
-    ['brut', 'tsa', 'res'].forEach(function (src) {
-      const b = document.getElementById('btn-sync-src-' + src);
-      if (b) b.classList.toggle('active', _source === src);
-    });
+  function _hasTrace() {
+    return !!((_showA && _avg) || (_dual && _showB && _avgB));
+  }
+
+  function _updateAnalyseBtns(on) {
+    const row = document.getElementById('sync-analyse-row');
+    if (row) row.style.display = on ? 'flex' : 'none';
   }
 
   function _updateShapeBtn() {
     const shapeBtn = document.getElementById('btn-sync-shape');
     if (!shapeBtn) return;
-    const show = _view === 'trace' && !!_activeAvg();
+    const show = _view === 'trace' && _hasTrace();
     shapeBtn.style.display = show ? 'inline-block' : 'none';
-    // Label = action (passer à l'autre vue)
     shapeBtn.textContent = _shape === 'polar' ? 'Linéaire' : 'Polaire';
   }
 
   function toggleShape() {
-    if (_view !== 'trace' || !_activeAvg()) return;
+    if (_view !== 'trace' || !_hasTrace()) return;
     _shape = (_shape === 'polar') ? 'linear' : 'polar';
     if (_shape === 'linear') {
       _linZMin = 0;
@@ -182,7 +207,7 @@ const SyncModule = (() => {
 
   function showOrderFft() {
     _view = 'fft_order';
-    if (!_orderMag && _activeAvg()) _computeOrderFft();
+    if ((_avg && !_orderMag) || (_avgB && !_orderMagB)) _computeOrderFft();
     _applyLayout();
     resize();
   }
@@ -190,66 +215,100 @@ const SyncModule = (() => {
   function getView() { return _view; }
   function getShape() { return _shape; }
 
-  /**
-   * Payload pour AnalSession.importBuffer — buffer Sync brut + indices tach.
-   * Ne consomme pas / ne vide pas les données Sync.
-   */
-  function exportRaw() {
-    if (!_rawSamples || !_rawSamples.length) return null;
-    const fs = (_rawMeta && _rawMeta.fs) || _fs;
-    const g = (_rawMeta && _rawMeta.g) || _gRange;
-    const t0 = (_rawMeta && _rawMeta.t0) || 0;
-    const n = _rawSamples.length;
+  function _payloadMeta() {
+    const fs = (_rawMeta && _rawMeta.fs) || (_rawMetaB && _rawMetaB.fs) || _fs;
+    const g = (_rawMeta && _rawMeta.g) || (_rawMetaB && _rawMetaB.g) || _gRange;
     if (!(fs > 0) || !(g > 0)) return null;
-    const tachIdx = [];
-    if (_tachUs && _tachUs.length) {
-      const periodUs = 1000000 / fs;
-      const t0u = t0 >>> 0;
-      for (let i = 0; i < _tachUs.length; i++) {
-        const tu = _tachUs[i] >>> 0;
-        const rel = (tu - t0u) >>> 0;
-        const si = Math.floor(rel / periodUs);
-        if (si >= 0 && si < n) tachIdx.push(si);
-      }
+    return { fs: fs, g: g };
+  }
+
+  function _makePayload(samples, tachIdx, sourceTag, samplesB, tachIdxB) {
+    const meta = _payloadMeta();
+    if (!meta || !samples || !samples.length) return null;
+    const n = samples.length;
+    const out = {
+      g: meta.g,
+      fs: meta.fs,
+      n: n,
+      t: n / meta.fs,
+      samples: samples,
+      tachIdx: tachIdx || [],
+      source: sourceTag,
+      view: 'fft',
+    };
+    if (samplesB && samplesB.length) {
+      out.samplesB = samplesB;
+      out.tachIdxB = tachIdxB || [];
+      out.nB = samplesB.length;
+      out.tB = samplesB.length / meta.fs;
     }
-    return {
-      g: g,
-      fs: fs,
-      n: n,
-      t: n / fs,
-      samples: _rawSamples,
-      tachIdx: tachIdx,
-      source: 'sync',
-    };
+    return out;
   }
 
-  /**
-   * Buffer temporel résiduel (int16) pour handoff Analyse.
-   */
+  function _tachIdxFromUs(samples, tachUs, meta, rawMeta) {
+    if (!samples || !meta) return [];
+    const t0 = (rawMeta && rawMeta.t0) || 0;
+    const n = samples.length;
+    const tachIdx = [];
+    const periodUs = 1000000 / meta.fs;
+    const t0u = t0 >>> 0;
+    for (let i = 0; i < (tachUs || []).length; i++) {
+      const tu = tachUs[i] >>> 0;
+      const si = Math.floor(((tu - t0u) >>> 0) / periodUs);
+      if (si >= 0 && si < n) tachIdx.push(si);
+    }
+    return tachIdx;
+  }
+
+  /** 1) Brut = acquisition Sync entière (temporel pur). */
+  function exportBrut() {
+    const meta = _payloadMeta();
+    if (!meta) return null;
+    // Primaire = A si présent, sinon B (timeout partiel dual)
+    const pri = (_rawSamples && _rawSamples.length) ? _rawSamples : null;
+    const sec = (_rawSamplesB && _rawSamplesB.length) ? _rawSamplesB : null;
+    if (!pri && !sec) return null;
+    if (pri) {
+      return _makePayload(
+        pri, _tachIdxFromUs(pri, _tachUs, meta, _rawMeta), 'sync-brut',
+        (_dual && sec) ? sec : null,
+        (_dual && sec) ? _tachIdxFromUs(sec, _tachUsB, meta, _rawMetaB) : null
+      );
+    }
+    return _makePayload(
+      sec, _tachIdxFromUs(sec, _tachUsB, meta, _rawMetaB), 'sync-brut',
+      null, null
+    );
+  }
+
+  /** 2) TSA = moyenne angulaire remappée sur chaque tour, concaténée. */
+  function exportTsa() {
+    const pri = _tsaRaw;
+    const sec = _tsaRawB;
+    if (pri && pri.length) {
+      return _makePayload(pri, _tsaTachIdx, 'sync-tsa',
+        (_dual && sec) ? sec : null, (_dual && sec) ? _tsaTachIdxB : null);
+    }
+    if (sec && sec.length) return _makePayload(sec, _tsaTachIdxB, 'sync-tsa', null, null);
+    return null;
+  }
+
+  /** 3) Résiduel = (tour_k − TSA) pour chaque tour, concaténé. */
   function exportResidual() {
-    if (!_residualRaw || !_residualRaw.length) return null;
-    const fs = (_rawMeta && _rawMeta.fs) || _fs;
-    const g = (_rawMeta && _rawMeta.g) || _gRange;
-    if (!(fs > 0) || !(g > 0)) return null;
-    const n = _residualRaw.length;
-    return {
-      g: g,
-      fs: fs,
-      n: n,
-      t: n / fs,
-      samples: _residualRaw,
-      tachIdx: (_residualTachIdx && _residualTachIdx.length)
-        ? _residualTachIdx.slice()
-        : [],
-      source: 'sync-res',
-    };
+    const pri = _residualRaw;
+    const sec = _residualRawB;
+    if (pri && pri.length) {
+      return _makePayload(pri, _residualTachIdx, 'sync-res',
+        (_dual && sec) ? sec : null, (_dual && sec) ? _residualTachIdxB : null);
+    }
+    if (sec && sec.length) {
+      return _makePayload(sec, _residualTachIdxB, 'sync-res', null, null);
+    }
+    return null;
   }
 
-  /** Export selon source UI (Résiduel → residual, sinon brut). */
-  function exportForAnalyse() {
-    if (_source === 'res') return exportResidual();
-    return exportRaw();
-  }
+  /** Compat anciens appels. */
+  function exportRaw() { return exportBrut(); }
 
   function setStatus(text) {
     const el = document.getElementById('sync-status');
@@ -277,60 +336,117 @@ const SyncModule = (() => {
     _rawMeta = Object.assign({}, meta || {});
     _rawSamples = null;
     _tachUs = [];
+    _tsaRaw = null;
+    _tsaTachIdx = null;
+    _residualRaw = null;
+    _residualTachIdx = null;
     if (_rawMeta.g) _gRange = _rawMeta.g;
     if (_rawMeta.fs) _fs = _rawMeta.fs;
+  }
+
+  function beginBinaryB(meta) {
+    _rawMetaB = Object.assign({}, meta || {});
+    _rawSamplesB = null;
+    _tachUsB = [];
+    _tsaRawB = null;
+    _tsaTachIdxB = null;
+    _residualRawB = null;
+    _residualTachIdxB = null;
+    if (_rawMetaB.g) _gRange = _rawMetaB.g;
+    if (_rawMetaB.fs) _fs = _rawMetaB.fs;
   }
 
   function onSamples(int16arr) {
     _rawSamples = int16arr;
   }
 
+  function onSamplesB(int16arr) {
+    _rawSamplesB = int16arr;
+  }
+
   function onTachUs(list) {
     _tachUs = list || [];
   }
 
+  function onTachUsB(list) {
+    _tachUsB = list || [];
+  }
+
   function finalizeFromRaw() {
-    if (!_rawSamples || !_rawSamples.length) {
+    const hasA = _rawSamples && _rawSamples.length;
+    const hasB = _dual && _rawSamplesB && _rawSamplesB.length;
+    if (!hasA && !hasB) {
       setStatus('Buffer vide');
       return false;
     }
-    const fs = (_rawMeta && _rawMeta.fs) || _fs;
-    const g = (_rawMeta && _rawMeta.g) || _gRange;
-    const t0 = (_rawMeta && _rawMeta.t0) || 0;
-    const r = _computeTsa(_rawSamples, fs, g, t0, _tachUs);
-    _avg = r.avg;
-    _avgBrut = r.avgBrut;
-    _avgRes = r.avgRes;
-    _residualRaw = r.residualRaw;
-    _residualTachIdx = r.residualTachIdx;
-    _stats = r.stats || { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 };
-    _nRevs = r.nRevs;
-    _meanRpm = r.meanRpm;
+    _avg = null;
+    _avgB = null;
     _orderMag = null;
-    _source = 'tsa';
+    _orderMagB = null;
+    _nRevs = 0;
+    _nRevsB = 0;
+
+    if (hasA) {
+      const fs = (_rawMeta && _rawMeta.fs) || _fs;
+      const g = (_rawMeta && _rawMeta.g) || _gRange;
+      const t0 = (_rawMeta && _rawMeta.t0) || 0;
+      const r = _computeTsa(_rawSamples, fs, g, t0, _tachUs);
+      _avg = r.avg;
+      _tsaRaw = r.tsaRaw;
+      _tsaTachIdx = r.tsaTachIdx;
+      _residualRaw = r.residualRaw;
+      _residualTachIdx = r.residualTachIdx;
+      _stats = r.stats || { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 };
+      _nRevs = r.nRevs;
+      _meanRpm = r.meanRpm;
+    }
+    if (hasB) {
+      const fsB = (_rawMetaB && _rawMetaB.fs) || _fs;
+      const gB = (_rawMetaB && _rawMetaB.g) || _gRange;
+      const t0B = (_rawMetaB && _rawMetaB.t0) || 0;
+      const rB = _computeTsa(_rawSamplesB, fsB, gB, t0B, _tachUsB);
+      _avgB = rB.avg;
+      _tsaRawB = rB.tsaRaw;
+      _tsaTachIdxB = rB.tsaTachIdx;
+      _residualRawB = rB.residualRaw;
+      _residualTachIdxB = rB.residualTachIdx;
+      _statsB = rB.stats || { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 };
+      _nRevsB = rB.nRevs;
+      if (!_meanRpm && rB.meanRpm > 0) _meanRpm = rB.meanRpm;
+    }
     if (_meanRpm > 0) updateRpmBar(_meanRpm);
 
+    const ok = (_nRevs > 0) || (_nRevsB > 0);
     _updateInfoLine();
-    _updateSourceBtns();
     showTrace();
     _updateShapeBtn();
-    setStatus(_nRevs
-      ? ('TSA — ' + _nRevs + ' tours  R%=' + _stats.rPct.toFixed(1))
+    _updateAnalyseBtns(ok);
+    setStatus(ok
+      ? (_dual
+        ? ('TSA DOUBLE — A:' + _nRevs + ' B:' + _nRevsB + ' tours')
+        : ('TSA — ' + _nRevs + ' tours  R%=' + _stats.rPct.toFixed(1)))
       : 'Pas assez de tours tach');
-    return _nRevs > 0;
+    return ok;
   }
 
   function _updateInfoLine() {
     const info = document.getElementById('sync-mod-info');
     if (!info) return;
-    const fs = (_rawMeta && _rawMeta.fs) || _fs;
-    if (!_nRevs) {
+    const fs = (_rawMeta && _rawMeta.fs) || (_rawMetaB && _rawMetaB.fs) || _fs;
+    if (!_nRevs && !_nRevsB) {
       info.textContent = '—';
       return;
     }
+    if (_dual) {
+      info.textContent =
+        'TSA DOUBLE  A: tours=' + _nRevs + ' R%=' + _stats.rPct.toFixed(1) +
+        '  |  B: tours=' + _nRevsB + ' R%=' + _statsB.rPct.toFixed(1) +
+        '  RPM=' + Math.round(_meanRpm) +
+        '  FS=' + Math.round(fs);
+      return;
+    }
     info.textContent =
-      _sourceLabel() +
-      '  Tours=' + _nRevs +
+      'TSA  Tours=' + _nRevs +
       '  RPM=' + Math.round(_meanRpm) +
       '  RMS_b=' + _stats.rmsBrut.toFixed(4) +
       '  RMS_t=' + _stats.rmsTsa.toFixed(4) +
@@ -355,14 +471,16 @@ const SyncModule = (() => {
   }
 
   /**
-   * Rééchantillonne chaque tour sur GRID, TSA inchangé, + résidus + residualRaw.
+   * TSA angulaire + buffers temporels TSA/résiduel pour Analyse.
+   * Soustraction : pour chaque tour k, res_k(θ) = AC(tour_k)(θ) − TSA(θ).
    */
   function _computeTsa(samples, fs, gRange, t0u32, tachAbs) {
     const N = samples.length;
     const periodUs = 1000000 / fs;
-    const scale = gRange / 16384; // cohérent Harmonic / Bode (lsbPerG = 16384/g)
+    const scale = gRange / 16384;
     const out = {
-      avg: null, avgBrut: null, avgRes: null,
+      avg: null,
+      tsaRaw: null, tsaTachIdx: null,
       residualRaw: null, residualTachIdx: null,
       nRevs: 0, meanRpm: 0,
       stats: { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 },
@@ -378,8 +496,8 @@ const SyncModule = (() => {
     }
     pairs.sort(function (a, b) { return a.si - b.si; });
 
-    const revs = [];   // Float32Array GRID (avec DC)
-    const wins = [];   // { i0, nWin }
+    const revs = [];
+    const wins = [];
     const sum = new Float64Array(GRID);
     let nOk = 0;
     let rpmSum = 0;
@@ -400,9 +518,8 @@ const SyncModule = (() => {
         const iA = Math.floor(pos);
         const iB = Math.min(nWin - 1, iA + 1);
         const f = pos - iA;
-        const vA = samples[i0 + iA] * scale;
-        const vB = samples[i0 + iB] * scale;
-        const v = vA + (vB - vA) * f;
+        const v = samples[i0 + iA] * scale +
+          (samples[i0 + iB] * scale - samples[i0 + iA] * scale) * f;
         rev[g] = v;
         sum[g] += v;
       }
@@ -414,47 +531,39 @@ const SyncModule = (() => {
 
     if (!nOk) return out;
 
-    // TSA = moyenne puis retrait DC (comportement historique inchangé)
     const avg = new Float32Array(GRID);
     for (let g = 0; g < GRID; g++) avg[g] = sum[g] / nOk;
     _removeDc(avg);
 
-    // Brut = moyenne des tours AC (DC retiré par tour)
-    const sumBrut = new Float64Array(GRID);
-    const sumRes = new Float64Array(GRID);
     const resRevs = [];
     for (let k = 0; k < nOk; k++) {
-      const ac = new Float32Array(GRID);
       let m = 0;
       for (let g = 0; g < GRID; g++) m += revs[k][g];
       m /= GRID;
+      const res = new Float32Array(GRID);
       for (let g = 0; g < GRID; g++) {
-        ac[g] = revs[k][g] - m;
-        sumBrut[g] += ac[g];
-        const r = ac[g] - avg[g];
-        sumRes[g] += r;
-        ac[g] = r; // réutilise pour stocker résidu tour
+        res[g] = (revs[k][g] - m) - avg[g];
       }
-      resRevs.push(ac);
+      resRevs.push(res);
     }
-    const avgBrut = new Float32Array(GRID);
-    const avgRes = new Float32Array(GRID);
-    for (let g = 0; g < GRID; g++) {
-      avgBrut[g] = sumBrut[g] / nOk;
-      avgRes[g] = sumRes[g] / nOk;
-    }
-    _removeDc(avgBrut);
-    _removeDc(avgRes);
 
-    // Buffer temporel : brut / TSA / résiduel concaténés (fenêtres valides)
     let totN = 0;
     for (let k = 0; k < nOk; k++) totN += wins[k].nWin;
     const brutF = new Float32Array(totN);
     const tsaF = new Float32Array(totN);
     const resF = new Float32Array(totN);
+    const tsaI16 = new Int16Array(totN);
     const resI16 = new Int16Array(totN);
     const tachIdx = [];
     let o = 0;
+
+    function quantize(gVal) {
+      let q = Math.round(gVal / scale);
+      if (q > 32767) q = 32767;
+      if (q < -32768) q = -32768;
+      return q;
+    }
+
     for (let k = 0; k < nOk; k++) {
       tachIdx.push(o);
       const i0 = wins[k].i0;
@@ -463,19 +572,16 @@ const SyncModule = (() => {
       for (let i = 0; i < nWin; i++) {
         const rawG = samples[i0 + i] * scale;
         brutF[o + i] = rawG;
-        // TSA remappé angle → sample
         const pos = (i / nWin) * GRID;
         const iA = Math.floor(pos);
         const iB = Math.min(GRID - 1, iA + 1);
         const f = pos - iA;
         const tsaV = avg[iA] + (avg[iB] - avg[iA]) * f;
-        tsaF[o + i] = tsaV;
         const resV = resRev[iA] + (resRev[iB] - resRev[iA]) * f;
+        tsaF[o + i] = tsaV;
         resF[o + i] = resV;
-        let q = Math.round(resV / scale);
-        if (q > 32767) q = 32767;
-        if (q < -32768) q = -32768;
-        resI16[o + i] = q;
+        tsaI16[o + i] = quantize(tsaV);
+        resI16[o + i] = quantize(resV);
       }
       o += nWin;
     }
@@ -484,24 +590,27 @@ const SyncModule = (() => {
     const rmsBrut = _rmsArr(brutF);
     const rmsTsa = _rmsArr(tsaF);
     const rmsRes = _rmsArr(resF);
-    const rPct = rmsBrut > 1e-12 ? (100 * rmsRes / rmsBrut) : 0;
 
     out.avg = avg;
-    out.avgBrut = avgBrut;
-    out.avgRes = avgRes;
+    out.tsaRaw = tsaI16;
+    out.tsaTachIdx = tachIdx.slice();
     out.residualRaw = resI16;
-    out.residualTachIdx = tachIdx;
+    out.residualTachIdx = tachIdx.slice();
     out.nRevs = nOk;
     out.meanRpm = rpmSum / nOk;
-    out.stats = { rmsBrut: rmsBrut, rmsTsa: rmsTsa, rmsRes: rmsRes, rPct: rPct };
+    out.stats = {
+      rmsBrut: rmsBrut,
+      rmsTsa: rmsTsa,
+      rmsRes: rmsRes,
+      rPct: rmsBrut > 1e-12 ? (100 * rmsRes / rmsBrut) : 0,
+    };
     return out;
   }
 
-  function _computeOrderFft() {
-    const avg = _activeAvg();
-    if (!avg) return;
+  function _fftFromAvg(avg) {
+    if (!avg) return null;
     const n = avg.length;
-    _orderMag = new Float32Array(MAX_ORDER + 1);
+    const mag = new Float32Array(MAX_ORDER + 1);
     for (let k = 1; k <= MAX_ORDER && k < n / 2; k++) {
       let re = 0, im = 0;
       for (let i = 0; i < n; i++) {
@@ -511,27 +620,40 @@ const SyncModule = (() => {
       }
       re /= n;
       im /= n;
-      _orderMag[k] = 2 * Math.sqrt(re * re + im * im);
+      mag[k] = 2 * Math.sqrt(re * re + im * im);
     }
+    return mag;
+  }
+
+  function _computeOrderFft() {
+    if (_avg) _orderMag = _fftFromAvg(_avg);
+    if (_avgB) _orderMagB = _fftFromAvg(_avgB);
   }
 
   function _ampMax() {
     let aMax = 0.1;
-    const avg = _activeAvg();
-    if (avg) {
+    function scan(avg) {
+      if (!avg) return;
       for (let i = 0; i < avg.length; i++) {
         const a = Math.abs(avg[i]);
         if (a > aMax) aMax = a;
       }
-      aMax *= 1.15;
     }
-    return aMax;
+    if (_showA) scan(_avg);
+    if (_dual && _showB) scan(_avgB);
+    return aMax * 1.15;
+  }
+
+  function _primaryAvg() {
+    if (_showA && _avg) return _avg;
+    if (_dual && _showB && _avgB) return _avgB;
+    return _avg || _avgB;
   }
 
   function _updateCursorLine() {
     const el = document.getElementById('sync-cursor-line');
     if (!el) return;
-    const avg = _activeAvg();
+    const avg = _primaryAvg();
     if (_view !== 'trace' || _shape !== 'linear' || !avg) {
       el.textContent = '—';
       return;
@@ -542,10 +664,15 @@ const SyncModule = (() => {
     }
     const n = avg.length;
     const idx = Math.max(0, Math.min(n - 1, Math.round((_linCursorDeg / 360) * n) % n));
-    const g = avg[idx];
-    el.textContent = 'Curseur  ' + _linCursorDeg.toFixed(1) + '°  |  ' +
-      g.toFixed(4) + ' g  |  ' + _sourceLabel() + '  |  zoom ' +
-      _linZMin.toFixed(0) + '–' + _linZMax.toFixed(0) + '°';
+    let txt = 'Curseur  ' + _linCursorDeg.toFixed(1) + '°';
+    if (_showA && _avg) txt += '  |  A ' + _avg[idx].toFixed(4) + ' g';
+    if (_dual && _showB && _avgB) {
+      const idxB = Math.max(0, Math.min(_avgB.length - 1,
+        Math.round((_linCursorDeg / 360) * _avgB.length) % _avgB.length));
+      txt += '  |  B ' + _avgB[idxB].toFixed(4) + ' g';
+    }
+    txt += '  |  zoom ' + _linZMin.toFixed(0) + '–' + _linZMax.toFixed(0) + '°';
+    el.textContent = txt;
   }
 
   function _bindLinearInteractions() {
@@ -564,7 +691,7 @@ const SyncModule = (() => {
     }
 
     cnv.addEventListener('pointerdown', function (e) {
-      if (_view !== 'trace' || _shape !== 'linear' || !_activeAvg()) return;
+      if (_view !== 'trace' || _shape !== 'linear' || !_hasTrace()) return;
       e.preventDefault();
       try { cnv.setPointerCapture(e.pointerId); } catch (err) {}
       _linPtr = { x0: e.clientX, z0: _linZMin, z1: _linZMax };
@@ -573,7 +700,7 @@ const SyncModule = (() => {
       _updateCursorLine();
     });
     cnv.addEventListener('pointermove', function (e) {
-      if (_view !== 'trace' || _shape !== 'linear' || !_activeAvg()) return;
+      if (_view !== 'trace' || _shape !== 'linear' || !_hasTrace()) return;
       if (_linPtr && (e.buttons || e.pointerType === 'touch')) {
         e.preventDefault();
         const rect = cnv.getBoundingClientRect();
@@ -596,7 +723,7 @@ const SyncModule = (() => {
     cnv.addEventListener('pointercancel', function () { _linPtr = null; });
 
     cnv.addEventListener('wheel', function (e) {
-      if (_view !== 'trace' || _shape !== 'linear' || !_activeAvg()) return;
+      if (_view !== 'trace' || _shape !== 'linear' || !_hasTrace()) return;
       e.preventDefault();
       const deg = degFromClientX(e.clientX);
       if (deg == null) return;
@@ -646,7 +773,7 @@ const SyncModule = (() => {
     c.fillStyle = '#444';
     c.font = '11px "Courier New", monospace';
     c.textAlign = 'left';
-    c.fillText(_sourceLabel() + ' — tour moyen (linéaire °)', P.l, 12);
+    c.fillText('TSA — tour moyen (linéaire °)', P.l, 12);
 
     function xOf(deg) { return P.l + ((deg - z0) / span) * gW; }
     function yOf(g) { return P.t + gH / 2 - (g / aMax) * (gH / 2); }
@@ -693,8 +820,7 @@ const SyncModule = (() => {
     c.textAlign = 'center';
     c.fillText('Angle (°)', P.l + gW / 2, H);
 
-    const avg = _activeAvg();
-    if (!avg) {
+    if (!_hasTrace()) {
       c.fillStyle = '#aaa';
       c.textAlign = 'center';
       c.fillText('—', P.l + gW / 2, P.t + gH / 2);
@@ -703,7 +829,6 @@ const SyncModule = (() => {
 
     c.save();
     c.beginPath(); c.rect(P.l, P.t, gW, gH); c.clip();
-    // Marqueur 0° (tach) si dans la fenêtre
     if (0 >= z0 && 0 <= z1) {
       const xT = xOf(0);
       c.strokeStyle = '#e07000';
@@ -711,21 +836,26 @@ const SyncModule = (() => {
       c.beginPath(); c.moveTo(xT, P.t); c.lineTo(xT, P.t + gH); c.stroke();
     }
 
-    const n = avg.length;
-    const i0 = Math.max(0, Math.floor((z0 / 360) * n));
-    const i1 = Math.min(n - 1, Math.ceil((z1 / 360) * n));
-    c.strokeStyle = COL;
-    c.lineWidth = 1.6;
-    c.beginPath();
-    let first = true;
-    for (let i = i0; i <= i1; i++) {
-      const deg = (i / n) * 360;
-      const x = xOf(deg);
-      const y = yOf(avg[i]);
-      if (first) { c.moveTo(x, y); first = false; }
-      else c.lineTo(x, y);
+    function strokeAvg(avg, color) {
+      if (!avg) return;
+      const n = avg.length;
+      const i0 = Math.max(0, Math.floor((z0 / 360) * n));
+      const i1 = Math.min(n - 1, Math.ceil((z1 / 360) * n));
+      c.strokeStyle = color;
+      c.lineWidth = 1.6;
+      c.beginPath();
+      let first = true;
+      for (let i = i0; i <= i1; i++) {
+        const deg = (i / n) * 360;
+        const x = xOf(deg);
+        const y = yOf(avg[i]);
+        if (first) { c.moveTo(x, y); first = false; }
+        else c.lineTo(x, y);
+      }
+      c.stroke();
     }
-    c.stroke();
+    if (_showA) strokeAvg(_avg, COL);
+    if (_dual && _showB) strokeAvg(_avgB, COL_B);
 
     if (_linCursorDeg != null && _linCursorDeg >= z0 && _linCursorDeg <= z1) {
       const xc = xOf(_linCursorDeg);
@@ -734,11 +864,15 @@ const SyncModule = (() => {
       c.setLineDash([4, 3]);
       c.beginPath(); c.moveTo(xc, P.t); c.lineTo(xc, P.t + gH); c.stroke();
       c.setLineDash([]);
-      const idx = Math.max(0, Math.min(n - 1, Math.round((_linCursorDeg / 360) * n) % n));
-      c.fillStyle = '#cc3300';
-      c.beginPath();
-      c.arc(xc, yOf(avg[idx]), 3.5, 0, 2 * Math.PI);
-      c.fill();
+      const avg = _primaryAvg();
+      if (avg) {
+        const n = avg.length;
+        const idx = Math.max(0, Math.min(n - 1, Math.round((_linCursorDeg / 360) * n) % n));
+        c.fillStyle = '#cc3300';
+        c.beginPath();
+        c.arc(xc, yOf(avg[idx]), 3.5, 0, 2 * Math.PI);
+        c.fill();
+      }
     }
     c.restore();
   }
@@ -763,12 +897,10 @@ const SyncModule = (() => {
     c.fillStyle = '#444';
     c.font = '11px "Courier New", monospace';
     c.textAlign = 'left';
-    c.fillText(_sourceLabel() + ' — tour moyen (polaire °)', 8, 14);
+    c.fillText('TSA — tour moyen (polaire °)', 8, 14);
 
     const aMax = _ampMax();
-    const avg = _activeAvg();
 
-    // Cercles de référence (échelle ±aMax autour du rayon milieu)
     [0.25, 0.5, 0.75, 1.0].forEach(function (f) {
       c.strokeStyle = f === 1.0 ? '#999' : '#ddd';
       c.setLineDash(f === 1.0 ? [] : [4, 5]);
@@ -783,7 +915,6 @@ const SyncModule = (() => {
     c.textAlign = 'left';
     c.fillText('±' + aMax.toFixed(3) + 'g', cx + R + 2, cy - 2);
 
-    // Axes + labels degrés (0° haut, 90° droite)
     c.strokeStyle = '#ccc';
     c.lineWidth = 0.8;
     [[0, -1], [1, 0], [0, 1], [-1, 0]].forEach(function (d) {
@@ -807,7 +938,7 @@ const SyncModule = (() => {
     c.fillStyle = '#bbb';
     c.fill();
 
-    if (!avg) {
+    if (!_hasTrace()) {
       c.fillStyle = '#aaa';
       c.font = '13px "Courier New", monospace';
       c.textAlign = 'center';
@@ -815,11 +946,9 @@ const SyncModule = (() => {
       return;
     }
 
-    // Cercle de base (0 g) à R/2 ; signal ±aMax → [0 .. R]
     const r0 = R * 0.5;
     const rSpan = R * 0.5;
 
-    // Marqueur tach (0°)
     c.strokeStyle = '#e07000';
     c.lineWidth = 1.5;
     c.beginPath();
@@ -831,29 +960,35 @@ const SyncModule = (() => {
     c.textAlign = 'center';
     c.fillText('tach', cx, cy - R - 22);
 
-    c.strokeStyle = COL;
-    c.lineWidth = 1.8;
-    c.beginPath();
-    const n = avg.length;
-    for (let i = 0; i <= n; i++) {
-      const idx = i % n;
-      const deg = (idx / n) * 360;
-      // Convention Balance/Phase : 0° en haut, sens horaire
-      const angRad = (deg - 90) * Math.PI / 180;
-      const rr = r0 + (avg[idx] / aMax) * rSpan;
-      const px = cx + rr * Math.cos(angRad);
-      const py = cy + rr * Math.sin(angRad);
-      if (i === 0) c.moveTo(px, py);
-      else c.lineTo(px, py);
+    function strokePolar(avg, color) {
+      if (!avg) return;
+      c.strokeStyle = color;
+      c.lineWidth = 1.8;
+      c.beginPath();
+      const n = avg.length;
+      for (let i = 0; i <= n; i++) {
+        const idx = i % n;
+        const deg = (idx / n) * 360;
+        const angRad = (deg - 90) * Math.PI / 180;
+        const rr = r0 + (avg[idx] / aMax) * rSpan;
+        const px = cx + rr * Math.cos(angRad);
+        const py = cy + rr * Math.sin(angRad);
+        if (i === 0) c.moveTo(px, py);
+        else c.lineTo(px, py);
+      }
+      c.stroke();
     }
-    c.stroke();
+    if (_showA) strokePolar(_avg, COL);
+    if (_dual && _showB) strokePolar(_avgB, COL_B);
 
-    // Point 0° sur la courbe
-    const rStart = r0 + (avg[0] / aMax) * rSpan;
-    c.beginPath();
-    c.arc(cx, cy - rStart, 4, 0, 2 * Math.PI);
-    c.fillStyle = '#e07000';
-    c.fill();
+    const avg0 = _primaryAvg();
+    if (avg0) {
+      const rStart = r0 + (avg0[0] / aMax) * rSpan;
+      c.beginPath();
+      c.arc(cx, cy - rStart, 4, 0, 2 * Math.PI);
+      c.fillStyle = '#e07000';
+      c.fill();
+    }
   }
 
   function _drawTrace() {
@@ -876,9 +1011,11 @@ const SyncModule = (() => {
     c.fillStyle = '#444';
     c.font = '11px "Courier New", monospace';
     c.textAlign = 'left';
-    c.fillText('Spectre d\'ordres — ' + _sourceLabel() + ' (g)', padL, 12);
+    c.fillText('Spectre d\'ordres TSA (g)', padL, 12);
 
-    if (!_orderMag) {
+    const magA = (_showA && _orderMag) ? _orderMag : null;
+    const magB = (_dual && _showB && _orderMagB) ? _orderMagB : null;
+    if (!magA && !magB) {
       c.fillStyle = '#aaa';
       c.textAlign = 'center';
       c.fillText('—', padL + gW / 2, padT + gH / 2);
@@ -887,23 +1024,35 @@ const SyncModule = (() => {
 
     let aMax = 0;
     for (let k = 1; k <= MAX_ORDER; k++) {
-      if (_orderMag[k] > aMax) aMax = _orderMag[k];
+      if (magA && magA[k] > aMax) aMax = magA[k];
+      if (magB && magB[k] > aMax) aMax = magB[k];
     }
     if (!(aMax > 0)) aMax = 0.1;
     aMax *= 1.15;
 
     const barW = gW / MAX_ORDER;
+    const dualBars = !!(magA && magB);
     for (let k = 1; k <= MAX_ORDER; k++) {
-      const h = (_orderMag[k] / aMax) * gH;
-      const x = padL + (k - 0.5) * barW - barW * 0.35;
-      const y = padT + gH - h;
-      c.fillStyle = COL;
-      c.fillRect(x, y, barW * 0.7, h);
+      const x0 = padL + (k - 0.5) * barW;
+      if (magA) {
+        const h = (magA[k] / aMax) * gH;
+        const w = dualBars ? barW * 0.32 : barW * 0.7;
+        const x = dualBars ? (x0 - barW * 0.35) : (x0 - barW * 0.35);
+        c.fillStyle = COL;
+        c.fillRect(x, padT + gH - h, w, h);
+      }
+      if (magB) {
+        const h = (magB[k] / aMax) * gH;
+        const w = dualBars ? barW * 0.32 : barW * 0.7;
+        const x = dualBars ? (x0 + barW * 0.02) : (x0 - barW * 0.35);
+        c.fillStyle = COL_B;
+        c.fillRect(x, padT + gH - h, w, h);
+      }
       if (k === 1 || k % 4 === 0 || k === MAX_ORDER) {
         c.fillStyle = '#888';
         c.font = '9px "Courier New", monospace';
         c.textAlign = 'center';
-        c.fillText(String(k) + 'X', padL + (k - 0.5) * barW, H - 8);
+        c.fillText(String(k) + 'X', x0, H - 8);
       }
     }
     c.fillStyle = '#666';
@@ -937,25 +1086,37 @@ const SyncModule = (() => {
         _fftCanvas.width = wrap.clientWidth;
         _fftCanvas.height = Math.max(160, wrap.clientHeight || 220);
       }
-      if (_view === 'fft_order' && !_orderMag && _activeAvg()) _computeOrderFft();
+      if (_view === 'fft_order' && ((_avg && !_orderMag) || (_avgB && !_orderMagB))) {
+        _computeOrderFft();
+      }
       _drawFft();
     }
   }
 
   function clearResult() {
     _avg = null;
-    _avgBrut = null;
-    _avgRes = null;
+    _avgB = null;
     _orderMag = null;
+    _orderMagB = null;
     _nRevs = 0;
+    _nRevsB = 0;
     _meanRpm = 0;
     _rawSamples = null;
+    _rawSamplesB = null;
     _tachUs = [];
+    _tachUsB = [];
     _rawMeta = null;
+    _rawMetaB = null;
+    _tsaRaw = null;
+    _tsaTachIdx = null;
     _residualRaw = null;
     _residualTachIdx = null;
-    _source = 'tsa';
+    _tsaRawB = null;
+    _tsaTachIdxB = null;
+    _residualRawB = null;
+    _residualTachIdxB = null;
     _stats = { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 };
+    _statsB = { rmsBrut: 0, rmsTsa: 0, rmsRes: 0, rPct: 0 };
     _view = 'trace';
     _linZMin = 0;
     _linZMax = 360;
@@ -963,7 +1124,7 @@ const SyncModule = (() => {
     const info = document.getElementById('sync-mod-info');
     if (info) info.textContent = '—';
     _updateShapeBtn();
-    _updateSourceBtns();
+    _updateAnalyseBtns(false);
     _updateCursorLine();
   }
 
@@ -979,14 +1140,15 @@ const SyncModule = (() => {
   return {
     init: init,
     setConfig: setConfig,
+    setDual: setDual,
+    toggleVis: toggleVis,
     getAcqTiming: getAcqTiming,
     showTrace: showTrace,
     showOrderFft: showOrderFft,
     exportRaw: exportRaw,
+    exportBrut: exportBrut,
+    exportTsa: exportTsa,
     exportResidual: exportResidual,
-    exportForAnalyse: exportForAnalyse,
-    setSource: setSource,
-    getSource: getSource,
     toggleShape: toggleShape,
     getShape: getShape,
     getView: getView,
@@ -994,8 +1156,11 @@ const SyncModule = (() => {
     onTachPeriod: onTachPeriod,
     updateRpmBar: updateRpmBar,
     beginBinary: beginBinary,
+    beginBinaryB: beginBinaryB,
     onSamples: onSamples,
+    onSamplesB: onSamplesB,
     onTachUs: onTachUs,
+    onTachUsB: onTachUsB,
     finalizeFromRaw: finalizeFromRaw,
     clearResult: clearResult,
     resize: resize,

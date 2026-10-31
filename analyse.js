@@ -173,6 +173,19 @@ function analyseArmDual() {
 }
 window.analyseArmDual = analyseArmDual;
 
+/** Import Sync dual → force overlay A/B même si DualSession.available() flicker. */
+function analyseImportDualArm() {
+  analyseFlushB();
+  _anGotA = false;
+  _anGotB = false;
+  if (typeof DualSession !== 'undefined' && DualSession.begin) DualSession.begin();
+  _anDualArm = true;
+  if (typeof anShowA !== 'undefined') anShowA = true;
+  if (typeof anShowB !== 'undefined') anShowB = true;
+  _anUpdateVisBtns();
+}
+window.analyseImportDualArm = analyseImportDualArm;
+
 // ── Persistance localStorage ─────────────────────────────────
 const AN_LS_KEY = 'va_analyse_v1';
 let _anPersistTimer = null;

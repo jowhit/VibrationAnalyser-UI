@@ -1,6 +1,6 @@
-// sync-session.js — SM module Analyse synchrone (TSA)
+// sync-session.js — SM Analyse synchrone TSA (mono A / mono B / duo AB)
 // IDLE → READY → ACQUIRING → FINALIZE → VIEW ↔ ORDER_FFT
-//                                          └→ HANDOFF (buffer → AnalSession)
+//                                          └→ HANDOFF (Brut | TSA | Résiduel → AnalSession)
 
 const SyncSession = (() => {
   const S = {
@@ -10,14 +10,20 @@ const SyncSession = (() => {
     FINALIZE: 'FINALIZE',
     VIEW: 'VIEW',
     ORDER_FFT: 'ORDER_FFT',
-    /** Buffer envoyé à AnalSession — ESP Sync intact, UI Analyse */
     HANDOFF: 'HANDOFF',
   };
 
-  let _state = S.IDLE;
-  let _acqTimer = null;
+  const ACQ_TIMEOUT_MS = 120000;
+  const FINALIZE_TIMEOUT_MS = 45000;
 
-  // Overlay rotatif dédié (#page-sync) — ne touche pas an-acq-overlay
+  let _state = S.IDLE;
+  let _dual = false;
+  let _binA = false;
+  let _binB = false;
+  let _acqTimer = null;
+  let _finalizeTimer = null;
+  let _handoffKind = null; // 'brut' | 'tsa' | 'res'
+
   let _ovRaf = null;
   let _ovStartMs = 0;
   let _ovDurMs = 8000;
@@ -27,8 +33,38 @@ const SyncSession = (() => {
     if (typeof termAddLine === 'function') termAddLine(msg, 'sys');
   }
 
+  function _isDualWanted() {
+    if (typeof DualSession !== 'undefined' && DualSession.available) {
+      return DualSession.available();
+    }
+    if (typeof isDualMode === 'function') return isDualMode();
+    return false;
+  }
+
+  function _sendSync(cmd) {
+    const dual = _dual ||
+      (typeof DualSession !== 'undefined' && DualSession.available && DualSession.available());
+    if (dual) {
+      if (typeof DualSession !== 'undefined' && DualSession.begin) DualSession.begin();
+      if (typeof DualSession !== 'undefined' && DualSession.sendBoth) {
+        DualSession.sendBoth(cmd);
+      } else {
+        if (typeof wsSend === 'function') wsSend(cmd);
+        if (typeof wsSendB === 'function') wsSendB(cmd);
+      }
+    } else if (typeof DualSession !== 'undefined' && DualSession.sendBoth) {
+      DualSession.sendBoth(cmd);
+    } else if (typeof wsSend === 'function') {
+      wsSend(cmd);
+    }
+  }
+
   function _clearAcqTimer() {
     if (_acqTimer) { clearTimeout(_acqTimer); _acqTimer = null; }
+  }
+
+  function _clearFinalizeTimer() {
+    if (_finalizeTimer) { clearTimeout(_finalizeTimer); _finalizeTimer = null; }
   }
 
   function _setBtnRunning(on) {
@@ -87,133 +123,150 @@ const SyncSession = (() => {
       ctx.arc(cx, cy, R, start, end);
       ctx.closePath();
       ctx.fill();
-
-      ctx.strokeStyle = '#0066cc';
-      ctx.lineWidth = 7;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.arc(cx, cy, R, start, end);
-      ctx.stroke();
-
-      const tip = end;
-      const wedge = Math.PI / 7;
-      ctx.fillStyle = 'rgba(0, 102, 204, 0.42)';
-      ctx.beginPath();
-      ctx.moveTo(cx, cy);
-      ctx.arc(cx, cy, R * 0.92, tip + spin - wedge / 2, tip + spin + wedge / 2);
-      ctx.closePath();
-      ctx.fill();
     }
-  }
 
-  function _ovUpdateLabel(progress) {
-    const lbl = document.getElementById('sync-acq-label');
-    if (!lbl) return;
-    if (_ovTransfer) {
-      lbl.textContent = 'Transfert des données…';
-      return;
-    }
-    const pct = Math.round(Math.max(0, Math.min(1, progress)) * 100);
-    const remain = Math.max(0, _ovDurMs - (Date.now() - _ovStartMs));
-    lbl.textContent = remain <= 0
-      ? 'Finalisation…'
-      : ('Acquisition ' + pct + '%  ' + (remain / 1000).toFixed(1) + 's');
+    ctx.strokeStyle = '#0066cc';
+    ctx.lineWidth = 7;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(cx, cy, R, start, end);
+    ctx.stroke();
+
+    const tip = end;
+    const wedge = Math.PI / 7;
+    ctx.fillStyle = 'rgba(0, 102, 204, 0.42)';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, R * 0.92, tip + spin - wedge / 2, tip + spin + wedge / 2);
+    ctx.closePath();
+    ctx.fill();
   }
 
   function _ovAnimFrame() {
-    if (_state !== S.ACQUIRING && _state !== S.FINALIZE) {
-      _ovHide();
-      return;
-    }
+    if (!_ovRaf && !_ovStartMs) return;
     const elapsed = Date.now() - _ovStartMs;
-    if (!_ovTransfer && elapsed >= _ovDurMs) _ovTransfer = true;
     const progress = _ovTransfer ? 1 : Math.min(1, elapsed / _ovDurMs);
     _ovDraw(progress);
-    _ovUpdateLabel(progress);
     _ovRaf = requestAnimationFrame(_ovAnimFrame);
   }
 
   function _ovShow() {
-    let fs = 4000, n = 45000;
-    if (typeof SyncModule !== 'undefined' && SyncModule.getAcqTiming) {
-      const tmg = SyncModule.getAcqTiming();
-      if (tmg) {
-        if (tmg.fs > 0) fs = tmg.fs;
-        if (tmg.n > 0) n = tmg.n;
-      }
-    }
-    _ovDurMs = Math.max(800, Math.round(n * 1000 / fs) + 600);
-    _ovStartMs = Date.now();
-    _ovTransfer = false;
     const ov = document.getElementById('sync-acq-overlay');
     if (ov) {
       ov.style.display = 'flex';
       ov.setAttribute('aria-hidden', 'false');
     }
+    _ovTransfer = false;
+    _ovStartMs = Date.now();
+    const timing = (typeof SyncModule !== 'undefined' && SyncModule.getAcqTiming)
+      ? SyncModule.getAcqTiming() : null;
+    _ovDurMs = timing && timing.fs > 0 && timing.n > 0
+      ? Math.max(1500, (timing.n / timing.fs) * 1000)
+      : 8000;
     if (_ovRaf) cancelAnimationFrame(_ovRaf);
     _ovRaf = requestAnimationFrame(_ovAnimFrame);
   }
 
   function _ovHide() {
-    _ovTransfer = false;
     if (_ovRaf) { cancelAnimationFrame(_ovRaf); _ovRaf = null; }
+    _ovStartMs = 0;
+    _ovTransfer = false;
     const ov = document.getElementById('sync-acq-overlay');
     if (ov) {
       ov.style.display = 'none';
       ov.setAttribute('aria-hidden', 'true');
     }
-    const ring = document.getElementById('sync-acq-ring');
-    if (ring) {
-      const ctx = ring.getContext('2d');
-      if (ctx) ctx.clearRect(0, 0, ring.width, ring.height);
-    }
   }
 
   function getState() { return _state; }
+  function isDual() { return _dual; }
   function isActive() {
     return _state !== S.IDLE;
   }
 
+  function _setViewChrome(ok) {
+    const fftBtn = document.getElementById('btn-sync-fft');
+    if (fftBtn) {
+      fftBtn.style.display = ok ? 'inline-block' : 'none';
+      fftBtn.textContent = (typeof t === 'function') ? t('sync.fft') : 'FFT ordres';
+    }
+    const shapeBtn = document.getElementById('btn-sync-shape');
+    if (shapeBtn) shapeBtn.style.display = ok ? 'inline-block' : 'none';
+    const anRow = document.getElementById('sync-analyse-row');
+    if (anRow) anRow.style.display = ok ? 'flex' : 'none';
+  }
+
   function reset(silent) {
     _clearAcqTimer();
+    _clearFinalizeTimer();
     _ovHide();
     _state = S.IDLE;
+    _dual = false;
+    _binA = _binB = false;
+    _handoffKind = null;
     if (typeof SyncModule !== 'undefined') {
+      if (SyncModule.setDual) SyncModule.setDual(false);
       SyncModule.clearResult();
       SyncModule.showTrace();
     }
     _setBtnRunning(false);
-    const fftBtn = document.getElementById('btn-sync-fft');
-    if (fftBtn) fftBtn.style.display = 'none';
-    const shapeBtn = document.getElementById('btn-sync-shape');
-    if (shapeBtn) shapeBtn.style.display = 'none';
-    const srcRow = document.getElementById('sync-src-row');
-    if (srcRow) srcRow.style.display = 'none';
+    _setViewChrome(false);
     if (!silent) _log('[SYNC] reset → IDLE');
   }
 
   function enter() {
-    if (_state === S.READY || _state === S.ACQUIRING) return;
+    if (_state === S.READY || _state === S.ACQUIRING) {
+      if (_isDualWanted() && typeof DualSession !== 'undefined') {
+        DualSession.begin();
+        _dual = DualSession.is() || DualSession.available();
+        if (typeof SyncModule !== 'undefined' && SyncModule.setDual) {
+          SyncModule.setDual(_dual);
+        }
+      }
+      return;
+    }
     reset(true);
+    _dual = _isDualWanted();
+    if (_dual && typeof DualSession !== 'undefined') DualSession.begin();
+    _dual = (typeof DualSession !== 'undefined')
+      ? (DualSession.is() || DualSession.available())
+      : _dual;
+
     if (typeof SyncModule !== 'undefined') {
+      if (SyncModule.setDual) SyncModule.setDual(_dual);
       SyncModule.clearResult();
       SyncModule.showTrace();
-      SyncModule.setStatus((typeof t === 'function') ? t('sync.ready') : 'Prêt — Démarrer');
+      SyncModule.setStatus(_dual
+        ? 'Mode DOUBLE prêt — Démarrer (A+B)'
+        : ((typeof t === 'function') ? t('sync.ready') : 'Prêt — Démarrer'));
     }
+    _binA = _binB = false;
     _setBtnRunning(false);
     _state = S.READY;
     if (typeof showTab === 'function') showTab('sync');
-    _log('[SYNC] READY');
+    _log('[SYNC] ' + (_dual ? 'DOUBLE ' : '') + 'READY');
   }
 
   function _start() {
     _ovHide();
+    _clearFinalizeTimer();
+    _handoffKind = null;
+    _dual = _isDualWanted();
+    if (_dual && typeof DualSession !== 'undefined') DualSession.begin();
+    _dual = (typeof DualSession !== 'undefined')
+      ? (DualSession.is() || DualSession.available())
+      : _dual;
+    _binA = _binB = false;
+
     if (typeof SyncModule !== 'undefined') {
+      if (SyncModule.setDual) SyncModule.setDual(_dual);
       SyncModule.clearResult();
       SyncModule.showTrace();
-      SyncModule.setStatus((typeof t === 'function') ? t('sync.acquiring') : 'Acquisition…');
+      SyncModule.setStatus(_dual
+        ? 'Acquisition A+B…'
+        : ((typeof t === 'function') ? t('sync.acquiring') : 'Acquisition…'));
     }
-    if (typeof wsSend === 'function') wsSend('SYNC_START\n');
+    _sendSync('SYNC_START\n');
     _state = S.ACQUIRING;
     _setBtnRunning(true);
     _ovShow();
@@ -222,14 +275,15 @@ const SyncSession = (() => {
       _acqTimer = null;
       if (_state !== S.ACQUIRING && _state !== S.FINALIZE) return;
       _ovHide();
+      _clearFinalizeTimer();
       _log('[SYNC] !! timeout — pas de payload');
       _state = S.READY;
       _setBtnRunning(false);
       if (typeof SyncModule !== 'undefined') {
         SyncModule.setStatus('Timeout — réessayer Démarrer');
       }
-    }, 120000);
-    _log('[SYNC] ACQUIRING');
+    }, ACQ_TIMEOUT_MS);
+    _log('[SYNC] ACQUIRING' + (_dual ? ' A+B' : ''));
   }
 
   function toggleStart() {
@@ -241,37 +295,58 @@ const SyncSession = (() => {
     }
   }
 
-  function onPayloadReady() {
+  function _doFinalize() {
     _clearAcqTimer();
+    _clearFinalizeTimer();
     _ovHide();
-    if (_state !== S.FINALIZE && _state !== S.ACQUIRING) {
-      _state = S.FINALIZE;
-    }
     let ok = false;
     if (typeof SyncModule !== 'undefined' && SyncModule.finalizeFromRaw) {
       ok = SyncModule.finalizeFromRaw();
     }
     _state = S.VIEW;
+    _handoffKind = null;
     _setBtnRunning(false);
-    const fftBtn = document.getElementById('btn-sync-fft');
-    if (fftBtn) {
-      fftBtn.style.display = ok ? 'inline-block' : 'none';
-      fftBtn.textContent = _fftBtnLabel(S.VIEW);
-    }
-    const shapeBtn = document.getElementById('btn-sync-shape');
-    if (shapeBtn) shapeBtn.style.display = ok ? 'inline-block' : 'none';
-    const srcRow = document.getElementById('sync-src-row');
-    if (srcRow) srcRow.style.display = ok ? 'flex' : 'none';
+    _setViewChrome(ok);
     if (typeof showTab === 'function') showTab('sync');
-    _log('[SYNC] VIEW' + (ok ? '' : ' (peu de tours)'));
+    _log('[SYNC] VIEW' + (ok ? '' : ' (peu de tours)') + (_dual ? ' (dual)' : ''));
   }
 
-  function _fftBtnLabel(forState) {
-    if (forState === S.VIEW) {
-      return (typeof t === 'function') ? t('sync.fft') : 'FFT ordres';
+  function _tryFinalize() {
+    if (_state === S.ACQUIRING) {
+      _state = S.FINALIZE;
+      _ovTransfer = true;
+      _clearFinalizeTimer();
+      _finalizeTimer = setTimeout(function () {
+        _finalizeTimer = null;
+        if (_state !== S.FINALIZE) return;
+        _log('[SYNC] !! timeout FINALIZE' +
+          (_dual ? (' A=' + (_binA ? 'ok' : '?') + ' B=' + (_binB ? 'ok' : '?')) : ''));
+        _doFinalize();
+      }, FINALIZE_TIMEOUT_MS);
     }
-    if (forState === S.ORDER_FFT) return '→ Analyse';
-    return (typeof t === 'function') ? t('sync.fft') : 'FFT ordres';
+    if (_state !== S.FINALIZE && _state !== S.ACQUIRING) {
+      _state = S.FINALIZE;
+    }
+    if (_dual) {
+      if (!_binA || !_binB) return;
+      _log('[SYNC] OK — A+B reçus');
+    } else if (!_binA) {
+      return;
+    }
+    _doFinalize();
+  }
+
+  function onPayloadReady() {
+    _binA = true;
+    if (_dual) _log('[SYNC] A reçu' + (_binB ? ' — OK' : ' — attente B…'));
+    _tryFinalize();
+  }
+
+  function onPayloadReadyB() {
+    if (!_dual) return;
+    _binB = true;
+    _log('[SYNC] B reçu' + (_binA ? ' — OK' : ' — attente A…'));
+    _tryFinalize();
   }
 
   function onStatus(txt) {
@@ -279,8 +354,10 @@ const SyncSession = (() => {
       SyncModule.setStatus(txt);
     }
     if (/^Pret/i.test(String(txt || '')) &&
-        (_state === S.ACQUIRING || _state === S.FINALIZE)) {
+        (_state === S.ACQUIRING || _state === S.FINALIZE) &&
+        !_binA && !_binB) {
       _clearAcqTimer();
+      _clearFinalizeTimer();
       _ovHide();
       if (_state !== S.VIEW && _state !== S.HANDOFF) {
         _state = S.READY;
@@ -289,90 +366,101 @@ const SyncSession = (() => {
     }
   }
 
+  function _exportForKind(kind) {
+    if (typeof SyncModule === 'undefined') return null;
+    if (kind === 'brut') return SyncModule.exportBrut ? SyncModule.exportBrut() : null;
+    if (kind === 'tsa') return SyncModule.exportTsa ? SyncModule.exportTsa() : null;
+    if (kind === 'res') return SyncModule.exportResidual ? SyncModule.exportResidual() : null;
+    return null;
+  }
+
   /**
-   * Handoff SM : Sync → AnalSession.importBuffer (pas de WS_GOTO).
-   * VIEW | ORDER_FFT → HANDOFF
+   * VIEW | ORDER_FFT | HANDOFF → HANDOFF.
+   * kind = 'brut' | 'tsa' | 'res'
+   * Duo : payload A+B → AnalSession.importBuffer dual (overlay Analyse).
    */
-  function openAnalyse() {
+  function handoffToAnalyse(kind) {
+    if (kind !== 'brut' && kind !== 'tsa' && kind !== 'res') {
+      _log('[SYNC] handoff kind invalide: ' + kind);
+      return false;
+    }
     if (_state !== S.VIEW && _state !== S.ORDER_FFT && _state !== S.HANDOFF) {
-      _log('[SYNC] openAnalyse refusé (état=' + _state + ')');
+      _log('[SYNC] handoff refusé (état=' + _state + ')');
       return false;
     }
-    if (typeof SyncModule === 'undefined') {
-      _log('[SYNC] !! SyncModule manquant');
-      return false;
-    }
-    const exportFn = SyncModule.exportForAnalyse || SyncModule.exportRaw;
-    if (!exportFn) {
-      _log('[SYNC] !! export manquant');
-      return false;
-    }
-    const payload = exportFn.call(SyncModule);
-    if (!payload) {
-      _log('[SYNC] !! pas de buffer à exporter');
-      return false;
-    }
-    const src = (typeof SyncModule.getSource === 'function')
-      ? SyncModule.getSource()
-      : 'tsa';
-    payload.source = (src === 'res') ? 'sync-res' : 'sync';
-    payload.view = 'fft';
     if (typeof AnalSession === 'undefined' || !AnalSession.importBuffer) {
       _log('[SYNC] !! AnalSession.importBuffer manquant');
       return false;
     }
+    const payload = _exportForKind(kind);
+    if (!payload) {
+      _log('[SYNC] !! buffer ' + kind + ' indisponible');
+      return false;
+    }
+    payload.view = 'fft';
     const ok = AnalSession.importBuffer(payload);
-    if (!ok) return false;
+    if (!ok) {
+      _log('[SYNC] !! importBuffer échoué (' + kind + ')');
+      return false;
+    }
+    _handoffKind = kind;
     _state = S.HANDOFF;
-    _log('[SYNC] HANDOFF → AnalSession (' + payload.source + ')');
+    if (typeof showTab === 'function') showTab('analyse');
+    _log('[SYNC] HANDOFF → Analyse (' + kind + ') N=' + payload.n +
+      (payload.samplesB ? (' +B N=' + (payload.nB || payload.samplesB.length)) : ''));
     return true;
   }
 
-  /** Cycle UI : Tour ↔ Ordres ; depuis Ordres → Analyse (handoff). */
   function toggleFft() {
     const fftBtn = document.getElementById('btn-sync-fft');
     const shapeBtn = document.getElementById('btn-sync-shape');
+
+    if (_state === S.HANDOFF) {
+      if (typeof SyncModule !== 'undefined' && SyncModule.showTrace) {
+        SyncModule.showTrace();
+      }
+      _state = S.VIEW;
+      _handoffKind = null;
+      if (typeof showTab === 'function') showTab('sync');
+      _setViewChrome(true);
+      _log('[SYNC] VIEW ← retour HANDOFF');
+      return;
+    }
 
     if (_state === S.VIEW) {
       if (typeof SyncModule !== 'undefined' && SyncModule.showOrderFft) {
         SyncModule.showOrderFft();
       }
       _state = S.ORDER_FFT;
-      if (fftBtn) fftBtn.textContent = _fftBtnLabel(S.ORDER_FFT);
+      if (fftBtn) fftBtn.textContent = 'Tour TSA';
       if (shapeBtn) shapeBtn.style.display = 'none';
       return;
     }
+
     if (_state === S.ORDER_FFT) {
-      openAnalyse();
-      return;
-    }
-    if (_state === S.HANDOFF) {
-      // Retour page Sync sans perdre le buffer TSA
       if (typeof SyncModule !== 'undefined' && SyncModule.showTrace) {
         SyncModule.showTrace();
       }
       _state = S.VIEW;
-      if (typeof showTab === 'function') showTab('sync');
       if (fftBtn) {
-        fftBtn.style.display = 'inline-block';
-        fftBtn.textContent = _fftBtnLabel(S.VIEW);
+        fftBtn.textContent = (typeof t === 'function') ? t('sync.fft') : 'FFT ordres';
       }
       if (shapeBtn) shapeBtn.style.display = 'inline-block';
-      const srcRow = document.getElementById('sync-src-row');
-      if (srcRow) srcRow.style.display = 'flex';
-      _log('[SYNC] VIEW ← retour HANDOFF');
     }
   }
 
   return {
     S: S,
     getState: getState,
+    isDual: isDual,
     isActive: isActive,
     enter: enter,
     toggleStart: toggleStart,
     toggleFft: toggleFft,
-    openAnalyse: openAnalyse,
+    handoffToAnalyse: handoffToAnalyse,
+    openAnalyse: function () { return handoffToAnalyse('brut'); },
     onPayloadReady: onPayloadReady,
+    onPayloadReadyB: onPayloadReadyB,
     onStatus: onStatus,
     reset: reset,
     abort: function () { reset(true); },

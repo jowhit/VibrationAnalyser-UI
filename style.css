@@ -1447,6 +1447,15 @@ body { display: flex; flex-direction: column; }
 #page-bode {
   padding: 6px 8px 0; gap: 6px;
 }
+.bode-vis-row {
+  display: flex;
+  gap: 6px;
+  padding: 2px 8px 4px;
+  justify-content: flex-end;
+}
+.bode-vis-row .ham-vis-btn {
+  min-width: 36px;
+}
 .bode-mod-status {
   font-family: 'Courier New', monospace; font-size: 12px;
   color: #555; padding: 2px 4px;
@@ -1535,23 +1544,15 @@ body { display: flex; flex-direction: column; }
   font-family: 'Courier New', monospace; font-size: 11px;
   color: #444; text-align: center; padding: 2px 6px; min-height: 16px;
 }
-.sync-src-row {
+.sync-analyse-row {
   display: flex;
-  gap: 0;
+  gap: 4px;
   flex-shrink: 0;
+  flex-wrap: wrap;
 }
-.sync-src-row .bal-btn {
-  border-radius: 0;
-  margin: 0;
-  padding: 6px 8px;
+.sync-analyse-row .bal-btn {
   font-size: 11px;
-}
-.sync-src-row .bal-btn:first-child { border-radius: 4px 0 0 4px; }
-.sync-src-row .bal-btn:last-child { border-radius: 0 4px 4px 0; }
-.sync-src-row .bal-btn.active {
-  background: #1a6fc4;
-  color: #fff;
-  border-color: #1a6fc4;
+  padding: 6px 8px;
 }
 .sync-mod-info {
   font-family: 'Courier New', monospace; font-size: 11px;

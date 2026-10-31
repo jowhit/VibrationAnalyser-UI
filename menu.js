@@ -526,7 +526,14 @@ const MenuModule = (() => {
             showTab('bode');
           }
         };
-        if (_navGoto) {
+        if (typeof DualSession !== 'undefined' && DualSession.available &&
+            DualSession.available() && DualSession.startModule) {
+          DualSession.startModule('bode', cmd, {
+            label: 'Bode G=' + g + ' FS=' + fs,
+            onReady: bodeReady,
+            onFail: bodeReady,
+          });
+        } else if (_navGoto) {
           _navGoto('bode', cmd, { onAck: bodeReady, onTimeout: bodeReady });
         } else {
           _send(cmd + '\n');
@@ -552,7 +559,14 @@ const MenuModule = (() => {
             showTab('sync');
           }
         };
-        if (_navGoto) {
+        if (typeof DualSession !== 'undefined' && DualSession.available &&
+            DualSession.available() && DualSession.startModule) {
+          DualSession.startModule('sync', cmd, {
+            label: 'Sync G=' + g + ' FS=' + fs,
+            onReady: syncReady,
+            onFail: syncReady,
+          });
+        } else if (_navGoto) {
           _navGoto('sync', cmd, { onAck: syncReady, onTimeout: syncReady });
         } else {
           _send(cmd + '\n');

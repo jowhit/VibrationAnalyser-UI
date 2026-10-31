@@ -1483,10 +1483,209 @@ function handleTextB(raw) {
       }
       return;
     }
-    if (line.startsWith('BODE_TACH=') || line.startsWith('SYNC_TACH=') ||
-        line.startsWith('BAL_RPM=')) {
+
+    // ── Bode B (mono B → handlers A ; duo → *B) ───────────────
+    const monoBode = (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB());
+    if (rxStateB === 'bode_tach') {
+      if (line === 'BODE_TACH_BEGIN') {
+        rxHeadersB.tachList = [];
+        return;
+      }
+      if (line === 'BODE_TACH_END') {
+        const list = rxHeadersB.tachList || [];
+        if (monoBode) {
+          if (typeof BodeModule !== 'undefined' && BodeModule.onTachUs) {
+            BodeModule.onTachUs(list);
+          }
+          if (typeof BodeModuleSession !== 'undefined' && BodeModuleSession.onPayloadReady) {
+            BodeModuleSession.onPayloadReady();
+          }
+        } else {
+          if (typeof BodeModule !== 'undefined' && BodeModule.onTachUsB) {
+            BodeModule.onTachUsB(list);
+          }
+          if (typeof BodeModuleSession !== 'undefined' && BodeModuleSession.onPayloadReadyB) {
+            BodeModuleSession.onPayloadReadyB();
+          }
+        }
+        rxStateB = 'text';
+        return;
+      }
+      if (/^\d+$/.test(line)) {
+        if (!rxHeadersB.tachList) rxHeadersB.tachList = [];
+        rxHeadersB.tachList.push(parseInt(line, 10) >>> 0);
+        return;
+      }
       return;
     }
+    if (line.startsWith('BODE_STATUS=')) {
+      if (monoBode && typeof BodeModule !== 'undefined' && BodeModule.setStatus) {
+        BodeModule.setStatus(line.slice(12).trim());
+      }
+      return;
+    }
+    if (line.startsWith('BODE_LIVE=')) {
+      let v = parseInt(line.slice(10), 10);
+      v = applyAxisInvertScalar('B', v);
+      if (monoBode) {
+        if (typeof BodeModule !== 'undefined' && BodeModule.onLive) BodeModule.onLive(v);
+      } else if (typeof BodeModule !== 'undefined' && BodeModule.onLiveB) {
+        BodeModule.onLiveB(v);
+      }
+      return;
+    }
+    if (line.startsWith('BODE_TACH=')) {
+      const period = parseInt(line.slice(10), 10);
+      if (monoBode) {
+        if (typeof BodeModule !== 'undefined' && BodeModule.onTachPeriod) {
+          BodeModule.onTachPeriod(period);
+        }
+      }
+      // Duo : RPM barre = primaire A uniquement
+      return;
+    }
+    if (line.startsWith('BODE_CFG=')) {
+      if (monoBode) {
+        const payload = line.slice(9).trim();
+        const g = /G=(\d+)/.exec(payload);
+        const f = /FS=(\d+)/.exec(payload);
+        const n = /N=(\d+)/.exec(payload);
+        if (typeof BodeModule !== 'undefined' && BodeModule.setConfig) {
+          BodeModule.setConfig(g ? g[1] : '', f ? f[1] : '', n ? n[1] : '');
+        }
+      }
+      return;
+    }
+    if (line === 'BODE_BIN') {
+      rxStateB = 'bode_hdr';
+      rxHeadersB = {};
+      return;
+    }
+    if (rxStateB === 'bode_hdr') {
+      if (line.startsWith('G='))     { rxHeadersB.g  = parseInt(line.slice(2), 10); return; }
+      if (line.startsWith('F='))     { rxHeadersB.fs = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('T='))     { rxHeadersB.t  = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('T0='))    { rxHeadersB.t0 = parseInt(line.slice(3), 10) >>> 0; return; }
+      if (line.startsWith('NTACH=')) { rxHeadersB.ntach = parseInt(line.slice(6), 10); return; }
+      if (line.startsWith('N=')) {
+        rxHeadersB.n = parseInt(line.slice(2), 10);
+        const meta = {
+          g: rxHeadersB.g,
+          fs: rxHeadersB.fs,
+          t0: rxHeadersB.t0 || 0,
+          n: rxHeadersB.n,
+          t: rxHeadersB.t
+        };
+        if (monoBode) {
+          if (typeof BodeModule !== 'undefined' && BodeModule.beginBinary) {
+            BodeModule.beginBinary(meta);
+          }
+        } else if (typeof BodeModule !== 'undefined' && BodeModule.beginBinaryB) {
+          BodeModule.beginBinaryB(meta);
+        }
+        rxStateB = 'bode_bin';
+        return;
+      }
+      return;
+    }
+
+    // ── Sync B (mono B → handlers A ; duo → *B) ───────────────
+    if (rxStateB === 'sync_tach') {
+      if (line === 'SYNC_TACH_BEGIN') {
+        rxHeadersB.tachList = [];
+        return;
+      }
+      if (line === 'SYNC_TACH_END') {
+        const list = rxHeadersB.tachList || [];
+        if (monoBode) {
+          if (typeof SyncModule !== 'undefined' && SyncModule.onTachUs) {
+            SyncModule.onTachUs(list);
+          }
+          if (typeof SyncSession !== 'undefined' && SyncSession.onPayloadReady) {
+            SyncSession.onPayloadReady();
+          }
+        } else {
+          if (typeof SyncModule !== 'undefined' && SyncModule.onTachUsB) {
+            SyncModule.onTachUsB(list);
+          }
+          if (typeof SyncSession !== 'undefined' && SyncSession.onPayloadReadyB) {
+            SyncSession.onPayloadReadyB();
+          }
+        }
+        rxStateB = 'text';
+        return;
+      }
+      if (/^\d+$/.test(line)) {
+        if (!rxHeadersB.tachList) rxHeadersB.tachList = [];
+        rxHeadersB.tachList.push(parseInt(line, 10) >>> 0);
+        return;
+      }
+      return;
+    }
+    if (line.startsWith('SYNC_STATUS=')) {
+      if (monoBode) {
+        const txt = line.slice(12).trim();
+        if (typeof SyncSession !== 'undefined' && SyncSession.onStatus) {
+          SyncSession.onStatus(txt);
+        } else if (typeof SyncModule !== 'undefined' && SyncModule.setStatus) {
+          SyncModule.setStatus(txt);
+        }
+      }
+      return;
+    }
+    if (line.startsWith('SYNC_TACH=')) {
+      const period = parseInt(line.slice(10), 10);
+      if (monoBode && typeof SyncModule !== 'undefined' && SyncModule.onTachPeriod) {
+        SyncModule.onTachPeriod(period);
+      }
+      return;
+    }
+    if (line.startsWith('SYNC_CFG=')) {
+      if (monoBode) {
+        const payload = line.slice(9).trim();
+        const g = /G=(\d+)/.exec(payload);
+        const f = /FS=(\d+)/.exec(payload);
+        const n = /N=(\d+)/.exec(payload);
+        if (typeof SyncModule !== 'undefined' && SyncModule.setConfig) {
+          SyncModule.setConfig(g ? g[1] : '', f ? f[1] : '', n ? n[1] : '');
+        }
+      }
+      return;
+    }
+    if (line === 'SYNC_BIN') {
+      rxStateB = 'sync_hdr';
+      rxHeadersB = {};
+      return;
+    }
+    if (rxStateB === 'sync_hdr') {
+      if (line.startsWith('G='))     { rxHeadersB.g  = parseInt(line.slice(2), 10); return; }
+      if (line.startsWith('F='))     { rxHeadersB.fs = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('T='))     { rxHeadersB.t  = parseFloat(line.slice(2)); return; }
+      if (line.startsWith('T0='))    { rxHeadersB.t0 = parseInt(line.slice(3), 10) >>> 0; return; }
+      if (line.startsWith('NTACH=')) { rxHeadersB.ntach = parseInt(line.slice(6), 10); return; }
+      if (line.startsWith('N=')) {
+        rxHeadersB.n = parseInt(line.slice(2), 10);
+        const meta = {
+          g: rxHeadersB.g,
+          fs: rxHeadersB.fs,
+          t0: rxHeadersB.t0 || 0,
+          n: rxHeadersB.n,
+          t: rxHeadersB.t
+        };
+        if (monoBode) {
+          if (typeof SyncModule !== 'undefined' && SyncModule.beginBinary) {
+            SyncModule.beginBinary(meta);
+          }
+        } else if (typeof SyncModule !== 'undefined' && SyncModule.beginBinaryB) {
+          SyncModule.beginBinaryB(meta);
+        }
+        rxStateB = 'sync_bin';
+        return;
+      }
+      return;
+    }
+
+    if (line.startsWith('BAL_RPM=')) return;
     if (line.startsWith('WIFI_READY=') || line.startsWith('WIFI_IP=')) return;
     termAddLine('[B] ' + line, 'sys');
   });
@@ -1494,7 +1693,8 @@ function handleTextB(raw) {
 
 function handleBinaryB(buf) {
   const st = rxStateB;
-  if (st !== 'an_bin' && st !== 'fft_bin' && st !== 'harm_bin' && st !== 'bal_bin') {
+  if (st !== 'an_bin' && st !== 'fft_bin' && st !== 'harm_bin' && st !== 'bal_bin' &&
+      st !== 'bode_bin' && st !== 'sync_bin') {
     rxStateB = 'text';
     return;
   }
@@ -1506,6 +1706,28 @@ function handleBinaryB(buf) {
   const samples = applyAxisInvertIfNeeded('B', new Int16Array(buf));
   // Mode mono B : B alimente les handlers « A » (UI mono classique)
   const monoB = (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB());
+  if (st === 'bode_bin') {
+    if (monoB) {
+      if (typeof BodeModule !== 'undefined' && BodeModule.onSamples) {
+        BodeModule.onSamples(samples);
+      }
+    } else if (typeof BodeModule !== 'undefined' && BodeModule.onSamplesB) {
+      BodeModule.onSamplesB(samples);
+    }
+    rxStateB = 'bode_tach';
+    return;
+  }
+  if (st === 'sync_bin') {
+    if (monoB) {
+      if (typeof SyncModule !== 'undefined' && SyncModule.onSamples) {
+        SyncModule.onSamples(samples);
+      }
+    } else if (typeof SyncModule !== 'undefined' && SyncModule.onSamplesB) {
+      SyncModule.onSamplesB(samples);
+    }
+    rxStateB = 'sync_tach';
+    return;
+  }
   if (st === 'bal_bin') {
     rxStateB = 'text';
     if (monoB && typeof BalanceModule !== 'undefined' && BalanceModule.onTourBinary) {

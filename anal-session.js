@@ -306,8 +306,10 @@ const AnalSession = (() => {
   /**
    * Import buffer déjà acquis (ex. Sync → Analyse) sans WS_GOTO / sans acq ESP.
    * Transition : * → READY. Affiche l'onglet Analyse (outils FFT/curseurs/zoom).
+   * Duo : opts.samplesB (+ tachIdxB) → overlay A/B comme temporel dual.
    * @param {{ g:number, fs:number, n:number, t?:number, samples:Int16Array|Array,
-   *           tachIdx?:number[], view?:'time'|'fft', source?:string }} opts
+   *           tachIdx?:number[], samplesB?:Int16Array|Array, tachIdxB?:number[],
+   *           nB?:number, tB?:number, view?:'time'|'fft', source?:string }} opts
    */
   function importBuffer(opts) {
     opts = opts || {};
@@ -319,14 +321,24 @@ const AnalSession = (() => {
       _log('[TEMPO] importBuffer: payload invalide');
       return false;
     }
+    const samplesB = opts.samplesB;
+    const nB = opts.nB || (samplesB && samplesB.length) || 0;
+    const wantDual = !!(samplesB && nB >= 64);
+
     reset(true);
     _g = String(g);
     _fs = String(Math.round(fs));
-    _dual = false;
+    _dual = wantDual;
     _showTempoStart(false);
 
     const tSec = (opts.t != null && opts.t > 0) ? opts.t : (n / fs);
     const raw = (samples instanceof Int16Array) ? samples : Int16Array.from(samples);
+
+    if (wantDual && typeof analyseImportDualArm === 'function') {
+      analyseImportDualArm();
+    } else if (typeof analyseResetDualSession === 'function') {
+      analyseResetDualSession();
+    }
 
     if (typeof analyseReceiveBloc === 'function') {
       analyseReceiveBloc(g, fs, tSec, n, raw);
@@ -334,6 +346,18 @@ const AnalSession = (() => {
     if (opts.tachIdx && opts.tachIdx.length && typeof analyseSetTachMarks === 'function') {
       analyseSetTachMarks(opts.tachIdx);
     }
+
+    if (wantDual) {
+      const tB = (opts.tB != null && opts.tB > 0) ? opts.tB : (nB / fs);
+      const rawB = (samplesB instanceof Int16Array) ? samplesB : Int16Array.from(samplesB);
+      if (typeof analyseReceiveBlocB === 'function') {
+        analyseReceiveBlocB(g, fs, tB, nB, rawB);
+      }
+      if (opts.tachIdxB && opts.tachIdxB.length && typeof analyseSetTachMarksB === 'function') {
+        analyseSetTachMarksB(opts.tachIdxB);
+      }
+    }
+
     const view = (opts.view === 'time') ? 'time' : 'fft';
     if (typeof analyseSetView === 'function') analyseSetView(view);
     else if (typeof anMode !== 'undefined') anMode = view;
@@ -341,7 +365,8 @@ const AnalSession = (() => {
     _setState(S.READY);
     if (typeof showTab === 'function') showTab('analyse');
     _log('[TEMPO] READY ← import ' + (opts.source || 'externe') +
-      ' N=' + n + ' FS=' + Math.round(fs) + ' G=' + g);
+      ' N=' + n + (wantDual ? (' +B N=' + nB) : '') +
+      ' FS=' + Math.round(fs) + ' G=' + g);
     return true;
   }
 

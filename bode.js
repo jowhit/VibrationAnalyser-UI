@@ -1,8 +1,9 @@
 // bode.js — Module Bode brut : preview live + post-STOP 1X vs RPM (JS only)
-// Canal A (mono v1) — structures prêtes pour B plus tard.
+// Mono A / mono B / duo AB (overlay bleu/orange).
 
 const BodeModule = (() => {
   const COL_A = '#0033cc';
+  const COL_B = '#e67e22';
   const BODE_LIVE_HZ = 50;
   const TACH_STALE_MS = 1500;
 
@@ -11,19 +12,26 @@ const BodeModule = (() => {
   let _gRange = 2;
   let _fs = 4000;
   let _nCfg = 45000;
+  let _dual = false;
+  let _showA = true;
+  let _showB = true;
 
   // Preview live
   let _liveCanvas, _liveCtx;
   let _liveWin = null;
   let _liveHead = 0;
   let _liveFilled = false;
+  let _liveWinB = null;
+  let _liveHeadB = 0;
+  let _liveFilledB = false;
   let _liveRaf = null;
   let _liveRunning = false;
 
   // Final Bode
   let _phaseCanvas, _phaseCtx;
   let _ampCanvas, _ampCtx;
-  let _ptsA = []; // { rpm, amp, phase }
+  let _ptsA = []; // { rpm, amp, phase, canal }
+  let _ptsB = [];
   let _rpm = 0;
   let _lastTachMs = 0;
   let _lastRange = null;
@@ -34,6 +42,9 @@ const BodeModule = (() => {
   let _rawSamples = null;
   let _rawMeta = null;
   let _tachUs = [];
+  let _rawSamplesB = null;
+  let _rawMetaB = null;
+  let _tachUsB = [];
 
   function init() {
     if (_initialized) return;
@@ -55,16 +66,62 @@ const BodeModule = (() => {
     }
     _bindCursorEvents(_phaseCanvas);
     _bindCursorEvents(_ampCanvas);
+    const visA = document.getElementById('btn-bode-vis-a');
+    const visB = document.getElementById('btn-bode-vis-b');
+    if (visA) visA.addEventListener('click', function () { toggleVis('A'); });
+    if (visB) visB.addEventListener('click', function () { toggleVis('B'); });
     window.addEventListener('resize', resize);
     _applyLayout();
     resize();
+  }
+
+  function setDual(on) {
+    _dual = !!on;
+    if (!_dual) {
+      _showA = true;
+      _showB = true;
+    }
+    _syncVisUi();
+  }
+
+  function toggleVis(ch) {
+    if (ch === 'A') _showA = !_showA;
+    else if (ch === 'B') _showB = !_showB;
+    if (!_showA && !_showB) {
+      if (ch === 'A') _showB = true;
+      else _showA = true;
+    }
+    _syncVisUi();
+    if (_mode === 'preview') _drawLive();
+    else _drawBodeCharts();
+    _updateCursorReadout();
+  }
+
+  function _syncVisUi() {
+    const row = document.getElementById('bode-vis-row');
+    if (row) row.style.display = _dual ? 'flex' : 'none';
+    const visA = document.getElementById('btn-bode-vis-a');
+    const visB = document.getElementById('btn-bode-vis-b');
+    if (visA) visA.classList.toggle('active', _showA);
+    if (visB) visB.classList.toggle('active', _showB);
+  }
+
+  function _visiblePts() {
+    const out = [];
+    if (_showA && _ptsA.length) {
+      for (let i = 0; i < _ptsA.length; i++) out.push(_ptsA[i]);
+    }
+    if (_dual && _showB && _ptsB.length) {
+      for (let i = 0; i < _ptsB.length; i++) out.push(_ptsB[i]);
+    }
+    return out;
   }
 
   function _bindCursorEvents(canvas) {
     if (!canvas) return;
     canvas.style.touchAction = 'none';
     const onPtr = function (e) {
-      if (_mode !== 'bode' || !_ptsA.length) return;
+      if (_mode !== 'bode' || !_visiblePts().length) return;
       e.preventDefault();
       _setCursorFromClientX(canvas, e.clientX);
     };
@@ -94,20 +151,22 @@ const BodeModule = (() => {
   }
 
   function _nearestPt(rpm) {
-    if (!_ptsA.length || !(rpm > 0 || rpm === 0)) return null;
-    let best = _ptsA[0], bestD = Math.abs(_ptsA[0].rpm - rpm);
-    for (let i = 1; i < _ptsA.length; i++) {
-      const d = Math.abs(_ptsA[i].rpm - rpm);
-      if (d < bestD) { bestD = d; best = _ptsA[i]; }
+    const pts = _visiblePts();
+    if (!pts.length || !(rpm > 0 || rpm === 0)) return null;
+    let best = pts[0], bestD = Math.abs(pts[0].rpm - rpm);
+    for (let i = 1; i < pts.length; i++) {
+      const d = Math.abs(pts[i].rpm - rpm);
+      if (d < bestD) { bestD = d; best = pts[i]; }
     }
     return best;
   }
 
   function _peakPt() {
-    if (!_ptsA.length) return null;
-    let peak = _ptsA[0];
-    for (let i = 1; i < _ptsA.length; i++) {
-      if (_ptsA[i].amp > peak.amp) peak = _ptsA[i];
+    const pts = _visiblePts();
+    if (!pts.length) return null;
+    let peak = pts[0];
+    for (let i = 1; i < pts.length; i++) {
+      if (pts[i].amp > peak.amp) peak = pts[i];
     }
     return peak;
   }
@@ -128,8 +187,9 @@ const BodeModule = (() => {
       return;
     }
     const hz = pt.rpm / 60;
+    const ch = pt.canal ? ('[' + pt.canal + '] ') : '';
     el.textContent =
-      'Curseur  RPM=' + Math.round(pt.rpm) +
+      ch + 'Curseur  RPM=' + Math.round(pt.rpm) +
       '  (' + hz.toFixed(2) + ' Hz)' +
       '  |  Amp=' + _fmtAmp(pt.amp) + ' g' +
       '  |  Phase=' + pt.phase.toFixed(1) + '°';
@@ -176,6 +236,9 @@ const BodeModule = (() => {
     _liveWin = null;
     _liveHead = 0;
     _liveFilled = false;
+    _liveWinB = null;
+    _liveHeadB = 0;
+    _liveFilledB = false;
   }
 
   function startLiveAnim() {
@@ -217,18 +280,40 @@ const BodeModule = (() => {
     if (rpm > 30 && rpm < 120000) updateRpmBar(rpm);
   }
 
-  function onLive(rawVal) {
+  function _pushLive(rawVal, isB) {
     const T = _nCfg / _fs;
     const target = Math.max(32, Math.floor(T * BODE_LIVE_HZ));
     const gVal = (Number(rawVal) || 0) * (_gRange / 32768.0);
-    if (!_liveWin || _liveWin.length !== target) {
-      _liveWin = new Float32Array(target);
-      _liveHead = 0;
-      _liveFilled = false;
+    if (isB) {
+      if (!_liveWinB || _liveWinB.length !== target) {
+        _liveWinB = new Float32Array(target);
+        _liveHeadB = 0;
+        _liveFilledB = false;
+      }
+      _liveWinB[_liveHeadB] = gVal;
+      _liveHeadB = (_liveHeadB + 1) % _liveWinB.length;
+      if (_liveHeadB === 0) _liveFilledB = true;
+    } else {
+      if (!_liveWin || _liveWin.length !== target) {
+        _liveWin = new Float32Array(target);
+        _liveHead = 0;
+        _liveFilled = false;
+      }
+      _liveWin[_liveHead] = gVal;
+      _liveHead = (_liveHead + 1) % _liveWin.length;
+      if (_liveHead === 0) _liveFilled = true;
     }
-    _liveWin[_liveHead] = gVal;
-    _liveHead = (_liveHead + 1) % _liveWin.length;
-    if (_liveHead === 0) _liveFilled = true;
+  }
+
+  function onLive(rawVal) {
+    _pushLive(rawVal, false);
+    if (typeof BodeModuleSession !== 'undefined' && BodeModuleSession.onLive) {
+      BodeModuleSession.onLive();
+    }
+  }
+
+  function onLiveB(rawVal) {
+    _pushLive(rawVal, true);
     if (typeof BodeModuleSession !== 'undefined' && BodeModuleSession.onLive) {
       BodeModuleSession.onLive();
     }
@@ -239,31 +324,41 @@ const BodeModule = (() => {
     if (el) el.textContent = text || '—';
   }
 
+  function _strokeLiveWin(c, win, head, filled, color, W, H, ymax) {
+    if (!win || !win.length) return;
+    const n = win.length;
+    c.strokeStyle = color;
+    c.lineWidth = 1.5;
+    c.beginPath();
+    let started = false;
+    for (let i = 0; i < n; i++) {
+      const idx = filled ? (head + i) % n : i;
+      if (!filled && i >= head) break;
+      const v = win[idx];
+      const x = (i / Math.max(1, n - 1)) * W;
+      const y = H / 2 - (v / ymax) * (H * 0.45);
+      if (!started) { c.moveTo(x, y); started = true; }
+      else c.lineTo(x, y);
+    }
+    if (started) c.stroke();
+  }
+
   function _drawLive() {
-    if (!_liveCtx || !_liveCanvas || !_liveWin) return;
+    if (!_liveCtx || !_liveCanvas) return;
+    if (!_liveWin && !_liveWinB) return;
     const c = _liveCtx;
     const W = _liveCanvas.width, H = _liveCanvas.height;
     if (W < 8 || H < 8) return;
     c.clearRect(0, 0, W, H);
     c.fillStyle = '#fff';
     c.fillRect(0, 0, W, H);
-    const n = _liveWin.length;
     const ymax = Math.max(0.2, _gRange * 1.05);
     c.strokeStyle = '#ddd';
     c.beginPath(); c.moveTo(0, H / 2); c.lineTo(W, H / 2); c.stroke();
-    c.strokeStyle = COL_A;
-    c.lineWidth = 1.5;
-    c.beginPath();
-    for (let i = 0; i < n; i++) {
-      const idx = _liveFilled ? (_liveHead + i) % n : i;
-      if (!_liveFilled && i >= _liveHead) break;
-      const v = _liveWin[idx];
-      const x = (i / (n - 1)) * W;
-      const y = H / 2 - (v / ymax) * (H * 0.45);
-      if (i === 0) c.moveTo(x, y);
-      else c.lineTo(x, y);
+    if (_showA) _strokeLiveWin(c, _liveWin, _liveHead, _liveFilled, COL_A, W, H, ymax);
+    if (_dual && _showB) {
+      _strokeLiveWin(c, _liveWinB, _liveHeadB, _liveFilledB, COL_B, W, H, ymax);
     }
-    c.stroke();
   }
 
   // ── Binary payload ──────────────────────────────────────────
@@ -273,6 +368,14 @@ const BodeModule = (() => {
     _tachUs = [];
     if (_rawMeta.g) _gRange = _rawMeta.g;
     if (_rawMeta.fs) _fs = _rawMeta.fs;
+  }
+
+  function beginBinaryB(meta) {
+    _rawMetaB = Object.assign({}, _rawMetaB || {}, meta || {});
+    _rawSamplesB = null;
+    _tachUsB = [];
+    if (_rawMetaB.g) _gRange = _rawMetaB.g;
+    if (_rawMetaB.fs) _fs = _rawMetaB.fs;
   }
 
   /** Met à jour meta après beginBinary (ex. T0 reçu tard). */
@@ -286,44 +389,72 @@ const BodeModule = (() => {
     _rawSamples = int16arr;
   }
 
+  function onSamplesB(int16arr) {
+    _rawSamplesB = int16arr;
+  }
+
   function onTachUs(list) {
     _tachUs = list || [];
   }
 
+  function onTachUsB(list) {
+    _tachUsB = list || [];
+  }
+
   function finalizeFromRaw() {
-    if (!_rawSamples || !_rawSamples.length) {
+    const hasA = _rawSamples && _rawSamples.length;
+    const hasB = _dual && _rawSamplesB && _rawSamplesB.length;
+    if (!hasA && !hasB) {
       setStatus('Buffer vide');
       return false;
     }
-    const fs = (_rawMeta && _rawMeta.fs) || _fs;
-    const g = (_rawMeta && _rawMeta.g) || _gRange;
-    const t0 = (_rawMeta && _rawMeta.t0) || 0;
-    _ptsA = _computeBode1X(_rawSamples, fs, g, t0, _tachUs);
+    _ptsA = [];
+    _ptsB = [];
+    if (hasA) {
+      const fs = (_rawMeta && _rawMeta.fs) || _fs;
+      const g = (_rawMeta && _rawMeta.g) || _gRange;
+      const t0 = (_rawMeta && _rawMeta.t0) || 0;
+      _ptsA = _computeBode1X(_rawSamples, fs, g, t0, _tachUs, 'A');
+    }
+    if (hasB) {
+      const fsB = (_rawMetaB && _rawMetaB.fs) || _fs;
+      const gB = (_rawMetaB && _rawMetaB.g) || _gRange;
+      const t0B = (_rawMetaB && _rawMetaB.t0) || 0;
+      _ptsB = _computeBode1X(_rawSamplesB, fsB, gB, t0B, _tachUsB, 'B');
+    }
     const peak = _peakPt();
     _cursorRpm = peak ? peak.rpm : null;
+    const nPts = _ptsA.length + _ptsB.length;
     const info = document.getElementById('bode-mod-info');
     if (info) {
-      info.textContent = 'N samples=' + _rawSamples.length +
-        '  tach=' + _tachUs.length +
-        '  pts 1X=' + _ptsA.length +
+      const fs = (_rawMeta && _rawMeta.fs) || (_rawMetaB && _rawMetaB.fs) || _fs;
+      info.textContent =
+        (_dual ? 'DOUBLE  ' : '') +
+        'A: N=' + (hasA ? _rawSamples.length : 0) + ' pts=' + _ptsA.length +
+        (_dual
+          ? ('  |  B: N=' + (hasB ? _rawSamplesB.length : 0) + ' pts=' + _ptsB.length)
+          : ('  tach=' + _tachUs.length)) +
         '  FS=' + fs +
         (peak ? ('  |  Pic amp @ ' + Math.round(peak.rpm) + ' RPM') : '');
     }
     showBodeResult();
     _updateCursorReadout();
     const saveBtn = document.getElementById('btn-bode-save');
-    if (saveBtn) saveBtn.style.display = _ptsA.length ? 'inline-block' : 'none';
-    setStatus(_ptsA.length ? ('Bode 1X — ' + _ptsA.length + ' points') : 'Pas assez de tours tach');
-    return _ptsA.length > 0;
+    if (saveBtn) saveBtn.style.display = nPts ? 'inline-block' : 'none';
+    setStatus(nPts
+      ? ('Bode 1X — ' + nPts + ' points' + (_dual ? ' (A+B)' : ''))
+      : 'Pas assez de tours tach');
+    return nPts > 0;
   }
 
   /**
    * Order tracking 1X : une fenêtre par tour (pulse → pulse).
    */
-  function _computeBode1X(samples, fs, gRange, t0u32, tachAbs) {
+  function _computeBode1X(samples, fs, gRange, t0u32, tachAbs, canal) {
     const N = samples.length;
     const periodUs = 1000000 / fs;
     const lsbPerG = 16384 / gRange; // cohérent HarmonicModule
+    const ch = canal || 'A';
     const out = [];
     if (!tachAbs || tachAbs.length < 2) return out;
 
@@ -365,7 +496,7 @@ const BodeModule = (() => {
       let phase = Math.atan2(sumSin, sumCos) * 180 / Math.PI;
       if (phase < 0) phase += 360;
       if (phase >= 360) phase -= 360;
-      out.push({ rpm: rpm, amp: amp, phase: phase, canal: 'A' });
+      out.push({ rpm: rpm, amp: amp, phase: phase, canal: ch });
     }
 
     out.sort(function (a, b) { return a.rpm - b.rpm; });
@@ -418,7 +549,7 @@ const BodeModule = (() => {
     };
   }
 
-  function _drawChart(ctx, canvas, title, yUnit, pts, range, yNormOf, yTickVal, thin) {
+  function _drawChart(ctx, canvas, title, yUnit, series, range, yNormOf, yTickVal, thin) {
     if (!ctx || !canvas) return;
     const W = canvas.width, H = canvas.height;
     if (W < 10 || H < 10) return;
@@ -437,7 +568,6 @@ const BodeModule = (() => {
     ctx.textAlign = 'left';
     ctx.fillText(title, padL, 12);
 
-    // Unité Y (titre court à gauche)
     ctx.save();
     ctx.translate(11, padT + gH / 2);
     ctx.rotate(-Math.PI / 2);
@@ -454,7 +584,6 @@ const BodeModule = (() => {
       return padT + (1 - norm) * gH;
     }
 
-    // Grille + ticks RPM (X)
     const nTickX = 4;
     for (let t = 0; t <= nTickX; t++) {
       const rpm = range.rMin + (range.rMax - range.rMin) * t / nTickX;
@@ -475,7 +604,6 @@ const BodeModule = (() => {
       ctx.fillText('RPM', W - padR, H - 6);
     }
 
-    // Grille + ticks Y (phase ° / amp g)
     const nTickY = thin ? 3 : 4;
     ctx.font = '10px "Courier New", monospace';
     ctx.textAlign = 'right';
@@ -489,26 +617,30 @@ const BodeModule = (() => {
       ctx.fillText(val, padL - 4, y + 3);
     }
 
-    if (!pts.length) {
+    let any = false;
+    for (let s = 0; s < series.length; s++) {
+      const pts = series[s].pts;
+      if (!pts || !pts.length) continue;
+      any = true;
+      ctx.strokeStyle = series[s].color || COL_A;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      for (let i = 0; i < pts.length; i++) {
+        const px = xOf(pts[i].rpm);
+        const py = yPix(yNormOf(pts[i]));
+        if (i === 0) ctx.moveTo(px, py);
+        else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+    }
+
+    if (!any) {
       ctx.fillStyle = '#aaa';
       ctx.textAlign = 'center';
       ctx.fillText('—', padL + gW / 2, padT + gH / 2);
       return;
     }
 
-    // Courbe
-    ctx.strokeStyle = COL_A;
-    ctx.lineWidth = 1.6;
-    ctx.beginPath();
-    for (let i = 0; i < pts.length; i++) {
-      const px = xOf(pts[i].rpm);
-      const py = yPix(yNormOf(pts[i]));
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.stroke();
-
-    // Curseur vertical lié (même RPM sur les 2 graphes)
     if (_cursorRpm != null && _cursorRpm >= range.rMin && _cursorRpm <= range.rMax) {
       const cx = xOf(_cursorRpm);
       ctx.strokeStyle = '#cc3300';
@@ -528,13 +660,17 @@ const BodeModule = (() => {
   }
 
   function _drawBodeCharts() {
-    const range = _axisRange(_ptsA);
+    const vis = _visiblePts();
+    const range = _axisRange(vis.length ? vis : _ptsA);
     _lastRange = range;
     const pSpan = range.pMax - range.pMin || 1;
+    const series = [];
+    if (_showA && _ptsA.length) series.push({ pts: _ptsA, color: COL_A });
+    if (_dual && _showB && _ptsB.length) series.push({ pts: _ptsB, color: COL_B });
     _drawChart(
       _phaseCtx, _phaseCanvas,
       'Phase 1X', '°',
-      _ptsA, range,
+      series, range,
       function (p) { return (p.phase - range.pMin) / pSpan; },
       function (yn) {
         const v = range.pMin + yn * pSpan;
@@ -545,7 +681,7 @@ const BodeModule = (() => {
     _drawChart(
       _ampCtx, _ampCanvas,
       'Amp 1X', 'g',
-      _ptsA, range,
+      series, range,
       function (p) { return p.amp / range.aMax; },
       function (yn) {
         return _fmtAmp(yn * range.aMax);
@@ -579,9 +715,13 @@ const BodeModule = (() => {
 
   function clearResult() {
     _ptsA = [];
+    _ptsB = [];
     _rawSamples = null;
+    _rawSamplesB = null;
     _tachUs = [];
+    _tachUsB = [];
     _rawMeta = null;
+    _rawMetaB = null;
     _cursorRpm = null;
     _lastRange = null;
     const el = document.getElementById('bode-cursor-line');
@@ -590,9 +730,12 @@ const BodeModule = (() => {
     if (saveBtn) saveBtn.style.display = 'none';
   }
 
-  /** Export CSV courbe Bode 1X (RPM, amp g, phase °). */
+  /** Export CSV courbe Bode 1X (RPM, amp g, phase ° [, Canal]). */
   function saveFile() {
-    if (!_ptsA || !_ptsA.length) {
+    const all = [];
+    for (let i = 0; i < _ptsA.length; i++) all.push(_ptsA[i]);
+    for (let i = 0; i < _ptsB.length; i++) all.push(_ptsB[i]);
+    if (!all.length) {
       alert('Aucune courbe Bode — arrêter un enregistrement d\'abord');
       return;
     }
@@ -601,23 +744,25 @@ const BodeModule = (() => {
       'bode_' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')
     );
     if (!nom) return;
+    const dualCsv = _dual || _ptsB.length > 0;
     const lines = [];
     lines.push('# VibrationAnalyser — Bode 1X');
     lines.push('# Date: ' + new Date().toISOString());
     if (_rawMeta) {
       lines.push('# G: ±' + (_rawMeta.g || _gRange) + ' g');
       lines.push('# Fs: ' + (_rawMeta.fs || _fs) + ' Hz');
-      lines.push('# N: ' + (_rawMeta.n || (_rawSamples && _rawSamples.length) || 0));
+      lines.push('# N_A: ' + (_rawMeta.n || (_rawSamples && _rawSamples.length) || 0));
     }
-    lines.push('# Points: ' + _ptsA.length);
-    lines.push('RPM,Amp_g,Phase_deg');
-    for (let i = 0; i < _ptsA.length; i++) {
-      const p = _ptsA[i];
-      lines.push(
-        p.rpm.toFixed(2) + ',' +
-        p.amp.toFixed(6) + ',' +
-        p.phase.toFixed(2)
-      );
+    if (_rawMetaB) {
+      lines.push('# N_B: ' + (_rawMetaB.n || (_rawSamplesB && _rawSamplesB.length) || 0));
+    }
+    lines.push('# Points: ' + all.length + (dualCsv ? ' (A+B)' : ''));
+    lines.push(dualCsv ? 'RPM,Amp_g,Phase_deg,Canal' : 'RPM,Amp_g,Phase_deg');
+    for (let i = 0; i < all.length; i++) {
+      const p = all[i];
+      let row = p.rpm.toFixed(2) + ',' + p.amp.toFixed(6) + ',' + p.phase.toFixed(2);
+      if (dualCsv) row += ',' + (p.canal || 'A');
+      lines.push(row);
     }
     const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
@@ -628,13 +773,15 @@ const BodeModule = (() => {
     URL.revokeObjectURL(url);
   }
 
-  /** Parse CSV Bode (Sauv) → points {rpm,amp,phase}. null si format inconnu. */
+  /** Parse CSV Bode (Sauv) → { ptsA, ptsB }. null si format inconnu. */
   function parseBodeCsv(text) {
     if (!text || typeof text !== 'string') return null;
     const lines = text.split(/\r?\n/);
     let headerSeen = false;
     let looksBode = /Bode\s*1X/i.test(text) || /Amp_g\s*,\s*Phase/i.test(text);
-    const pts = [];
+    let hasCanal = false;
+    const ptsA = [];
+    const ptsB = [];
     for (let i = 0; i < lines.length; i++) {
       const raw = lines[i].trim();
       if (!raw) continue;
@@ -645,39 +792,55 @@ const BodeModule = (() => {
       if (/^RPM\s*,\s*Amp/i.test(raw)) {
         headerSeen = true;
         looksBode = true;
+        hasCanal = /Canal/i.test(raw);
         continue;
       }
       if (!headerSeen && !looksBode) continue;
-      // Accepter données après en-tête, ou lignes numériques si signature Bode
       const parts = raw.split(/[,;\t]/);
       if (parts.length < 3) continue;
       const rpm = parseFloat(parts[0]);
       const amp = parseFloat(parts[1]);
       const phase = parseFloat(parts[2]);
       if (!(rpm >= 0) || !isFinite(amp) || !isFinite(phase)) continue;
-      pts.push({ rpm: rpm, amp: amp, phase: phase });
+      let ch = 'A';
+      if (hasCanal && parts[3]) {
+        const c = String(parts[3]).trim().toUpperCase();
+        if (c === 'B') ch = 'B';
+      }
+      const pt = { rpm: rpm, amp: amp, phase: phase, canal: ch };
+      if (ch === 'B') ptsB.push(pt);
+      else ptsA.push(pt);
     }
-    if (!pts.length || !looksBode) return null;
-    pts.sort(function (a, b) { return a.rpm - b.rpm; });
-    return pts;
+    if ((!ptsA.length && !ptsB.length) || !looksBode) return null;
+    ptsA.sort(function (a, b) { return a.rpm - b.rpm; });
+    ptsB.sort(function (a, b) { return a.rpm - b.rpm; });
+    return { ptsA: ptsA, ptsB: ptsB };
   }
 
   /** Charge une courbe Bode sauvegardée (sans re-passer par Analyse). */
   function loadFromText(text, fileName) {
-    const pts = parseBodeCsv(text);
-    if (!pts) return false;
+    const parsed = parseBodeCsv(text);
+    if (!parsed) return false;
     stopLiveAnim();
-    _ptsA = pts;
+    _ptsA = parsed.ptsA || [];
+    _ptsB = parsed.ptsB || [];
+    _dual = _ptsB.length > 0;
+    _showA = true;
+    _showB = true;
+    _syncVisUi();
     _rawSamples = null;
+    _rawSamplesB = null;
     _tachUs = [];
+    _tachUsB = [];
     _cursorRpm = null;
     _mode = 'bode';
     _applyLayout();
+    const n = _ptsA.length + _ptsB.length;
     const saveBtn = document.getElementById('btn-bode-save');
     if (saveBtn) saveBtn.style.display = '';
-    setStatus('Chargé' + (fileName ? (': ' + fileName) : '') + ' — ' + pts.length + ' pts');
+    setStatus('Chargé' + (fileName ? (': ' + fileName) : '') + ' — ' + n + ' pts');
     const cfg = document.getElementById('bode-cfg-line');
-    if (cfg) cfg.textContent = 'Bode chargé — ' + pts.length + ' points 1X';
+    if (cfg) cfg.textContent = 'Bode chargé — ' + n + ' points 1X';
     showBodeResult();
     return true;
   }
@@ -716,19 +879,25 @@ const BodeModule = (() => {
   return {
     init: init,
     setConfig: setConfig,
+    setDual: setDual,
+    toggleVis: toggleVis,
     showPreview: showPreview,
     showBodeResult: showBodeResult,
     resetLive: resetLive,
     startLiveAnim: startLiveAnim,
     stopLiveAnim: stopLiveAnim,
     onLive: onLive,
+    onLiveB: onLiveB,
     onTachPeriod: onTachPeriod,
     updateRpmBar: updateRpmBar,
     setStatus: setStatus,
     beginBinary: beginBinary,
+    beginBinaryB: beginBinaryB,
     patchMeta: patchMeta,
     onSamples: onSamples,
+    onSamplesB: onSamplesB,
     onTachUs: onTachUs,
+    onTachUsB: onTachUsB,
     finalizeFromRaw: finalizeFromRaw,
     clearResult: clearResult,
     saveFile: saveFile,
