@@ -20,7 +20,7 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=119">
+<link rel="stylesheet" href="style.css?v=129">
 <link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   // Bump à chaque release UI — invalide l'ancien « Compris »
@@ -259,6 +259,10 @@
       </div>
     </div>
     <div class="ctrl-bar mod-cmdbar">
+      <button type="button" id="btn-fft-vis-a" class="ham-vis-btn active" style="display:none;"
+              onclick="fftToggleVis('A')" title="Afficher / masquer A">A</button>
+      <button type="button" id="btn-fft-vis-b" class="ham-vis-btn active" style="display:none;"
+              onclick="fftToggleVis('B')" title="Afficher / masquer B">B</button>
       <button type="button" id="btn-fft-g" class="bal-btn bal-mode-toggle bal-mode-toggle--active" onclick="fftSetUnit('g')">g</button>
       <button type="button" id="btn-fft-vel" class="bal-btn bal-mode-toggle" onclick="fftSetUnit('mm/s')">mm/s</button>
       <button type="button" id="btn-fft-disp" class="bal-btn bal-mode-toggle" onclick="fftSetUnit('mm')">mm</button>
@@ -296,9 +300,20 @@
         <div id="an-hscroll-thumb" class="graph-hscroll-thumb"></div>
       </div>
     </div>
+
+    <!-- Hub : Sync / Bode / LiveFFT (plein écran, leurs cmdbars restent en bas du host) -->
+    <div id="an-host-sync" class="an-module-host" style="display:none;"></div>
+    <div id="an-host-bode" class="an-module-host" style="display:none;"></div>
+    <div id="an-host-fft" class="an-module-host" style="display:none;"></div>
+
+    <!-- Cmdbars modules Analyse — juste au-dessus du chrome ☰ -->
     <div id="an-tempo-cmdbar" class="an-bump-actions mod-cmdbar" style="display:none;">
       <button type="button" id="btn-an-tempo-start" class="bal-btn bal-btn-run mod-start-btn"
               onclick="AnalSession.toggleStart()">&#9654; Démarrer</button>
+    </div>
+    <div id="an-fft-cmdbar" class="an-bump-actions mod-cmdbar" style="display:none;">
+      <button type="button" id="btn-an-fft-start" class="bal-btn bal-btn-run mod-start-btn"
+              onclick="fftToggle()">&#9654; Démarrer</button>
     </div>
     <div id="an-bump-panel" style="display:none;">
       <div class="an-bump-title" id="an-bump-title" data-i18n="an.bumpTitle">MODE BUMP TEST</div>
@@ -307,7 +322,16 @@
         <button type="button" id="btn-bump-start" class="bal-btn bal-btn-run mod-start-btn" onclick="bumpSendStart()">&#9654; Démarrer</button>
       </div>
     </div>
-    <div style="position:relative; flex-shrink:0;">
+
+    <div id="an-sync-tools-bar" class="an-sync-tools-bar mod-cmdbar" style="display:none;" role="group" aria-label="Retour Sync">
+      <button type="button" id="btn-an-sync-back" class="bal-btn"
+              title="Retour vue angulaire TSA">Vue TSA</button>
+      <button type="button" id="btn-an-sync-brut" class="bal-btn" title="Buffer brut">Brut</button>
+      <button type="button" id="btn-an-sync-tsa" class="bal-btn" title="TSA temporel">TSA</button>
+      <button type="button" id="btn-an-sync-res" class="bal-btn" title="Résiduel">Résiduel</button>
+    </div>
+
+    <div class="an-bottom-chrome" style="position:relative; flex-shrink:0;">
       <div id="an-ham-panel" class="ham-panel" style="display:none;">
         <div class="ham-row" id="an-ham-vis-row">
           <button id="btn-an-play" onclick="analysePlay()" data-i18n="an.play">▶ Play</button>
@@ -318,7 +342,7 @@
           <button id="btn-an-vis-b" class="ham-vis-btn active" onclick="analyseToggleVis('B')">👁 B</button>
           <button id="btn-an-vis-tach" class="ham-vis-btn active" onclick="analyseToggleVis('tach')"
                   title="Marqueurs 1X tach (temporel + FFT)">1X</button>
-          <button onclick="analyseFilter()" data-i18n="an.filter">🎸 Filtre</button>
+          <button onclick="analyseFilter()" data-i18n="an.filter">Filtre</button>
           <button id="btn-an-reset" onclick="analyseFilterReset()" style="display:none">✗ Reset</button>
           <button id="btn-an-fft-sel" onclick="analyseFFTSel()" style="display:none">FFT Sél</button>
           <button id="btn-an-sel-clear" onclick="analyseSelClear()" style="display:none">✗ Sél</button>
@@ -389,11 +413,13 @@
         </div>
         <div class="ham-divider"></div>
         <div class="ham-title" data-i18n="an.bearingFreq">FRÉQUENCES ROULEMENTS</div>
-        <div class="ham-field"><label class="ham-lbl-1x">1× RPM</label><input id="demod-rpm" type="number" placeholder="vitesse arbre" data-i18n-placeholder="an.rpmPlaceholder" step="1" min="0"></div>
-        <div class="ham-field"><label class="ham-lbl-bpfi">BPFi ×</label><input id="demod-bpfi" type="number" placeholder="ex: 5.6" step="0.01" min="0"></div>
-        <div class="ham-field"><label class="ham-lbl-bpfo">BPFo ×</label><input id="demod-bpfo" type="number" placeholder="ex: 4.2" step="0.01" min="0"></div>
-        <div class="ham-field"><label class="ham-lbl-bsf">BSF ×</label><input id="demod-bsf" type="number" placeholder="ex: 3.1" step="0.01" min="0"></div>
-        <div class="ham-field"><label class="ham-lbl-ftf">FTF ×</label><input id="demod-ftf" type="number" placeholder="ex: 0.4" step="0.01" min="0"></div>
+        <div class="ham-bearing-grid">
+          <div class="ham-field"><label class="ham-lbl-1x">1× RPM</label><input id="demod-rpm" type="number" placeholder="vitesse arbre" data-i18n-placeholder="an.rpmPlaceholder" step="1" min="0"></div>
+          <div class="ham-field"><label class="ham-lbl-bpfi">BPFi ×</label><input id="demod-bpfi" type="number" placeholder="ex: 5.6" step="0.01" min="0"></div>
+          <div class="ham-field"><label class="ham-lbl-bpfo">BPFo ×</label><input id="demod-bpfo" type="number" placeholder="ex: 4.2" step="0.01" min="0"></div>
+          <div class="ham-field"><label class="ham-lbl-bsf">BSF ×</label><input id="demod-bsf" type="number" placeholder="ex: 3.1" step="0.01" min="0"></div>
+          <div class="ham-field"><label class="ham-lbl-ftf">FTF ×</label><input id="demod-ftf" type="number" placeholder="ex: 0.4" step="0.01" min="0"></div>
+        </div>
         <div class="ham-row"><button class="ham-btn-demod" onclick="analyseRunDemod()" data-i18n="an.runDemod">⚙ Analyser Démod</button></div>
       </div>
       <div class="ctrl-bar an-ctrl-bar mod-cmdbar">
@@ -724,6 +750,12 @@
       <span id="sync-cfg-line" data-i18n="sync.waiting">Synchrone — choisir G/Fs au menu</span>
     </div>
     <div id="sync-status" class="sync-mod-status">—</div>
+    <div class="sync-ratio-row" id="sync-ratio-row">
+      <label for="sync-gear-ratio" title="R = RPM2/RPM_tach. Ex 7/72 → 0.097222 — rééchantillonnage fractionnaire">Ratio</label>
+      <input type="number" id="sync-gear-ratio" min="0.01" max="100" step="any" value="1"
+             title="Décimales exactes OK (0.097222). Pas d'arrondi au tour tach entier.">
+      <span id="sync-rpm2-line" class="sync-rpm2-line">RPM2: —</span>
+    </div>
     <div id="sync-vis-row" class="bode-vis-row" style="display:none;" role="group" aria-label="Canaux">
       <button type="button" id="btn-sync-vis-a" class="ham-vis-btn active">A</button>
       <button type="button" id="btn-sync-vis-b" class="ham-vis-btn active">B</button>
@@ -861,41 +893,37 @@
       <!-- ── Layout MODE 2P ─────────────────────────────────── -->
       <div id="bal-layout-2p" style="display:none; flex-direction:column; flex:1; overflow:hidden; min-height:0;">
 
-        <!-- Deux polaires côte à côte — TAPPABLES -->
-        <div class="bal-2p-polars">
-
-          <!-- Polaire A -->
-          <div id="bal-polar-a" class="bal-polar-card"
-               onclick="BalanceModule.selectSensor('A')">
-            <div class="bal-polar-card-title">
-              <span class="bal-polar-sensor-dot" style="background:#1a6fc4"></span>
-              <span data-i18n="bal.planeA">Palier A</span>
-              <span class="bal-polar-sensor-lbl" data-i18n="bal.sensor">◀ sonde</span>
+        <!-- Polaires + légende (bloc gauche sur desktop) -->
+        <div class="bal-2p-charts">
+          <div class="bal-2p-polars">
+            <div id="bal-polar-a" class="bal-polar-card"
+                 onclick="BalanceModule.selectSensor('A')">
+              <div class="bal-polar-card-title">
+                <span class="bal-polar-sensor-dot" style="background:#1a6fc4"></span>
+                <span data-i18n="bal.planeA">Palier A</span>
+                <span class="bal-polar-sensor-lbl" data-i18n="bal.sensor">◀ sonde</span>
+              </div>
+              <canvas id="bal-canvas-a"></canvas>
             </div>
-            <canvas id="bal-canvas-a"></canvas>
-          </div>
-
-          <!-- Polaire B -->
-          <div id="bal-polar-b" class="bal-polar-card"
-               onclick="BalanceModule.selectSensor('B')">
-            <div class="bal-polar-card-title">
-              <span class="bal-polar-sensor-dot" style="background:#2a8a3e"></span>
-              <span data-i18n="bal.planeB">Palier B</span>
-              <span class="bal-polar-sensor-lbl" data-i18n="bal.sensor">◀ sonde</span>
+            <div id="bal-polar-b" class="bal-polar-card"
+                 onclick="BalanceModule.selectSensor('B')">
+              <div class="bal-polar-card-title">
+                <span class="bal-polar-sensor-dot" style="background:#2a8a3e"></span>
+                <span data-i18n="bal.planeB">Palier B</span>
+                <span class="bal-polar-sensor-lbl" data-i18n="bal.sensor">◀ sonde</span>
+              </div>
+              <canvas id="bal-canvas-b"></canvas>
             </div>
-            <canvas id="bal-canvas-b"></canvas>
           </div>
-        </div>
-
-        <!-- Légende condition -->
-        <div class="bal-legend" style="padding:0 8px; flex-shrink:0;">
-          <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#1a6fc4"></span><span data-i18n="bal.cond1">Cond.1</span></span>
-          <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#2a8a3e"></span><span data-i18n="bal.cond2">Cond.2 (masse A)</span></span>
-          <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#c45a00"></span><span data-i18n="bal.cond3">Cond.3 (masse B)</span></span>
+          <div class="bal-legend bal-2p-legend">
+            <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#1a6fc4"></span><span data-i18n="bal.cond1">Cond.1</span></span>
+            <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#2a8a3e"></span><span data-i18n="bal.cond2">Cond.2 (masse A)</span></span>
+            <span class="bal-leg-item"><span class="bal-leg-dot" style="background:#c45a00"></span><span data-i18n="bal.cond3">Cond.3 (masse B)</span></span>
+          </div>
         </div>
 
         <!-- Status et contrôles 2P -->
-        <div class="bal-ctrl-area" style="padding:0 8px; overflow:hidden; flex:1; min-height:0;">
+        <div class="bal-ctrl-area bal-ctrl-area--2p">
           <div id="bal-status-2p" class="bal-status" style="margin-top:4px;" data-i18n="bal.ready2p">Prêt — cliquer Démarrer</div>
           <div id="bal-params-2p" class="bal-params" style="display:none;">
             <div id="bal-params-title-2p" class="bal-params-title" data-i18n="bal.trialMass">Masse essai</div>
@@ -964,7 +992,7 @@
               <button type="button" class="bal-btn bal-mode-toggle bal-mode-toggle--active" data-bal-win="16">16</button>
               <button type="button" class="bal-btn bal-mode-toggle" data-bal-win="32">32</button>
             </div>
-            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v119</div>
+            <div class="bal-more-stamp" id="bal-build-stamp" title="Version UI">v129</div>
           </div>
         </div>
         <button id="btn-bal-run" class="bal-btn bal-btn-run" disabled>&#9654; Démarrer</button>
@@ -1057,24 +1085,24 @@
 
 </div><!-- #main -->
 
-<script src="i18n.js?v=119"></script>
-<script src="terminal.js?v=119"></script>
-<script src="fft.js?v=119"></script>
-<script src="fft-session.js?v=119"></script>
+<script src="i18n.js?v=129"></script>
+<script src="terminal.js?v=129"></script>
+<script src="fft.js?v=129"></script>
+<script src="fft-session.js?v=129"></script>
 <script src="demod.js?v=16"></script>
-<script src="analyse.js?v=119"></script>
-<script src="anal-session.js?v=119"></script>
-<script src="bump-session.js?v=119"></script>
-<script src="calc.js?v=119"></script>
-<script src="balance.js?v=119"></script>
+<script src="analyse.js?v=129"></script>
+<script src="anal-session.js?v=129"></script>
+<script src="bump-session.js?v=129"></script>
+<script src="calc.js?v=129"></script>
+<script src="balance.js?v=129"></script>
 <script src="balance-session.js?v=70"></script>
-<script src="harmonic.js?v=119"></script>
-<script src="phase-session.js?v=119"></script>
-<script src="bode.js?v=119"></script>
-<script src="bode-session.js?v=119"></script>
-<script src="sync.js?v=119"></script>
-<script src="sync-session.js?v=119"></script>
-<script src="menu.js?v=119"></script>
-<script src="app.js?v=119"></script>
+<script src="harmonic.js?v=129"></script>
+<script src="phase-session.js?v=129"></script>
+<script src="bode.js?v=129"></script>
+<script src="bode-session.js?v=129"></script>
+<script src="sync.js?v=129"></script>
+<script src="sync-session.js?v=129"></script>
+<script src="menu.js?v=129"></script>
+<script src="app.js?v=129"></script>
 </body>
 </html>

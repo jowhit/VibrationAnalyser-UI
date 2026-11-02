@@ -97,6 +97,14 @@ const BodeModuleSession = (() => {
     if (!silent) _log('[BODE] reset → IDLE');
   }
 
+  function _showBodeHub() {
+    if (typeof anSetHubMode === 'function') anSetHubMode('bode');
+    if (typeof showTab === 'function') showTab('analyse');
+    if (typeof BodeModule !== 'undefined' && BodeModule.resize) {
+      setTimeout(function () { BodeModule.resize(); }, 40);
+    }
+  }
+
   function enter() {
     if (_state === S.READY || _state === S.RECORDING) {
       if (_isDualWanted() && typeof DualSession !== 'undefined') {
@@ -106,6 +114,15 @@ const BodeModuleSession = (() => {
           BodeModule.setDual(_dual);
         }
       }
+      _showBodeHub();
+      return;
+    }
+    // Reprise session avec courbes : ne pas clearResult (comme Sync VIEW)
+    if (_state === S.VIEW || _state === S.FINALIZE) {
+      if (typeof BodeModule !== 'undefined') {
+        if (_state === S.VIEW && BodeModule.showBodeResult) BodeModule.showBodeResult();
+      }
+      _showBodeHub();
       return;
     }
 
@@ -128,7 +145,7 @@ const BodeModuleSession = (() => {
     _binA = _binB = false;
     _setBtnRunning(false);
     _state = S.READY;
-    if (typeof showTab === 'function') showTab('bode');
+    _showBodeHub();
     _log('[BODE] ' + (_dual ? 'DOUBLE ' : '') + 'READY');
   }
 

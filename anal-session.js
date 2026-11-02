@@ -117,6 +117,7 @@ const AnalSession = (() => {
     _g = (opts.g != null && opts.g !== '') ? String(opts.g) : '16';
     _fs = (opts.fs != null && opts.fs !== '') ? String(opts.fs) : '16';
     _setState(S.ARMED);
+    if (typeof anSetHubMode === 'function') anSetHubMode(null);
     const bumpPanel = document.getElementById('an-bump-panel');
     if (bumpPanel) bumpPanel.style.display = 'none';
     if (typeof anMode !== 'undefined') anMode = 'time';

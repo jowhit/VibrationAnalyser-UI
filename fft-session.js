@@ -23,17 +23,21 @@ const FftSession = (() => {
   }
 
   function _setBtnRunning(on) {
-    const btn = document.getElementById('btn-fft-start');
-    if (!btn) return;
-    if (on) {
-      btn.textContent = (typeof t === 'function') ? t('common.stop') : '◼ Arrêter';
-      btn.classList.add('bal-btn-stop');
-      btn.classList.remove('bal-btn-run', 'running');
-    } else {
-      btn.textContent = (typeof t === 'function') ? t('common.start') : '▶ Démarrer';
-      btn.classList.remove('bal-btn-stop');
-      btn.classList.add('bal-btn-run');
+    const ids = ['btn-fft-start', 'btn-an-fft-start'];
+    for (let i = 0; i < ids.length; i++) {
+      const btn = document.getElementById(ids[i]);
+      if (!btn) continue;
+      if (on) {
+        btn.textContent = (typeof t === 'function') ? t('common.stop') : '◼ Arrêter';
+        btn.classList.add('bal-btn-stop');
+        btn.classList.remove('bal-btn-run', 'running');
+      } else {
+        btn.textContent = (typeof t === 'function') ? t('common.start') : '▶ Démarrer';
+        btn.classList.remove('bal-btn-stop');
+        btn.classList.add('bal-btn-run');
+      }
     }
+    if (typeof anApplyLayoutByMode === 'function') anApplyLayoutByMode();
   }
 
   function _stopEsp() {
@@ -52,6 +56,7 @@ const FftSession = (() => {
     _dual = false;
     if (typeof fftRunning !== 'undefined') fftRunning = false;
     if (typeof _fftDualSession !== 'undefined') _fftDualSession = false;
+    if (typeof _fftUpdateVisBtns === 'function') _fftUpdateVisBtns();
     if (typeof _fftWaitHide === 'function') _fftWaitHide();
     _setBtnRunning(false);
     if (!silent) _log('[FFT] reset → IDLE');
@@ -83,6 +88,9 @@ const FftSession = (() => {
       ? (DualSession.is() || DualSession.available())
       : _dual;
     if (typeof _fftDualSession !== 'undefined') _fftDualSession = _dual;
+    if (typeof fftShowA !== 'undefined') fftShowA = true;
+    if (typeof fftShowB !== 'undefined') fftShowB = true;
+    if (typeof _fftUpdateVisBtns === 'function') _fftUpdateVisBtns();
 
     if (typeof _fftWaitShow === 'function') {
       _fftWaitShow(_dual ? 'Live FFT A+B…' : 'Live FFT…');
@@ -99,7 +107,41 @@ const FftSession = (() => {
     fftRunning = true;
     _state = S.STREAMING;
     _setBtnRunning(true);
+    if (typeof anSetHubMode === 'function') anSetHubMode('livefft');
+    if (typeof showTab === 'function') showTab('analyse');
     _log('[FFT] ' + (_dual ? 'DOUBLE' : 'mono') + ' — STREAMING');
+  }
+
+  function _handoffLastBurstToAnalyse() {
+    if (typeof analyseReceiveBloc !== 'function') return false;
+    if (!_fftLastRawA || !_fftLastMetaA) return false;
+    const g = _fftLastMetaA.g;
+    const fs = _fftLastMetaA.fs;
+    const n = _fftLastMetaA.n || _fftLastRawA.length;
+    const tSec = n / fs;
+    const dual = !!( _dual && _fftLastRawB && _fftLastRawB.length >= 64);
+    if (dual && typeof analyseImportDualArm === 'function') {
+      analyseImportDualArm();
+    } else if (typeof analyseResetDualSession === 'function') {
+      analyseResetDualSession();
+    }
+    if (typeof anSetHubMode === 'function') anSetHubMode(null);
+    analyseReceiveBloc(g, fs, tSec, n, _fftLastRawA);
+    if (dual && typeof analyseReceiveBlocB === 'function') {
+      const nB = _fftLastMetaB.n || _fftLastRawB.length;
+      analyseReceiveBlocB(
+        _fftLastMetaB.g || g,
+        _fftLastMetaB.fs || fs,
+        nB / (_fftLastMetaB.fs || fs),
+        nB,
+        _fftLastRawB
+      );
+    }
+    if (typeof analyseSetView === 'function') analyseSetView('fft');
+    else if (typeof anMode !== 'undefined') anMode = 'fft';
+    if (typeof anApplyLayoutByMode === 'function') anApplyLayoutByMode();
+    if (typeof showTab === 'function') showTab('analyse');
+    return true;
   }
 
   function stop() {
@@ -110,8 +152,15 @@ const FftSession = (() => {
     if (typeof _fftWaitHide === 'function') _fftWaitHide();
     _state = S.VIEW;
     _setBtnRunning(false);
-    if (typeof fftDraw === 'function') fftDraw();
-    _log('[FFT] stop — VIEW');
+    // STOP → outils post-traitement Analyse (comme Bump)
+    if (_handoffLastBurstToAnalyse()) {
+      _log('[FFT] stop — outils Analyse (dernier burst)');
+    } else {
+      if (typeof anSetHubMode === 'function') anSetHubMode('livefft');
+      if (typeof showTab === 'function') showTab('analyse');
+      if (typeof fftDraw === 'function') fftDraw();
+      _log('[FFT] stop — VIEW live (pas de buffer)');
+    }
   }
 
   function _failNav() {
@@ -132,15 +181,27 @@ const FftSession = (() => {
     _state = S.READY;
     fftRunning = false;
     _setBtnRunning(false);
+    if (typeof _fftDualSession !== 'undefined') _fftDualSession = _dual;
+    if (typeof fftShowA !== 'undefined') fftShowA = true;
+    if (typeof fftShowB !== 'undefined') fftShowB = true;
+    if (typeof _fftUpdateVisBtns === 'function') _fftUpdateVisBtns();
     if (typeof _fftWaitHide === 'function') _fftWaitHide();
-    if (typeof showTab === 'function') showTab('fft');
+    if (typeof anSetHubMode === 'function') anSetHubMode('livefft');
+    if (typeof showTab === 'function') showTab('analyse');
     _log('[FFT] READY' + (_dual ? ' A+B' : '') + ' — appuyer Démarrer');
   }
 
   /** Menu : ouvrir l'onglet, attendre le bouton (pas de LIVE_START). */
   function enter() {
     if (_state === S.READY || _state === S.STREAMING) {
-      if (typeof showTab === 'function') showTab('fft');
+      if (typeof anSetHubMode === 'function') anSetHubMode('livefft');
+      if (typeof showTab === 'function') showTab('analyse');
+      return;
+    }
+    if (_state === S.VIEW) {
+      // Reprise : outils Analyse si handoff déjà fait, sinon panneau live
+      if (typeof anSetHubMode === 'function') anSetHubMode(null);
+      if (typeof showTab === 'function') showTab('analyse');
       return;
     }
     if (_state !== S.IDLE) reset(true);

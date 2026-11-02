@@ -17,6 +17,8 @@ const SyncModule = (() => {
   let _dual = false;
   let _showA = true;
   let _showB = true;
+  /** Ratio gearbox : RPM2 = RPM_tach × R ; TSA sur tours secondaires (dt_eff = dt/R). */
+  let _gearRatio = 1;
 
   let _traceCanvas, _traceCtx;
   let _fftCanvas, _fftCtx;
@@ -101,10 +103,54 @@ const SyncModule = (() => {
     const visB = document.getElementById('btn-sync-vis-b');
     if (visA) visA.addEventListener('click', function () { toggleVis('A'); });
     if (visB) visB.addEventListener('click', function () { toggleVis('B'); });
+    const ratioInp = document.getElementById('sync-gear-ratio');
+    if (ratioInp && !ratioInp.dataset.bound) {
+      ratioInp.dataset.bound = '1';
+      const apply = function () {
+        setGearRatio(ratioInp.value);
+      };
+      ratioInp.addEventListener('change', apply);
+      ratioInp.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); apply(); }
+      });
+    }
     _bindLinearInteractions();
     window.addEventListener('resize', resize);
     _applyLayout();
     resize();
+  }
+
+  function setGearRatio(r) {
+    const v = parseFloat(r);
+    _gearRatio = (v > 0 && isFinite(v)) ? v : 1;
+    const inp = document.getElementById('sync-gear-ratio');
+    if (inp && String(inp.value) !== String(_gearRatio)) inp.value = String(_gearRatio);
+    _updateRpm2Line();
+    // Rebuild TSA depuis buffers bruts (pas de re-acq ESP)
+    if (_rawSamples && _rawSamples.length) {
+      finalizeFromRaw();
+    }
+  }
+
+  function getGearRatio() { return _gearRatio; }
+
+  function _updateRpm2Line() {
+    const el = document.getElementById('sync-rpm2-line');
+    if (!el) return;
+    // Tach primaire (live) ; si absent après finalize : déduire de meanRpm / R
+    let tach = _rpm || 0;
+    if (!(tach > 0) && _meanRpm > 0) {
+      tach = (Math.abs(_gearRatio - 1) > 1e-6)
+        ? (_meanRpm / _gearRatio)
+        : _meanRpm;
+    }
+    if (!(tach > 0) || !(_gearRatio > 0)) {
+      el.textContent = 'RPM2: —';
+      return;
+    }
+    const r2 = tach * _gearRatio;
+    el.textContent = 'RPM2: ' + r2.toFixed(1) +
+      '  (×' + _gearRatio + ' ; tach ' + Math.round(tach) + ')';
   }
 
   function setDual(on) {
@@ -324,6 +370,7 @@ const SyncModule = (() => {
     if (dot) {
       dot.className = 'bal-rpm-dot ' + (_rpm > 0 ? 'bal-rpm-dot--ok' : 'bal-rpm-dot--lost');
     }
+    _updateRpm2Line();
   }
 
   function onTachPeriod(periodUs) {
@@ -415,16 +462,18 @@ const SyncModule = (() => {
       if (!_meanRpm && rB.meanRpm > 0) _meanRpm = rB.meanRpm;
     }
     if (_meanRpm > 0) updateRpmBar(_meanRpm);
+    else _updateRpm2Line();
 
     const ok = (_nRevs > 0) || (_nRevsB > 0);
     _updateInfoLine();
     showTrace();
     _updateShapeBtn();
     _updateAnalyseBtns(ok);
+    const rLbl = (Math.abs(_gearRatio - 1) > 1e-9) ? (' ×' + _gearRatio) : '';
     setStatus(ok
       ? (_dual
-        ? ('TSA DOUBLE — A:' + _nRevs + ' B:' + _nRevsB + ' tours')
-        : ('TSA — ' + _nRevs + ' tours  R%=' + _stats.rPct.toFixed(1)))
+        ? ('TSA DOUBLE' + rLbl + ' — A:' + _nRevs + ' B:' + _nRevsB + ' tours')
+        : ('TSA' + rLbl + ' — ' + _nRevs + ' tours  R%=' + _stats.rPct.toFixed(1)))
       : 'Pas assez de tours tach');
     return ok;
   }
@@ -474,10 +523,63 @@ const SyncModule = (() => {
    * TSA angulaire + buffers temporels TSA/résiduel pour Analyse.
    * Soustraction : pour chaque tour k, res_k(θ) = AC(tour_k)(θ) − TSA(θ).
    */
+  /**
+   * Remap journal tach primaire → tours arbre ciblé (ratio R = RPM2/RPM_tach).
+   * Pas d'arrondi entier : bornes secondaires à index primaire fractionnaire
+   *   0, 1/R, 2/R, …  (ex. R=7/72 → pas = 72/7 ≈ 10.2857 tours tach)
+   * Interpolation linéaire si/us entre pulses tach — pas besoin de tomber pile
+   * sur un pulse primaire.
+   */
+  function _expandPairsForRatio(pairs, R) {
+    if (!pairs || pairs.length < 2) return pairs || [];
+    if (!(R > 0) || !isFinite(R) || Math.abs(R - 1) < 1e-9) return pairs;
+
+    const lastIdx = pairs.length - 1;
+    const stepPri = 1 / R; // tours primaires entre deux bornes secondaires
+    if (!(stepPri > 0) || !isFinite(stepPri)) return pairs;
+
+    function lerpAt(fracIdx) {
+      if (fracIdx <= 0) return { si: pairs[0].si, us: pairs[0].us };
+      if (fracIdx >= lastIdx) {
+        return { si: pairs[lastIdx].si, us: pairs[lastIdx].us };
+      }
+      const i0 = Math.floor(fracIdx);
+      const i1 = i0 + 1;
+      const f = fracIdx - i0;
+      const a = pairs[i0];
+      const b = pairs[i1];
+      const dUs = (b.us - a.us) >>> 0;
+      return {
+        si: Math.round(a.si + f * (b.si - a.si)),
+        us: (a.us + Math.floor(f * dUs)) >>> 0,
+      };
+    }
+
+    const out = [];
+    const maxK = Math.floor(lastIdx / stepPri + 1e-9) + 2;
+    for (let k = 0; k <= maxK; k++) {
+      const frac = k * stepPri;
+      if (frac > lastIdx + 1e-6) break;
+      out.push(lerpAt(Math.min(frac, lastIdx)));
+      if (frac >= lastIdx - 1e-9) break;
+    }
+
+    // Dédup si (interpolation peut coller)
+    out.sort(function (x, y) { return x.si - y.si; });
+    const uniq = [];
+    for (let i = 0; i < out.length; i++) {
+      if (!uniq.length || out[i].si > uniq[uniq.length - 1].si) {
+        uniq.push(out[i]);
+      }
+    }
+    return uniq.length >= 2 ? uniq : pairs;
+  }
+
   function _computeTsa(samples, fs, gRange, t0u32, tachAbs) {
     const N = samples.length;
     const periodUs = 1000000 / fs;
     const scale = gRange / 16384;
+    const R = (_gearRatio > 0) ? _gearRatio : 1;
     const out = {
       avg: null,
       tsaRaw: null, tsaTachIdx: null,
@@ -487,14 +589,15 @@ const SyncModule = (() => {
     };
     if (!tachAbs || tachAbs.length < 2) return out;
 
-    const pairs = [];
+    const pairsPri = [];
     for (let i = 0; i < tachAbs.length; i++) {
       const tu = tachAbs[i] >>> 0;
       const rel = (tu - (t0u32 >>> 0)) >>> 0;
       const si = Math.floor(rel / periodUs);
-      if (si >= 0 && si < N) pairs.push({ si: si, us: tu });
+      if (si >= 0 && si < N) pairsPri.push({ si: si, us: tu });
     }
-    pairs.sort(function (a, b) { return a.si - b.si; });
+    pairsPri.sort(function (a, b) { return a.si - b.si; });
+    const pairs = _expandPairsForRatio(pairsPri, R);
 
     const revs = [];
     const wins = [];
@@ -509,6 +612,7 @@ const SyncModule = (() => {
       if (nWin < 8) continue;
       const dtUs = (pairs[k + 1].us - pairs[k].us) >>> 0;
       if (dtUs < 500) continue;
+      // RPM affiché / moyen = arbre ciblé (secondaire si R≠1)
       const rpm = 60000000 / dtUs;
       if (!(rpm > 60 && rpm < 100000)) continue;
 
@@ -1142,6 +1246,8 @@ const SyncModule = (() => {
     setConfig: setConfig,
     setDual: setDual,
     toggleVis: toggleVis,
+    setGearRatio: setGearRatio,
+    getGearRatio: getGearRatio,
     getAcqTiming: getAcqTiming,
     showTrace: showTrace,
     showOrderFft: showOrderFft,

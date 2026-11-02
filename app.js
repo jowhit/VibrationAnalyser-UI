@@ -2408,31 +2408,56 @@ function wsSend(cmd) {
 const ALL_TABS = ['term', 'fft', 'analyse', 'bode', 'sync', 'calc', 'balance', 'harmonic', 'demod'];
 
 function showTab(name) {
+  // Sync / Bode / LiveFFT → hub Analyse (plus d'onglets fantômes)
+  if (name === 'sync' || name === 'bode' || name === 'fft') {
+    const hub = (name === 'fft') ? 'livefft' : name;
+    if (typeof anSetHubMode === 'function') anSetHubMode(hub);
+    name = 'analyse';
+  } else if (name !== 'analyse' && typeof anSetHubMode === 'function') {
+    // Quitter Analyse → masquer panneaux hub (sauf syncTools géré par SyncSession)
+    if (typeof anHubMode !== 'undefined' && anHubMode) anSetHubMode(null);
+    if (typeof anSyncTools !== 'undefined' && anSyncTools) {
+      anSyncTools = false;
+      if (typeof anApplyLayoutByMode === 'function') anApplyLayoutByMode();
+    }
+  }
   _activeTab = name;
   localStorage.setItem('lastTab', name);
   ALL_TABS.forEach(n => {
     const el = document.getElementById('page-' + n);
-    if (el) el.style.display = (n === name) ? 'flex' : 'none';
+    if (!el) return;
+    // pages sync/bode/fft vidées / stubs — jamais affichées seules
+    if (n === 'sync' || n === 'bode' || n === 'fft') {
+      el.style.display = 'none';
+      return;
+    }
+    el.style.display = (n === name) ? 'flex' : 'none';
   });
   // data-tab (pas l'index) : Live FFT n'a plus de bouton dans la barre
   document.querySelectorAll('.tab').forEach((t) => {
     const id = t.getAttribute('data-tab');
     t.classList.toggle('active', id === name);
   });
-  if (name === 'fft')      setTimeout(fftDraw,     50);
   if (name === 'analyse') {
-    setTimeout(analyseDraw, 50);
-    // Réaffiche Démarrer si session ARMED (évite glitch layout / bump)
-    if (typeof AnalSession !== 'undefined' && AnalSession.syncUi) {
-      setTimeout(function () { AnalSession.syncUi(); }, 60);
+    if (typeof anApplyLayoutByMode === 'function') anApplyLayoutByMode();
+    const hub = (typeof anHubMode !== 'undefined') ? anHubMode : null;
+    const syncTools = (typeof anSyncTools !== 'undefined') && anSyncTools;
+    if (hub === 'livefft') setTimeout(function () {
+      if (typeof fftDraw === 'function') fftDraw();
+    }, 50);
+    else if (hub === 'bode') setTimeout(function () {
+      if (typeof BodeModule !== 'undefined' && BodeModule.resize) BodeModule.resize();
+    }, 50);
+    else if (hub === 'sync' && !syncTools) setTimeout(function () {
+      if (typeof SyncModule !== 'undefined' && SyncModule.resize) SyncModule.resize();
+    }, 50);
+    else {
+      setTimeout(analyseDraw, 50);
+      if (typeof AnalSession !== 'undefined' && AnalSession.syncUi) {
+        setTimeout(function () { AnalSession.syncUi(); }, 60);
+      }
     }
   }
-  if (name === 'bode') setTimeout(() => {
-    if (typeof BodeModule !== 'undefined') BodeModule.resize();
-  }, 50);
-  if (name === 'sync') setTimeout(() => {
-    if (typeof SyncModule !== 'undefined') SyncModule.resize();
-  }, 50);
   if (name === 'balance')  setTimeout(() => {
     if (typeof BalanceModule !== 'undefined') {
       // Viewer only — pas de BAL_INIT ici (sinon IDLE juste après EQ_RESUME
@@ -2449,6 +2474,34 @@ function showTab(name) {
   }, 50);
 }
 
+/** Si Bode/Sync/LiveFFT encore actifs, réafficher leur panneau dans Analyse. */
+function _restoreAnalyseHubIfNeeded() {
+  if (typeof anHubMode !== 'undefined' && anHubMode) return;
+  if (typeof anSyncTools !== 'undefined' && anSyncTools) return;
+
+  if (typeof BodeModuleSession !== 'undefined' && BodeModuleSession.isActive &&
+      BodeModuleSession.isActive()) {
+    if (typeof anSetHubMode === 'function') anSetHubMode('bode');
+    return;
+  }
+  if (typeof SyncSession !== 'undefined' && SyncSession.getState) {
+    const st = SyncSession.getState();
+    if (st === 'HANDOFF') {
+      if (typeof anSetHubMode === 'function') anSetHubMode(null, { syncTools: true });
+      return;
+    }
+    if (st === 'READY' || st === 'ACQUIRING' || st === 'FINALIZE' ||
+        st === 'VIEW' || st === 'ORDER_FFT') {
+      if (typeof anSetHubMode === 'function') anSetHubMode('sync');
+      return;
+    }
+  }
+  if (typeof FftSession !== 'undefined' && FftSession.isActive && FftSession.isActive()) {
+    if (typeof anSetHubMode === 'function') anSetHubMode('livefft');
+  }
+}
+window._restoreAnalyseHubIfNeeded = _restoreAnalyseHubIfNeeded;
+
 /**
  * Clic onglet utilisateur — modules capteurs passent par WS_GOTO
  * (sinon ESP reste au menu → pas de BAL_RPM / pas d'acq).
@@ -2459,6 +2512,7 @@ function requestTab(name) {
     return;
   }
   if (name === 'analyse') {
+    _restoreAnalyseHubIfNeeded();
     showTab('analyse');
     return;
   }
@@ -2473,21 +2527,18 @@ function requestTab(name) {
     return;
   }
   if (name === 'bode') {
-    // Viewer only — démarrage via Terminal → BodeModuleSession
-    showTab('bode');
+    showTab('analyse');
+    if (typeof anSetHubMode === 'function') anSetHubMode('bode');
     return;
   }
   if (name === 'sync') {
-    showTab('sync');
+    showTab('analyse');
+    if (typeof anSetHubMode === 'function') anSetHubMode('sync');
     return;
   }
   if (name === 'fft') {
-    if (_activeTab === 'fft') {
-      showTab('fft');
-      return;
-    }
-    // Live FFT : l'onglet suffit (Start envoie ANAL_LIVE) — juste afficher
-    showTab('fft');
+    showTab('analyse');
+    if (typeof anSetHubMode === 'function') anSetHubMode('livefft');
     return;
   }
   showTab(name);
@@ -2670,7 +2721,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const boot = function () {
     syncHostFromPage();
     updateConnStatus();
+    if (typeof anAdoptModulePages === 'function') anAdoptModulePages();
     var lastTab = localStorage.getItem('lastTab') || 'term';
+    if (lastTab === 'sync' || lastTab === 'bode' || lastTab === 'fft') lastTab = 'analyse';
     if (typeof _anPersistRestore === 'function' && _anPersistRestore()) {
       anUpdateStats();
       anApplyLayoutByMode();
@@ -2682,6 +2735,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (typeof HarmonicModule !== 'undefined') HarmonicModule.init();
     if (typeof BodeModule !== 'undefined') BodeModule.init();
     if (typeof SyncModule !== 'undefined') SyncModule.init();
+    if (typeof _anBindSyncToolsBar === 'function') _anBindSyncToolsBar();
     // Restaure snapshot équilibrage même avant WS (pause / refresh)
     if (typeof BalanceModule !== 'undefined') BalanceModule.init(wsSend);
     if (typeof showPwaInstallUi === 'function') showPwaInstallUi();

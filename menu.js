@@ -181,9 +181,10 @@ const MenuModule = (() => {
       ];
 
       case L.ANALYSE: return [
+        // Flex 2 cols (ordre entrelacé) → gauche sans tach | droite tach
         { label: _tt('menu.temporal'), sub: _tt('menu.temporal.sub'), key: 'temporelle' },
-        { label: _tt('menu.bump'),     sub: _tt('menu.bump.sub'),     key: 'bump' },
         { label: _tt('menu.bode'),     sub: _tt('menu.bode.sub'),     key: 'bode' },
+        { label: _tt('menu.bump'),     sub: _tt('menu.bump.sub'),     key: 'bump' },
         { label: _tt('menu.sync'),     sub: _tt('menu.sync.sub'),     key: 'sync' },
         { label: _tt('menu.liveFft'),  sub: _tt('menu.liveFft.sub'),  key: 'live_fft' },
         { label: _tt('menu.phase'),    sub: _tt('menu.phase.sub'),    key: 'harmonique' },

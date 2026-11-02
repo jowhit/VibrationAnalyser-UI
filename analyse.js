@@ -1,5 +1,7 @@
 // analyse.js — Analyse temporelle + FFT + Démodulation enveloppe
 // Modes : anMode = 'time' | 'fft' | 'demod' | 'bump_wait' | 'bump_stream'
+// Hub modules (Sync/Bode/LiveFFT) : anHubMode = null | 'sync' | 'bode' | 'livefft'
+//   + Sync HANDOFF outils → anHubMode null + anSyncTools=true
 let anData = null;
 let anDataB = null; // 2e sonde (mode DOUBLE) — même G/Fs
 /** Indices sample des pulses tach (marqueurs 1X sur tracé temporel + FFT). */
@@ -101,7 +103,7 @@ function _anVisB() { return anShowB && anDataB && anDataB.length; }
 
 /**
  * Choix sonde pour Play / WAV / Sauv / CSV.
- * DOUBLE : A | B | 2 (deux fichiers séparés) — jamais un mix (décalage temporel).
+ * DOUBLE : A | B | 2 (fichier ensemble A+B+tach).
  * @returns {'A'|'B'|'2'|null}
  */
 function _anAskProbe(actionLabel) {
@@ -111,15 +113,37 @@ function _anAskProbe(actionLabel) {
     actionLabel + ' — quelle sonde ?\n' +
     '  A  = sonde A (bleu)\n' +
     '  B  = sonde B (orange)\n' +
-    '  2  = deux fichiers séparés (_A et _B)\n\n' +
-    '(Pas de mix stéréo : A et B ne sont pas synchrones.)',
-    'A'
+    '  2  = ensemble A+B + tach (1 fichier)\n',
+    '2'
   );
   if (raw === null) return null;
   const c = String(raw).trim().toUpperCase();
   if (c === 'B') return 'B';
   if (c === '2' || c === 'AB' || c === 'A+B') return '2';
   return 'A';
+}
+
+function _anTachCsv(marks) {
+  if (!marks || !marks.length) return '';
+  return marks.map(function (x) { return Math.round(x); }).join(',');
+}
+
+function _anParseTachCsv(s) {
+  if (!s) return [];
+  const out = [];
+  String(s).split(',').forEach(function (p) {
+    const v = parseInt(String(p).trim(), 10);
+    if (Number.isFinite(v) && v >= 0) out.push(v);
+  });
+  return out;
+}
+
+function _anSigToInt16Json(sig, g, n) {
+  const nn = Math.min(n, sig.length);
+  const scale = 32768.0 / g;
+  const raw = [];
+  for (let i = 0; i < nn; i++) raw.push(Math.round(sig[i] * scale));
+  return JSON.stringify(raw);
 }
 
 function _anSigForProbe(probe) {
@@ -233,6 +257,10 @@ function anPersistClear() {
   try { localStorage.removeItem(AN_LS_KEY); } catch (e) {}
 }
 let anMode = 'time'; // 'time' | 'fft' | 'demod' | 'bump_wait' | 'bump_stream'
+/** Module hébergé dans l'onglet Analyse (hors bump). */
+let anHubMode = null; // null | 'sync' | 'bode' | 'livefft'
+/** Bandeau Sync HANDOFF (Vue TSA + Brut/TSA/Rés) au-dessus des outils Analyse. */
+let anSyncTools = false;
 let anMag  = null;
 let anZMin = 0, anZMax = 1;
 /** Zoom vertical temporel (>1 = zoom in). anYPan = décalage du centre (g). */
@@ -555,18 +583,148 @@ function _acqAnimFrame() {
   _acqRaf = requestAnimationFrame(_acqAnimFrame);
 }
 
+/** Adopte page-sync / page-bode / page-fft dans les hosts Analyse (une fois). */
+function anAdoptModulePages() {
+  const map = [
+    ['page-sync', 'an-host-sync'],
+    ['page-bode', 'an-host-bode'],
+    ['page-fft', 'an-host-fft'],
+  ];
+  for (let i = 0; i < map.length; i++) {
+    const src = document.getElementById(map[i][0]);
+    const host = document.getElementById(map[i][1]);
+    if (!src || !host || host.dataset.adopted === '1') continue;
+    while (src.firstChild) host.appendChild(src.firstChild);
+    host.dataset.adopted = '1';
+    src.style.display = 'none';
+  }
+}
+window.anAdoptModulePages = anAdoptModulePages;
+
+/**
+ * Hub Analyse : sync | bode | livefft | null.
+ * syncTools=true → outils temporels + bandeau retour Sync (HANDOFF).
+ */
+function anSetHubMode(mode, opts) {
+  opts = opts || {};
+  anAdoptModulePages();
+  const m = (mode === 'sync' || mode === 'bode' || mode === 'livefft') ? mode : null;
+  anHubMode = m;
+  anSyncTools = !!(opts.syncTools);
+  if (m === 'sync' || m === 'bode' || m === 'livefft') {
+    if (anMode === 'bump_wait' || anMode === 'bump_stream') anMode = 'time';
+  }
+  anApplyLayoutByMode();
+  if (m === 'sync' && typeof SyncModule !== 'undefined' && SyncModule.resize) {
+    setTimeout(function () { SyncModule.resize(); }, 40);
+  }
+  if (m === 'bode' && typeof BodeModule !== 'undefined' && BodeModule.resize) {
+    setTimeout(function () { BodeModule.resize(); }, 40);
+  }
+  if (m === 'livefft') {
+    if (typeof _fftUpdateVisBtns === 'function') _fftUpdateVisBtns();
+    if (typeof fftDraw === 'function') setTimeout(fftDraw, 40);
+  }
+  if (!m && typeof analyseDraw === 'function') {
+    setTimeout(analyseDraw, 40);
+  }
+}
+window.anSetHubMode = anSetHubMode;
+
+function _anBindSyncToolsBar() {
+  const back = document.getElementById('btn-an-sync-back');
+  if (back && !back.dataset.bound) {
+    back.dataset.bound = '1';
+    back.addEventListener('click', function () {
+      if (typeof SyncSession !== 'undefined' && SyncSession.returnToAngular) {
+        SyncSession.returnToAngular();
+      }
+    });
+  }
+  function bindKind(id, kind) {
+    const b = document.getElementById(id);
+    if (!b || b.dataset.bound) return;
+    b.dataset.bound = '1';
+    b.addEventListener('click', function () {
+      if (typeof SyncSession !== 'undefined' && SyncSession.setHandoffKind) {
+        SyncSession.setHandoffKind(kind);
+      }
+    });
+  }
+  bindKind('btn-an-sync-brut', 'brut');
+  bindKind('btn-an-sync-tsa', 'tsa');
+  bindKind('btn-an-sync-res', 'res');
+}
+window._anBindSyncToolsBar = _anBindSyncToolsBar;
+
+function _anMarkSyncToolsKind(kind) {
+  const map = { brut: 'btn-an-sync-brut', tsa: 'btn-an-sync-tsa', res: 'btn-an-sync-res' };
+  Object.keys(map).forEach(function (k) {
+    const el = document.getElementById(map[k]);
+    if (el) el.classList.toggle('active', k === kind);
+  });
+}
+window._anMarkSyncToolsKind = _anMarkSyncToolsKind;
+
 function anApplyLayoutByMode() {
+  anAdoptModulePages();
   const isBumpWait = (anMode === 'bump_wait' || anMode === 'bump_stream');
+  const hub = anHubMode; // sync | bode | livefft
+  const hostActive = !!(hub && !anSyncTools);
   const bumpPanel = document.getElementById('an-bump-panel');
   const header = document.querySelector('#page-analyse .graph-header');
   const stats = document.getElementById('an-stats');
   const wrap = document.getElementById('an-canvas-wrap');
+  const hscroll = document.getElementById('an-hscroll');
+  const timeCursors = document.getElementById('an-time-cursors');
+  const tempoBar = document.getElementById('an-tempo-cmdbar');
   const ctrl = document.querySelector('#page-analyse .ctrl-bar');
+  const syncHost = document.getElementById('an-host-sync');
+  const bodeHost = document.getElementById('an-host-bode');
+  const fftHost = document.getElementById('an-host-fft');
+  const syncTools = document.getElementById('an-sync-tools-bar');
+
   if (bumpPanel) bumpPanel.style.display = isBumpWait ? 'flex' : 'none';
-  if (header) header.style.display = 'flex';
-  if (stats) stats.style.display = isBumpWait ? 'none' : 'flex';
-  if (wrap) wrap.style.display = 'block';
-  if (ctrl) ctrl.style.display = isBumpWait ? 'none' : 'flex';
+
+  if (syncHost) syncHost.classList.toggle('is-active', hub === 'sync' && !anSyncTools);
+  if (bodeHost) bodeHost.classList.toggle('is-active', hub === 'bode');
+  if (fftHost) fftHost.classList.toggle('is-active', hub === 'livefft');
+  if (syncTools) {
+    syncTools.classList.toggle('is-active', !!anSyncTools);
+    syncTools.style.display = anSyncTools ? 'flex' : 'none';
+  }
+
+  const pageAn = document.getElementById('page-analyse');
+  if (pageAn) pageAn.classList.toggle('is-bump', isBumpWait);
+
+  // Bump : garder le canvas (preview live) — ne masquer le cœur que pour Sync/Bode/LiveFFT
+  if (header) {
+    if (hostActive) header.style.display = 'none';
+    else header.style.display = 'flex';
+  }
+  if (stats) stats.style.display = (isBumpWait || hostActive) ? 'none' : '';
+  if (wrap) {
+    if (hostActive) {
+      wrap.style.display = 'none';
+      wrap.style.flex = '';
+      wrap.style.minHeight = '';
+    } else {
+      // '' = CSS .canvas-wrap (flex:1) — pas 'block' (casse la hauteur preview bump)
+      wrap.style.display = '';
+      wrap.style.flex = '1 1 auto';
+      wrap.style.minHeight = isBumpWait ? '160px' : '';
+    }
+  }
+  if (hscroll && (isBumpWait || hostActive)) hscroll.style.display = 'none';
+  if (timeCursors && (isBumpWait || hostActive)) timeCursors.style.display = 'none';
+  if (tempoBar && (hostActive || isBumpWait)) tempoBar.style.display = 'none';
+  if (ctrl) ctrl.style.display = (isBumpWait || hostActive) ? 'none' : '';
+
+  // LiveFFT : barre Démarrer en bas (comme temporel), au-dessus du chrome
+  const fftBar = document.getElementById('an-fft-cmdbar');
+  if (fftBar) {
+    fftBar.style.display = (!isBumpWait && !anSyncTools && hub === 'livefft') ? 'flex' : 'none';
+  }
 }
 
 function _bumpWindowT() {
@@ -1438,17 +1596,24 @@ function _anFftXAxisLabel() {
   return 'Fréquence (RPM)';
 }
 
-function _anFmtFftX(rpm, digits) {
+/** Format axe/curseur FFT. opts.compact=true → ticks axe (1.2k) ; curseur = valeur exacte. */
+function _anFmtFftX(rpm, digits, opts) {
+  const compact = !!(opts && opts.compact);
   const v = _anFftXFromRpm(rpm);
   if (anFftXMode === 'order') {
-    if (!(_anOrderRefRpm() > 0)) return rpm.toFixed(0) + ' RPM';
+    if (!(_anOrderRefRpm() > 0)) {
+      return (digits != null ? rpm.toFixed(digits) : rpm.toFixed(1)) + ' RPM';
+    }
     return (digits != null ? v.toFixed(digits) : (v >= 10 ? v.toFixed(1) : v.toFixed(2))) + '×';
   }
   if (anFftXMode === 'hz') {
     return (digits != null ? v.toFixed(digits) : (v >= 100 ? v.toFixed(0) : v.toFixed(1))) + ' Hz';
   }
-  if (v >= 1000) return (v / 1000).toFixed(1) + 'k';
-  return v.toFixed(digits != null ? digits : 0) + ' RPM';
+  // RPM : curseur / labels = exact ; ticks axe seulement en compact
+  if (compact && v >= 1000) return (v / 1000).toFixed(1) + 'k';
+  if (digits != null) return v.toFixed(digits) + ' RPM';
+  if (v >= 100) return v.toFixed(1) + ' RPM';
+  return v.toFixed(2) + ' RPM';
 }
 
 function anSetFftXMode(mode) {
@@ -3266,16 +3431,62 @@ function analyseSelClear(){
 
 function _anDownloadTxt(sig, baseNom, tag) {
   const n = Math.min(anP.n, sig.length);
-  const scale = 32768.0 / anP.g;
-  const raw = [];
-  for (let i = 0; i < n; i++) raw.push(Math.round(sig[i] * scale));
-  const txt = 'G=' + anP.g + '\nF=' + anP.fs + '\nT=' + anP.t +
-    '\nPROBE=' + tag + '\n' + JSON.stringify(raw) + '\n';
+  const marks = (tag === 'B') ? anTachMarksB : anTachMarks;
+  const tachLine = _anTachCsv(marks);
+  let txt = 'G=' + anP.g + '\nF=' + anP.fs + '\nT=' + anP.t +
+    '\nPROBE=' + tag + '\n';
+  if (tachLine) txt += 'TACH_IDX=' + tachLine + '\n';
+  txt += _anSigToInt16Json(sig, anP.g, n) + '\n';
   const blob = new Blob([txt], { type: 'text/plain' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   const stem = baseNom.replace(/\.txt$/i, '');
   a.href = url; a.download = stem + '_' + tag + '.txt'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Un fichier : A + B + tach A/B (+ align) — rechargeable en duo. */
+function _anDownloadDualEnsemble(baseNom, asCsv) {
+  if (!anData || !anDataB) return;
+  const nA = Math.min(anP.n, anData.length);
+  const nB = Math.min(anP.n, anDataB.length);
+  const fsOut = anP.fsOrig || anP.fs;
+  const lines = [];
+  lines.push('G=' + anP.g);
+  lines.push('F=' + fsOut);
+  lines.push('T=' + anP.t.toFixed(6));
+  lines.push('FORMAT=VA_DUAL');
+  lines.push('PROBE=AB');
+  lines.push('N_A=' + nA);
+  lines.push('N_B=' + nB);
+  const ta = _anTachCsv(anTachMarks);
+  const tb = _anTachCsv(anTachMarksB);
+  if (ta) lines.push('TACH_A=' + ta);
+  if (tb) lines.push('TACH_B=' + tb);
+  if (anAlignShiftB) lines.push('ALIGN_B=' + anAlignShiftB);
+  lines.push('# VibrationAnalyser — Duo A+B + tach (rechargeable)');
+  lines.push('# Date: ' + new Date().toISOString());
+  if (asCsv) {
+    lines.push('# Unit: g');
+    lines.push('Time_s,Accel_A_g,Accel_B_g');
+    const dt = 1.0 / anP.fs;
+    const n = Math.max(nA, nB);
+    for (let i = 0; i < n; i++) {
+      const a = (i < nA) ? anData[i].toFixed(6) : '';
+      const b = (i < nB) ? anDataB[i].toFixed(6) : '';
+      lines.push((i * dt).toFixed(7) + ',' + a + ',' + b);
+    }
+  } else {
+    lines.push('DATA_A=' + _anSigToInt16Json(anData, anP.g, nA));
+    lines.push('DATA_B=' + _anSigToInt16Json(anDataB, anP.g, nB));
+  }
+  const ext = asCsv ? '.csv' : '.txt';
+  const mime = asCsv ? 'text/csv' : 'text/plain';
+  const blob = new Blob([lines.join('\n') + '\n'], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stem = baseNom.replace(/\.(txt|csv)$/i, '');
+  a.href = url; a.download = stem + '_AB' + ext; a.click();
   URL.revokeObjectURL(url);
 }
 
@@ -3286,8 +3497,7 @@ function analyseSave() {
   const nom = prompt('Nom du fichier:', 'acq_' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
   if (!nom) return;
   if (pick === '2') {
-    _anDownloadTxt(anData, nom, 'A');
-    if (anDataB) setTimeout(function () { _anDownloadTxt(anDataB, nom, 'B'); }, 250);
+    _anDownloadDualEnsemble(nom, false);
     return;
   }
   const p = _anSigForProbe(pick);
@@ -3298,12 +3508,14 @@ function analyseSave() {
 function _anDownloadCSV(sig, baseNom, tag) {
   const n = Math.min(anP.n, sig.length);
   const dt = 1.0 / anP.fs;
+  const marks = (tag === 'B') ? anTachMarksB : anTachMarks;
   const lines = [];
-  // Lignes G=/F=/T= → rechargeables aussi par le parseur natif
   lines.push('G=' + anP.g);
   lines.push('F=' + (anP.fsOrig || anP.fs));
   lines.push('T=' + anP.t.toFixed(6));
   lines.push('PROBE=' + tag);
+  const tachLine = _anTachCsv(marks);
+  if (tachLine) lines.push('TACH_IDX=' + tachLine);
   lines.push('# VibrationAnalyser — Export CSV (rechargeable)');
   lines.push('# Probe: ' + tag);
   lines.push('# Date: ' + new Date().toISOString());
@@ -3312,6 +3524,7 @@ function _anDownloadCSV(sig, baseNom, tag) {
   lines.push('# Samples: ' + n);
   lines.push('# Range: +/-' + anP.g + ' g');
   lines.push('# Unit: g (1 g = 9.80665 m/s2)');
+  if (tachLine) lines.push('# Tach_idx: ' + tachLine);
   lines.push('Time_s,Accel_g');
   for (let i = 0; i < n; i++) {
     lines.push((i * dt).toFixed(7) + ',' + sig[i].toFixed(6));
@@ -3331,8 +3544,7 @@ function analyseExportCSV() {
   const nom = prompt('Nom du fichier:', 'export_' + new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
   if (!nom) return;
   if (pick === '2') {
-    _anDownloadCSV(anData, nom, 'A');
-    if (anDataB) setTimeout(function () { _anDownloadCSV(anDataB, nom, 'B'); }, 250);
+    _anDownloadDualEnsemble(nom, true);
     return;
   }
   const p = _anSigForProbe(pick);
@@ -3340,30 +3552,66 @@ function analyseExportCSV() {
   _anDownloadCSV(p.sig, nom, p.tag);
 }
 
+function _anInt16JsonToG(rawArr, g) {
+  if (!rawArr || !rawArr.length) return null;
+  const scale = g / 32768.0;
+  const isInt16 = Math.abs(rawArr[0]) > 10 ||
+    Math.abs(rawArr[Math.min(10, rawArr.length - 1)]) > 10;
+  const samples = new Float64Array(rawArr.length);
+  for (let i = 0; i < rawArr.length; i++) {
+    samples[i] = isInt16 ? rawArr[i] * scale : rawArr[i];
+  }
+  return samples;
+}
+
+function _anRemoveDc(samples) {
+  if (!samples || !samples.length) return samples;
+  let mean = 0;
+  for (let i = 0; i < samples.length; i++) mean += samples[i];
+  mean /= samples.length;
+  for (let i = 0; i < samples.length; i++) samples[i] -= mean;
+  return samples;
+}
+
 /**
- * Parse capture native (G=/F=/T= + JSON int16) ou export CSV
- * (# Fs / # Range + Time_s,Accel_g).
- * @returns {{ g, fs, t, samples: Float64Array }|null}
+ * Parse capture native / CSV / duo VA_DUAL (+ tach optionnel).
+ * @returns {{ g, fs, t, samples, samplesB?, tach?, tachB?, alignB?, dual? }|null}
  */
 function _anParseCaptureText(text) {
   const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/);
   const h = {};
   let dataLine = null;
+  let dataLineB = null;
   let csvMode = false;
+  let csvDual = false;
   const csvAccel = [];
+  const csvAccelB = [];
 
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i].trim();
     if (!l) continue;
 
-    // ── En-tête natif ──
     if (l.startsWith('G=')) { h.g = parseFloat(l.slice(2)); continue; }
     if (l.startsWith('F=')) { h.fs = parseFloat(l.slice(2)); continue; }
     if (l.startsWith('T=')) { h.t = parseFloat(l.slice(2)); continue; }
     if (l.startsWith('N=')) { h.n = parseInt(l.slice(2), 10); continue; }
-    if (l.startsWith('PROBE=')) continue;
+    if (l.startsWith('N_A=')) { h.nA = parseInt(l.slice(4), 10); continue; }
+    if (l.startsWith('N_B=')) { h.nB = parseInt(l.slice(4), 10); continue; }
+    if (l.startsWith('FORMAT=')) { h.format = l.slice(7).trim(); continue; }
+    if (l.startsWith('PROBE=')) { h.probe = l.slice(6).trim(); continue; }
+    if (l.startsWith('TACH_IDX=')) { h.tach = _anParseTachCsv(l.slice(9)); continue; }
+    if (l.startsWith('TACH_A=')) { h.tach = _anParseTachCsv(l.slice(7)); continue; }
+    if (l.startsWith('TACH_B=')) { h.tachB = _anParseTachCsv(l.slice(7)); continue; }
+    if (l.startsWith('ALIGN_B=')) { h.alignB = parseInt(l.slice(8), 10) || 0; continue; }
+    if (l.startsWith('DATA_A=')) {
+      try { dataLine = l.slice(7); } catch (e) { /* ignore */ }
+      continue;
+    }
+    if (l.startsWith('DATA_B=')) {
+      try { dataLineB = l.slice(7); } catch (e) { /* ignore */ }
+      continue;
+    }
 
-    // ── En-tête export CSV (commentaires #) ──
     if (l.charAt(0) === '#') {
       const fsM = l.match(/#\s*Fs\s*:\s*([\d.]+)/i);
       if (fsM) h.fs = parseFloat(fsM[1]);
@@ -3373,24 +3621,33 @@ function _anParseCaptureText(text) {
       if (tM) h.t = parseFloat(tM[1]);
       const nM = l.match(/#\s*Samples\s*:\s*(\d+)/i);
       if (nM) h.n = parseInt(nM[1], 10);
+      const tachM = l.match(/#\s*Tach_idx\s*:\s*(.+)/i);
+      if (tachM) h.tach = _anParseTachCsv(tachM[1]);
       continue;
     }
 
-    // Ligne titre CSV
+    if (/^Time_s\s*,\s*Accel_A_g\s*,\s*Accel_B_g/i.test(l)) {
+      csvMode = true; csvDual = true; continue;
+    }
     if (/^Time_s\s*,/i.test(l) || /^time\s*,/i.test(l)) {
-      csvMode = true;
+      csvMode = true; continue;
+    }
+
+    if (l.startsWith('[')) {
+      if (!dataLine) dataLine = l;
+      else if (!dataLineB) dataLineB = l;
       continue;
     }
 
-    // Données natives : tableau JSON int16
-    if (l.startsWith('[')) {
-      dataLine = l;
-      break;
-    }
-
-    // Ligne CSV time,accel
     if (csvMode || (l.indexOf(',') >= 0 && /^[-+]?\d/.test(l))) {
       const parts = l.split(',');
+      if (csvDual && parts.length >= 3) {
+        const ag = parseFloat(parts[1]);
+        const bg = parseFloat(parts[2]);
+        if (Number.isFinite(ag)) csvAccel.push(ag);
+        if (Number.isFinite(bg)) csvAccelB.push(bg);
+        continue;
+      }
       if (parts.length >= 2) {
         const ag = parseFloat(parts[1]);
         if (Number.isFinite(ag)) {
@@ -3400,38 +3657,40 @@ function _anParseCaptureText(text) {
         }
       }
     }
-
-    // Ancien format : une valeur float/int par ligne
-    if (!csvMode && !dataLine && !l.includes('=')) {
-      const v = parseFloat(l);
-      if (!isNaN(v)) {
-        // peut être début d'une liste mono-colonne — collecté plus bas
-        dataLine = 'mono';
-      }
-    }
   }
 
   if (!h.g || !h.fs) return null;
 
+  const dual = (h.format === 'VA_DUAL') ||
+    (h.probe === 'AB') ||
+    !!(dataLineB && dataLine) ||
+    (csvDual && csvAccelB.length > 0);
+
   let samples = null;
+  let samplesB = null;
 
   if (csvMode && csvAccel.length > 0) {
-    // Export CSV : déjà en g
     samples = new Float64Array(csvAccel.length);
     for (let i = 0; i < csvAccel.length; i++) samples[i] = csvAccel[i];
-  } else if (dataLine && dataLine.startsWith('[')) {
-    let rawArr;
-    try { rawArr = JSON.parse(dataLine); }
-    catch (e) { return null; }
-    if (!rawArr || !rawArr.length) return null;
-    const scale = h.g / 32768.0;
-    const isInt16 = Math.abs(rawArr[0]) > 10 || Math.abs(rawArr[Math.min(10, rawArr.length - 1)]) > 10;
-    samples = new Float64Array(rawArr.length);
-    for (let i = 0; i < rawArr.length; i++) {
-      samples[i] = isInt16 ? rawArr[i] * scale : rawArr[i];
+    if (csvAccelB.length) {
+      samplesB = new Float64Array(csvAccelB.length);
+      for (let i = 0; i < csvAccelB.length; i++) samplesB[i] = csvAccelB[i];
+    }
+  } else if (dataLine) {
+    let rawA;
+    try {
+      rawA = typeof dataLine === 'string' && dataLine.charAt(0) === '['
+        ? JSON.parse(dataLine)
+        : JSON.parse(dataLine);
+    } catch (e) { return null; }
+    samples = _anInt16JsonToG(rawA, h.g);
+    if (dataLineB) {
+      try {
+        const rawB = JSON.parse(dataLineB);
+        samplesB = _anInt16JsonToG(rawB, h.g);
+      } catch (e2) { samplesB = null; }
     }
   } else {
-    // Une valeur par ligne (hors en-têtes)
     const rawArr = [];
     for (let i = 0; i < lines.length; i++) {
       const l = lines[i].trim();
@@ -3440,23 +3699,25 @@ function _anParseCaptureText(text) {
       if (!isNaN(v)) rawArr.push(v);
     }
     if (!rawArr.length) return null;
-    const scale = h.g / 32768.0;
-    const isInt16 = Math.abs(rawArr[0]) > 10;
-    samples = new Float64Array(rawArr.length);
-    for (let i = 0; i < rawArr.length; i++) {
-      samples[i] = isInt16 ? rawArr[i] * scale : rawArr[i];
-    }
+    samples = _anInt16JsonToG(rawArr, h.g);
   }
 
   if (!samples || !samples.length) return null;
+  _anRemoveDc(samples);
+  if (samplesB && samplesB.length) _anRemoveDc(samplesB);
 
-  // Retrait DC
-  let mean = 0;
-  for (let i = 0; i < samples.length; i++) mean += samples[i];
-  mean /= samples.length;
-  for (let i = 0; i < samples.length; i++) samples[i] -= mean;
-
-  return { g: h.g, fs: h.fs, t: h.t, samples: samples };
+  return {
+    g: h.g,
+    fs: h.fs,
+    t: h.t,
+    samples: samples,
+    samplesB: (dual && samplesB && samplesB.length) ? samplesB : null,
+    tach: h.tach || [],
+    tachB: h.tachB || [],
+    alignB: h.alignB || 0,
+    dual: !!(dual && samplesB && samplesB.length),
+    probe: h.probe || 'A',
+  };
 }
 
 function _anApplyLoadedCapture(parsed, fileName) {
@@ -3474,18 +3735,47 @@ function _anApplyLoadedCapture(parsed, fileName) {
   if (_wavSource) analysePause();
   if (typeof AnalSession !== 'undefined' && AnalSession.reset) AnalSession.reset(true);
   analyseResetDualSession();
+
+  anTachMarks = (parsed.tach && parsed.tach.length) ? parsed.tach.slice() : [];
+  anTachMarksB = [];
+  anAlignShiftB = 0;
+
+  if (parsed.dual && parsed.samplesB && parsed.samplesB.length) {
+    // Armer d'abord (flush B), puis remplir A/B + tach
+    if (typeof analyseImportDualArm === 'function') analyseImportDualArm();
+    else _anDualArm = true;
+    anDataB = parsed.samplesB;
+    anTachMarksB = (parsed.tachB && parsed.tachB.length) ? parsed.tachB.slice() : [];
+    anAlignShiftB = parsed.alignB || 0;
+    _anGotA = true;
+    _anGotB = true;
+    if (typeof anShowA !== 'undefined') anShowA = true;
+    if (typeof anShowB !== 'undefined') anShowB = true;
+    if (typeof _anUpdateVisBtns === 'function') _anUpdateVisBtns();
+  } else if (parsed.probe === 'B' && anTachMarks.length && !(parsed.tachB && parsed.tachB.length)) {
+    // Fichier mono B : marks dans TACH_IDX → canal B
+    anTachMarksB = anTachMarks.slice();
+    anTachMarks = [];
+  }
+
   anMode = 'time'; anZMin = 0; anZMax = anP.t; anYZoom = 1; anYPan = 0;
-  anMag = null; anMagVel = null; anCursorX = -1;
+  anMag = null; anMagVel = null; anMagB = null; anMagVelB = null; anCursorX = -1;
   if (typeof _anClearTimeCursors === 'function') _anClearTimeCursors();
-  anUnit = 'g'; anDataDisplay = null; anFilterInfo = '';
-  anDemodResult = null;
+  anUnit = 'g'; anDataDisplay = null; anDataDisplayB = null; anFilterInfo = '';
+  anDemodResult = null; anDemodResultB = null;
   anSelStart = -1; anSelEnd = -1; _anUpdateSelBtn();
   anUpdateBtnStates();
+  if (typeof anSetHubMode === 'function') anSetHubMode(null);
   if (typeof showTab === 'function') showTab('analyse');
   analyseDraw();
   if (typeof _anPersistSave === 'function') _anPersistSave();
   if (typeof termAddLine === 'function') {
-    termAddLine('[analyse] chargé ' + (fileName || '') + ' N=' + n + ' Fs=' + parsed.fs, 'sys');
+    const dualTxt = parsed.dual ? ' DUAL' : '';
+    const tachTxt = (anTachMarks.length || anTachMarksB.length)
+      ? (' tach=' + anTachMarks.length + '/' + anTachMarksB.length)
+      : '';
+    termAddLine('[analyse] chargé ' + (fileName || '') + dualTxt +
+      ' N=' + n + ' Fs=' + parsed.fs + tachTxt, 'sys');
   }
 }
 

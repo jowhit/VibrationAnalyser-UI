@@ -134,12 +134,16 @@ const BumpSession = (() => {
         '  FS=' + _bumpCfgFs + ' Hz  Fenetre=' + _bumpWindowT().toFixed(3) +
         ' s  ±' + bumpLiveG + 'g';
     }
-    if (typeof anApplyLayoutByMode === 'function') anApplyLayoutByMode();
     const title = document.getElementById('an-bump-title');
     if (title) title.textContent = _dual ? 'MODE BUMP TEST — DOUBLE' : 'MODE BUMP TEST';
     if (typeof bumpSetStatus === 'function') bumpSetStatus('');
+    if (typeof anSetHubMode === 'function') anSetHubMode(null);
     if (typeof showTab === 'function') showTab('analyse');
-    if (typeof analyseDraw === 'function') analyseDraw();
+    // Layout après showTab (canvas visible → hauteur réelle pour preview)
+    if (typeof anApplyLayoutByMode === 'function') anApplyLayoutByMode();
+    if (typeof analyseDraw === 'function') {
+      setTimeout(function () { analyseDraw(); }, 40);
+    }
     _log('[BUMP] ' + (_dual ? 'DOUBLE prêt' : 'prêt') + ' — ' + S.READY);
   }
 

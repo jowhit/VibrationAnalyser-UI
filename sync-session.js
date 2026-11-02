@@ -196,6 +196,17 @@ const SyncSession = (() => {
     if (anRow) anRow.style.display = ok ? 'flex' : 'none';
   }
 
+  function _showAngularHub() {
+    if (typeof anSetHubMode === 'function') anSetHubMode('sync');
+    if (typeof showTab === 'function') showTab('analyse');
+  }
+
+  function _showToolsHub() {
+    if (typeof anSetHubMode === 'function') anSetHubMode(null, { syncTools: true });
+    if (typeof showTab === 'function') showTab('analyse');
+    if (typeof _anMarkSyncToolsKind === 'function') _anMarkSyncToolsKind(_handoffKind);
+  }
+
   function reset(silent) {
     _clearAcqTimer();
     _clearFinalizeTimer();
@@ -211,6 +222,10 @@ const SyncSession = (() => {
     }
     _setBtnRunning(false);
     _setViewChrome(false);
+    if (typeof anSetHubMode === 'function' &&
+        typeof anHubMode !== 'undefined' && anHubMode === 'sync') {
+      anSetHubMode(null);
+    }
     if (!silent) _log('[SYNC] reset → IDLE');
   }
 
@@ -223,6 +238,17 @@ const SyncSession = (() => {
           SyncModule.setDual(_dual);
         }
       }
+      _showAngularHub();
+      return;
+    }
+    // Reprise session avec data : ne pas clearResult
+    if (_state === S.VIEW || _state === S.ORDER_FFT) {
+      _showAngularHub();
+      _setViewChrome(true);
+      return;
+    }
+    if (_state === S.HANDOFF) {
+      _showToolsHub();
       return;
     }
     reset(true);
@@ -243,7 +269,7 @@ const SyncSession = (() => {
     _binA = _binB = false;
     _setBtnRunning(false);
     _state = S.READY;
-    if (typeof showTab === 'function') showTab('sync');
+    _showAngularHub();
     _log('[SYNC] ' + (_dual ? 'DOUBLE ' : '') + 'READY');
   }
 
@@ -307,7 +333,7 @@ const SyncSession = (() => {
     _handoffKind = null;
     _setBtnRunning(false);
     _setViewChrome(ok);
-    if (typeof showTab === 'function') showTab('sync');
+    _showAngularHub();
     _log('[SYNC] VIEW' + (ok ? '' : ' (peu de tours)') + (_dual ? ' (dual)' : ''));
   }
 
@@ -375,9 +401,7 @@ const SyncSession = (() => {
   }
 
   /**
-   * VIEW | ORDER_FFT | HANDOFF → HANDOFF.
-   * kind = 'brut' | 'tsa' | 'res'
-   * Duo : payload A+B → AnalSession.importBuffer dual (overlay Analyse).
+   * VIEW | ORDER_FFT | HANDOFF → HANDOFF (outils Analyse, buffers Sync intacts).
    */
   function handoffToAnalyse(kind) {
     if (kind !== 'brut' && kind !== 'tsa' && kind !== 'res') {
@@ -398,6 +422,8 @@ const SyncSession = (() => {
       return false;
     }
     payload.view = 'fft';
+    // Outils hub avant import (évite flash panneau Sync pendant showTab analyse)
+    if (typeof anSetHubMode === 'function') anSetHubMode(null, { syncTools: true });
     const ok = AnalSession.importBuffer(payload);
     if (!ok) {
       _log('[SYNC] !! importBuffer échoué (' + kind + ')');
@@ -405,9 +431,34 @@ const SyncSession = (() => {
     }
     _handoffKind = kind;
     _state = S.HANDOFF;
-    if (typeof showTab === 'function') showTab('analyse');
-    _log('[SYNC] HANDOFF → Analyse (' + kind + ') N=' + payload.n +
+    _showToolsHub();
+    _log('[SYNC] HANDOFF → outils (' + kind + ') N=' + payload.n +
       (payload.samplesB ? (' +B N=' + (payload.nB || payload.samplesB.length)) : ''));
+    return true;
+  }
+
+  /** Bascule Brut / TSA / Rés pendant HANDOFF (sans quitter Analyse). */
+  function setHandoffKind(kind) {
+    if (_state !== S.HANDOFF) {
+      return handoffToAnalyse(kind);
+    }
+    return handoffToAnalyse(kind);
+  }
+
+  /** HANDOFF → VIEW angulaire (buffers Sync intacts). */
+  function returnToAngular() {
+    if (_state !== S.HANDOFF && _state !== S.VIEW && _state !== S.ORDER_FFT) {
+      _log('[SYNC] returnToAngular refusé (état=' + _state + ')');
+      return false;
+    }
+    if (typeof SyncModule !== 'undefined' && SyncModule.showTrace) {
+      SyncModule.showTrace();
+    }
+    _state = S.VIEW;
+    _handoffKind = null;
+    _setViewChrome(true);
+    _showAngularHub();
+    _log('[SYNC] VIEW ← retour outils');
     return true;
   }
 
@@ -416,14 +467,7 @@ const SyncSession = (() => {
     const shapeBtn = document.getElementById('btn-sync-shape');
 
     if (_state === S.HANDOFF) {
-      if (typeof SyncModule !== 'undefined' && SyncModule.showTrace) {
-        SyncModule.showTrace();
-      }
-      _state = S.VIEW;
-      _handoffKind = null;
-      if (typeof showTab === 'function') showTab('sync');
-      _setViewChrome(true);
-      _log('[SYNC] VIEW ← retour HANDOFF');
+      returnToAngular();
       return;
     }
 
@@ -458,6 +502,8 @@ const SyncSession = (() => {
     toggleStart: toggleStart,
     toggleFft: toggleFft,
     handoffToAnalyse: handoffToAnalyse,
+    setHandoffKind: setHandoffKind,
+    returnToAngular: returnToAngular,
     openAnalyse: function () { return handoffToAnalyse('brut'); },
     onPayloadReady: onPayloadReady,
     onPayloadReadyB: onPayloadReadyB,
