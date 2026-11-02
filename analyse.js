@@ -1323,20 +1323,24 @@ function anUpdateStats() {
       `Démod  Bande: ${fLow.toFixed(0)}–${fHigh.toFixed(0)} Hz  Fs=${anP.fs} Hz  [` + _anAmpMetricTag() + ']';
 
   } else if (anMode === 'fft' && anUnit === 'mm/s' && anMagVel) {
+    const chunk = _anTimeChunk(sig);
+    const nUse = (chunk && chunk.length) ? chunk.length : anP.n;
     const nFFT  = anMagVel.length * 2;
     const rpmPB = (anP.fs / nFFT) * 60;
     const maxB  = Math.min(anMagVel.length-1, Math.floor(fftMaxRpmVel(anP.fs)/rpmPB));
     let pkAmp=0;
     for (let i=1;i<=maxB;i++) if(anMagVel[i]>pkAmp) pkAmp=anMagVel[i];
     const rmsIso = (typeof calcRmsIso==='function')
-      ? calcRmsIso(sig.slice(0,anP.n), anP.fs, anP.n) : 0;
+      ? calcRmsIso(chunk || sig.slice(0, nUse), anP.fs, nUse) : 0;
     _anFillAmpStats(rmsIso, pkAmp, pkAmp * 2, rmsIso > 0 ? pkAmp / rmsIso : 0, 'mm/s');
     document.getElementById('an-fs').textContent    =
-      anP.fs+' Hz  N='+anP.n+'  T='+anP.t.toFixed(3)+'s  ±'+anP.g+'g  [' + _anAmpMetricTag() + ']';
+      anP.fs+' Hz  N='+nUse+'  T='+(nUse/anP.fs).toFixed(3)+'s  ±'+anP.g+'g  [' + _anAmpMetricTag() + ']';
 
   } else if (anMode === 'fft' && (anUnit === 'g' || anUnit === 'mm') && anMag) {
     _anEnsureFftA();
     const mag = _anPickMag(anMag, anMagVel, anMagDisp) || anMag;
+    const chunk = _anTimeChunk(sig);
+    const nUse = (chunk && chunk.length) ? chunk.length : anP.n;
     const u = _anUnitShort();
     const nFFT  = mag.length * 2;
     const rpmPB = (anP.fs / nFFT) * 60;
@@ -1348,7 +1352,7 @@ function anUpdateStats() {
     rmsS=Math.sqrt(rmsS*2);
     _anFillAmpStats(rmsS, pkAmp, pkAmp * 2, rmsS > 0 ? pkAmp / rmsS : 0, u);
     document.getElementById('an-fs').textContent    =
-      anP.fs+' Hz  N='+anP.n+'  T='+anP.t.toFixed(3)+'s  ±'+anP.g+'g  [' + _anAmpMetricTag() + ']';
+      anP.fs+' Hz  N='+nUse+'  T='+(nUse/anP.fs).toFixed(3)+'s  ±'+anP.g+'g  [' + _anAmpMetricTag() + ']';
 
   } else {
     // Temporel : courbe = instantané ; stats = RMS / Peak / P-P
@@ -2095,8 +2099,9 @@ function anDrawFFT() {
   canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext('2d');
   const zMin = anZMin, zMax = Math.min(anZMax, maxRpm);
-  const P = APAD, fs = anP.fs, n = anP.n;
-  const nFFT = nextPow2(n);
+  const P = APAD, fs = anP.fs;
+  // Échelle = nFFT du spectre (zone sél. si présente), jamais anP.n seul
+  const nFFT = _anFftNFromMag(mag || magB);
   const rpmPB = (fs / nFFT) * 60, span = zMax - zMin;
   const minB = Math.max(1, Math.floor(zMin / rpmPB));
   const maxB = Math.min(nFFT / 2 - 1, Math.ceil(zMax / rpmPB));
@@ -2105,7 +2110,8 @@ function anDrawFFT() {
   ctx.strokeStyle = '#555'; ctx.lineWidth = 1; ctx.strokeRect(P.l, P.t, pW, pH);
   let maxPeak = 0;
   if (_anVisA() && mag) {
-    for (let i = minB; i <= maxB; i++) if (mag[i] > maxPeak) maxPeak = mag[i];
+    const limA = Math.min(maxB, mag.length - 1);
+    for (let i = minB; i <= limA; i++) if (mag[i] > maxPeak) maxPeak = mag[i];
   }
   if (_anVisB() && magB) {
     const lim = Math.min(maxB, magB.length - 1);
@@ -2154,7 +2160,8 @@ function anDrawFFT() {
     _anStrokeMag(ctx, magB, minB, maxBB, rpmPB, zMin, span, pW, pH, aSDraw, AN_COLOR_B, AN_FILL_B, maxPeak);
   }
   if (_anVisA() && mag) {
-    _anStrokeMag(ctx, mag, minB, maxB, rpmPB, zMin, span, pW, pH, aSDraw,
+    const maxBA = Math.min(maxB, mag.length - 1);
+    _anStrokeMag(ctx, mag, minB, maxBA, rpmPB, zMin, span, pW, pH, aSDraw,
       dualFft ? AN_COLOR_A : _anPrimaryColor(),
       dualFft ? AN_FILL_A : _anPrimaryFill(), maxPeak);
   }
@@ -2689,6 +2696,18 @@ function _anTimeChunk(sig) {
   return sig.slice(0, nFull);
 }
 
+/** nFFT réel du spectre affiché (sélection ou acquis complet) — pas anP.n. */
+function _anFftNFromMag(mag) {
+  if (mag && mag.length > 1) return mag.length * 2;
+  const chunk = _anTimeChunk(anDataDisplay || anData);
+  if (chunk && chunk.length >= 64) return nextPow2(chunk.length);
+  return nextPow2(anP.n || 2);
+}
+
+function _anFftRpmPerBin(mag) {
+  return (anP.fs / _anFftNFromMag(mag)) * 60;
+}
+
 function _anInvalidateFft() {
   anMag = null; anMagVel = null; anMagDisp = null;
   anMagB = null; anMagVelB = null; anMagDispB = null;
@@ -2780,9 +2799,7 @@ function _anSnapCursorToPeak() {
       ? _anPickMag(anMag, anMagVel, anMagDisp)
       : (_anVisB() ? _anPickMag(anMagB, anMagVelB, anMagDispB) : null);
     if (!mag) return;
-    const fs = anP.fs;
-    const nFFT = nextPow2(anP.n);
-    const rpmPB = (fs / nFFT) * 60;
+    const rpmPB = _anFftRpmPerBin(mag);
     const rpm = anZMin + ((anCursorX - P.l) / pW) * span;
     let bin = Math.round(rpm / rpmPB);
     const win = Math.max(8, Math.round((span / rpmPB) * 0.02));
