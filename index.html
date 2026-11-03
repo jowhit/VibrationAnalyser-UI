@@ -20,11 +20,11 @@
   })();
 </script>
 <link rel="apple-touch-icon" href="icon-192.png">
-<link rel="stylesheet" href="style.css?v=130">
+<link rel="stylesheet" href="style.css?v=131">
 <link rel="manifest" id="app-manifest" href="manifest.json">
 <script>
   // Bump à chaque release UI — invalide l'ancien « Compris »
-  var PWA_UI_VER = '105';
+  var PWA_UI_VER = '106';
   var PWA_URL = 'https://jowhit.github.io/VibrationAnalyser-UI/';
 
   function _pwaT(key) {
@@ -114,12 +114,16 @@
     if (box) box.style.display = 'none';
   }
 
-  /** Reset fort : flags + caches + unregister SW → reload (sinon « Reset » ne change rien). */
+  /** Reset fort : tout ce que la page peut effacer (SW, Cache, storage, IDB).
+   *  Chrome garde aussi une mémoire d'install hors page — voir pwa.hintChromeClear. */
   function resetPwaInstall() {
     _pwaClearAllDismiss();
     window._pwaPrompt = null;
+    try { localStorage.clear(); } catch (e) {}
+    try { sessionStorage.clear(); } catch (e) {}
     if (typeof termAddLine === 'function') {
       termAddLine(_pwaT('pwa.resetHint'), 'sys');
+      termAddLine(_pwaT('pwa.hintChromeClear'), 'sys');
       if (!_pwaIsHttpsOk()) termAddLine(_pwaT('pwa.hintHttp'), 'sys');
     }
     var jobs = [];
@@ -133,8 +137,27 @@
         return Promise.all(regs.map(function (r) { return r.unregister(); }));
       }));
     }
+    if (window.indexedDB && indexedDB.databases) {
+      jobs.push(indexedDB.databases().then(function (dbs) {
+        return Promise.all((dbs || []).map(function (db) {
+          if (!db || !db.name) return null;
+          return new Promise(function (resolve) {
+            var req = indexedDB.deleteDatabase(db.name);
+            req.onsuccess = req.onerror = req.onblocked = function () { resolve(); };
+          });
+        }));
+      }).catch(function () {}));
+    }
     Promise.all(jobs).then(function () {
-      setTimeout(function () { location.reload(); }, 200);
+      // hard reload sans cache HTTP si possible
+      setTimeout(function () {
+        try {
+          location.href = location.pathname + location.search +
+            (location.search ? '&' : '?') + '_pwa_reset=' + Date.now() + location.hash;
+        } catch (e) {
+          location.reload();
+        }
+      }, 250);
     }).catch(function () {
       location.reload();
     });
