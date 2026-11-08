@@ -20,12 +20,10 @@ function _isMdnsHost(host) {
   return h === ESP_MDNS_HOST || h === 'vibanalyseur.local';
 }
 
-// ── Inversion d'axe par IP (même FW A/B — décision côté browser) ──
-// Auto : dernier octet 84 toujours inversé (boîtier retourné).
-// Manuel : localStorage (invert 85, invertA, …) en plus.
+// ── Invert axe ──────────────────────────────────────────────
+// Normal : invert dans le firmware boîtier B (VA_PROBE_IS_B) — pas d'auto .84.
+// Secours labo seulement : localStorage via commande "invert …"
 const INVERT_LS_KEY = 'esp_invert_ips';
-/** Octets finaux toujours inversés — même firmware, flip JS uniquement. */
-const INVERT_AUTO_LAST_OCTETS = ['84'];
 
 function _invertLoad() {
   try {
@@ -64,17 +62,10 @@ function _probeHost(which) {
   return (ESP32_IP || ESP32_HOST || '').trim();
 }
 
-function _hostAutoInvert(host) {
-  if (!host || !_isEspIpv4(host)) return false;
-  const last = String(host).trim().split('.').pop();
-  return INVERT_AUTO_LAST_OCTETS.indexOf(last) >= 0;
-}
-
-/** true si le boîtier A ou B doit être inversé (selon son IP). */
+/** Secours JS uniquement (liste manuelle). FW B inverse déjà l'axe. */
 function probeAxisInvert(which) {
   const host = _probeHost(which);
   if (!host) return false;
-  if (_hostAutoInvert(host)) return true;
   return _invertLoad().some(function (t) { return _hostMatchesInvertToken(host, t); });
 }
 
@@ -90,7 +81,8 @@ function applyAxisInvertScalar(which, v) {
 }
 
 /**
- * Commande moniteur : invert | invert 84 | invert .84 | invert off
+ * Commande moniteur : invert | invert 85 | invertA | invertB | invert off
+ * (secours — le boîtier B flashé inverse déjà dans le firmware)
  * @returns {boolean} true si commande locale (ne pas envoyer à l'ESP)
  */
 function handleInvertCommand(raw) {
@@ -101,35 +93,30 @@ function handleInvertCommand(raw) {
   const list = _invertLoad();
   const arg = (parts[1] || '').trim().toLowerCase();
 
-  // invert seul (ou ?) → statut
   if (cmd === 'invert' && (!arg || arg === '?' || arg === 'status')) {
     const a = _probeHost('A') || '(A non défini)';
     const b = _probeHost('B') || '(B non défini)';
-    termAddLine('invert AUTO: …' + INVERT_AUTO_LAST_OCTETS.map(function (o) {
-      return '.' + o;
-    }).join(', '), 'sys');
-    termAddLine('invert extra: ' + (list.length ? list.join(', ') : '(aucun)'), 'sys');
-    termAddLine('  A ' + a + ' → ' + (probeAxisInvert('A') ? 'INVERSE' : 'normal') +
-      (_hostAutoInvert(a) ? ' (auto)' : ''), 'sys');
-    termAddLine('  B ' + b + ' → ' + (probeAxisInvert('B') ? 'INVERSE' : 'normal') +
-      (_hostAutoInvert(b) ? ' (auto)' : ''), 'sys');
-    termAddLine('Usage: invert 85  |  invertA  |  invertB  |  invert off', 'sys');
+    termAddLine('invert: FW B = axe inversé dans le firmware (pas d\'auto .84)', 'sys');
+    termAddLine('invert JS extra: ' + (list.length ? list.join(', ') : '(aucun)'), 'sys');
+    termAddLine('  A ' + a + ' → JS ' + (probeAxisInvert('A') ? 'INVERSE' : 'normal'), 'sys');
+    termAddLine('  B ' + b + ' → JS ' + (probeAxisInvert('B') ? 'INVERSE' : 'normal') +
+      ' (FW B déjà inversé)', 'sys');
+    termAddLine('Usage secours: invert 85 | invertA | invertB | invert off', 'sys');
     return true;
   }
 
   if (arg === 'off' || arg === 'clear' || arg === 'none' || arg === '0') {
     _invertSave([]);
-    termAddLine('invert: toutes les IP désactivées', 'sys');
+    termAddLine('invert JS: liste vidée', 'sys');
     return true;
   }
 
-  // invert 84  → IP ; invertA / invertB → IP du slot actuel
   let token = arg;
   if (cmd === 'inverta' && !arg) token = _probeHost('A');
   if (cmd === 'invertb' && !arg) token = _probeHost('B');
   token = _invertNormToken(token);
   if (!token) {
-    termAddLine('invert: IP manquante (ex. invert 84)', 'sys');
+    termAddLine('invert: IP manquante (ex. invert 85)', 'sys');
     return true;
   }
 
@@ -141,18 +128,120 @@ function handleInvertCommand(raw) {
   if (idx >= 0) {
     list.splice(idx, 1);
     _invertSave(list);
-    termAddLine('invert OFF: ' + token, 'sys');
+    termAddLine('invert JS OFF: ' + token, 'sys');
   } else {
     list.push(token);
     _invertSave(list);
-    termAddLine('invert ON: ' + token +
-      ' (A=' + (probeAxisInvert('A') ? 'oui' : 'non') +
-      ' B=' + (probeAxisInvert('B') ? 'oui' : 'non') + ')', 'sys');
+    termAddLine('invert JS ON: ' + token + ' (attention double-invert si FW B)', 'sys');
   }
   return true;
 }
 window.handleInvertCommand = handleInvertCommand;
 window.probeAxisInvert = probeAxisInvert;
+
+/** GET /probe → "A" | "B" (firmware). */
+async function fetchProbeRole(host, timeoutMs) {
+  if (!host || !_isEspIpv4(host)) return '';
+  const ms = timeoutMs || 500;
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const t = ctrl ? setTimeout(function () { try { ctrl.abort(); } catch (e) {} }, ms) : null;
+  try {
+    const r = await fetch('http://' + host + '/probe', {
+      method: 'GET',
+      mode: 'cors',
+      cache: 'no-store',
+      signal: ctrl ? ctrl.signal : undefined
+    });
+    if (!r.ok) return '';
+    const txt = String(await r.text()).trim().toUpperCase();
+    return (txt === 'A' || txt === 'B') ? txt : '';
+  } catch (e) {
+    return '';
+  } finally {
+    if (t) clearTimeout(t);
+  }
+}
+
+/**
+ * Classe les IP trouvées : A → slot A, B → slot B (indépendant de l'ordre DHCP).
+ * @returns {{ a: string, b: string }}
+ */
+async function assignHostsByProbeRole(found) {
+  const list = (found || []).filter(function (h) { return _isEspIpv4(h); });
+  let hostA = '';
+  let hostB = '';
+  for (let i = 0; i < list.length; i++) {
+    const h = list[i];
+    const role = await fetchProbeRole(h, 600);
+    if (role === 'A' && !hostA) hostA = h;
+    else if (role === 'B' && !hostB) hostB = h;
+    else if (!role) {
+      if (!hostA) hostA = h;
+      else if (!hostB && h !== hostA) hostB = h;
+    }
+  }
+  if (!hostA && hostB && list.length === 1) {
+    /* mono boîtier B : slot B seulement */
+  }
+  return { a: hostA, b: hostB };
+}
+
+/** PROBE_ID=A|B reçu sur WS — corrige le slot si mauvais câblage logique. */
+function _onProbeIdMessage(role, host, channel) {
+  role = String(role || '').trim().toUpperCase();
+  if (role !== 'A' && role !== 'B') return;
+  host = String(host || '').trim();
+  if (!host) return;
+  termAddLine('[' + channel + '] identité firmware PROBE_ID=' + role + ' @ ' + host, 'sys');
+
+  if (role === 'A') {
+    // Branché sur slot B par erreur → libérer B, ouvrir A
+    if (channel === 'B' || ESP32_HOST_B === host) {
+      termAddLine('[probe] ' + host + ' est A — slot A (pas B)', 'sys');
+      if (_wsReconnectTimerB) { clearTimeout(_wsReconnectTimerB); _wsReconnectTimerB = null; }
+      ESP32_HOST_B = (ESP32_HOST_B === host) ? '' : ESP32_HOST_B;
+      if (!ESP32_HOST_B) {
+        try { localStorage.removeItem('esp32ip_b'); } catch (e) {}
+      }
+      if (channel === 'B') forceCloseB('PROBE_ID=A — mauvais slot');
+    }
+    ESP32_HOST = host;
+    ESP32_IP = host;
+    try {
+      localStorage.setItem('esp32ip', host);
+      localStorage.setItem('esp32ip_a', host);
+      localStorage.setItem('esp32host', host);
+    } catch (e) {}
+    if (channel === 'B' || !(ws && ws.readyState === WebSocket.OPEN)) {
+      setTimeout(function () { if (typeof wsConnect === 'function') wsConnect(); }, 250);
+    }
+    updateConnStatus();
+    return;
+  }
+
+  // role B — ne jamais laisser le voyant A vert sur un boîtier B
+  if (channel === 'A' || ESP32_HOST === host || ESP32_IP === host) {
+    termAddLine('[probe] ' + host + ' est B — slot B seulement (A éteint)', 'sys');
+    if (_wsReconnectTimer) { clearTimeout(_wsReconnectTimer); _wsReconnectTimer = null; }
+    ESP32_HOST = '';
+    ESP32_IP = '';
+    try {
+      localStorage.removeItem('esp32ip');
+      localStorage.removeItem('esp32ip_a');
+      localStorage.removeItem('esp32host');
+    } catch (e) {}
+    if (channel === 'A') forceCloseA('PROBE_ID=B — mauvais slot');
+  }
+  ESP32_HOST_B = host;
+  try { localStorage.setItem('esp32ip_b', host); } catch (e) {}
+  if (channel === 'A' || !(wsB && wsB.readyState === WebSocket.OPEN)) {
+    setTimeout(function () {
+      if (typeof wsConnectB === 'function') wsConnectB();
+    }, 300);
+  }
+  updateConnStatus();
+}
+window.fetchProbeRole = fetchProbeRole;
 
 /** La page est servie par l'ESP32 lui-même (pas par GitHub Pages). */
 function _pageServedByEsp() {
@@ -431,21 +520,23 @@ async function discoverEspHost() {
       stopAfter: 2
     });
     if (found.length) {
-      const h = found[0];
-      ESP32_IP = h;
-      localStorage.setItem('esp32ip', h);
-      // 2e IP → B si libre
-      if (found.length > 1 && (!ESP32_HOST_B || ESP32_HOST_B === h)) {
-        const b = found[1];
-        if (b !== h) {
-          ESP32_HOST_B = b;
-          localStorage.setItem('esp32ip_b', b);
-        }
+      const slots = await assignHostsByProbeRole(found);
+      if (slots.b) {
+        ESP32_HOST_B = slots.b;
+        localStorage.setItem('esp32ip_b', slots.b);
+      }
+      if (slots.a) {
+        ESP32_IP = slots.a;
+        localStorage.setItem('esp32ip', slots.a);
       }
       if (typeof termAddLine === 'function') {
         termAddLine(t('app.espFound', { list: found.join(', ') }), 'ok');
+        termAddLine('[probe] A=' + (slots.a || '—') + '  B=' + (slots.b || '—'), 'sys');
       }
-      return h;
+      // Ne jamais prendre un boîtier B comme A (sinon voyant A vert tout seul)
+      if (slots.a) return slots.a;
+      if (slots.b && !slots.a) return '';
+      return found[0];
     }
   } catch (e) {
     if (typeof termAddLine === 'function') {
@@ -496,28 +587,32 @@ async function findEspAndPrompt() {
   for (let i = 0; i < found.length; i++) {
     line('  ' + found[i], 'ok');
   }
-  const host = found[0];
+  const slots = await assignHostsByProbeRole(found);
+  const host = slots.a || (slots.b ? '' : found[0]);
   _wsFailCount = 0;
-  if (typeof applyEspIp === 'function') applyEspIp(host, true);
-  else {
-    ESP32_IP = host;
-    localStorage.setItem('esp32ip', host);
-    _wsConnectTo(host);
-  }
-  if (found.length > 1) {
-    const b = found[1];
-    if (b !== host) {
-      ESP32_HOST_B = b;
-      localStorage.setItem('esp32ip_b', b);
-      _wsFailCountB = 0;
-      setTimeout(function () { wsConnectB(); }, 400);
-      line('[B] IP auto: ' + b, 'ok');
+  if (host) {
+    if (typeof applyEspIp === 'function') applyEspIp(host, true);
+    else {
+      ESP32_IP = host;
+      localStorage.setItem('esp32ip', host);
+      _wsConnectTo(host);
     }
   }
-  line(found.length > 1
+  const b = slots.b || ((found.length > 1 && found[1] !== host) ? found[1] : '');
+  if (b && b !== host) {
+    ESP32_HOST_B = b;
+    localStorage.setItem('esp32ip_b', b);
+    _wsFailCountB = 0;
+    setTimeout(function () { wsConnectB(); }, 400);
+    line('[B] IP (PROBE_ID): ' + b, 'ok');
+  }
+  if (!host && slots.b) {
+    line('[A] aucun boîtier A — B seul @ ' + slots.b, 'sys');
+  }
+  line((host && b)
     ? t('app.connectedAMore', { host: host })
-    : t('app.connectedA', { host: host }), 'ok');
-  return { ok: true, host: host, found: found };
+    : (host ? t('app.connectedA', { host: host }) : ('B @ ' + (slots.b || '?'))), 'ok');
+  return { ok: true, host: host || slots.b || found[0], found: found, roleA: slots.a, roleB: slots.b };
 }
 window.findEspAndPrompt = findEspAndPrompt;
 window.scanEspSubnet = scanEspSubnet;
@@ -1303,6 +1398,10 @@ function handleTextB(raw) {
       _markWsAliveB();
       return;
     }
+    if (line.startsWith('PROBE_ID=')) {
+      _onProbeIdMessage(line.slice(9), ESP32_HOST_B || '', 'B');
+      return;
+    }
 
     // Marqueurs tach post-temporel B — ignorer le bruit jusqu'à END
     if (rxStateB === 'an_tach') {
@@ -1883,6 +1982,11 @@ function handleText(raw) {
     // ── PONG ──────────────────────────────────────────────────
     if (line === 'WS_PONG' || line === 'PONG') {
       _markWsAlive();
+      return;
+    }
+
+    if (line.startsWith('PROBE_ID=')) {
+      _onProbeIdMessage(line.slice(9), ESP32_HOST || ESP32_IP || '', 'A');
       return;
     }
 
