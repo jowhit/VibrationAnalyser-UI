@@ -4,7 +4,7 @@
 // lang/*.json volontairement ABSENTS du précache : chargés à la demande par i18n.js
 // (évite qu'un 404/JSON casse l'installabilité PWA perçue / cache SW).
 
-const CACHE_NAME = 'vibanalyser-v132';
+const CACHE_NAME = 'vibanalyser-v134';
 const FILES = [
   './index.html',
   './i18n.js',

@@ -402,14 +402,22 @@ function cancelEspScan() {
 
 async function scanEspSubnet(opts) {
   opts = opts || {};
-  const timeoutMs = opts.timeoutMs || 500;
-  const concurrency = opts.concurrency || 32;
-  /** Arrêt dès N ESP trouvés (2 = A+B) — évite scan complet /24 inutile. */
+  // Timeout + concurrence plus doux : flood /24 tuait souvent le 2e ESP sur hotspot Android
+  const timeoutMs = opts.timeoutMs || 900;
+  const concurrency = opts.concurrency || 14;
+  /** Arrêt dès N ESP trouvés (2 = A+B). */
   const stopAfter = opts.stopAfter != null ? opts.stopAfter : 0;
+  /** IPs déjà connues : on continue le scan jusqu'à en trouver une *nouvelle* si besoin. */
+  const ignoreForStop = {};
+  (opts.knownHosts || []).forEach(function (h) {
+    if (_isEspIpv4(h)) ignoreForStop[h] = true;
+  });
   const isAborted = typeof opts.isAborted === 'function'
     ? opts.isAborted
     : function () { return !!(opts.signal && opts.signal.aborted); };
-  const bases = {};
+
+  const primaryBases = {}; // hotspot réel (RTC + ESP déjà connus)
+  const fallbackBases = {};
   const hosts = [];
   const seenH = {};
   let stopScan = false;
@@ -419,55 +427,76 @@ async function scanEspSubnet(opts) {
     seenH[h] = true;
     hosts.push(h);
   }
-  function addBase(b) {
-    if (!b || bases[b]) return;
-    bases[b] = true;
+  function addBase(map, b) {
+    if (!b || map[b]) return;
+    map[b] = true;
   }
   function prioritizeAround(ip) {
     if (!_isEspIpv4(ip)) return;
-    addBase(_subnetBase(ip));
+    addBase(primaryBases, _subnetBase(ip));
     const last = parseInt(ip.split('.')[3], 10);
-    for (let d = 0; d <= 40; d++) {
+    // Voisinage d'abord (souvent DHCP proche) — le /24 complet vient ensuite
+    for (let d = 0; d <= 60; d++) {
       if (last + d <= 254) addHost(_subnetBase(ip) + '.' + (last + d));
       if (d > 0 && last - d >= 1) addHost(_subnetBase(ip) + '.' + (last - d));
     }
   }
 
-  // Bases : IP locales WebRTC + IP mémorisées A/B + hôtes connus
   const rtc = await _rtcLocalIpv4s();
   if (isAborted()) return [];
   if (typeof termAddLine === 'function' && rtc.length) {
     termAddLine('[scan] interfaces: ' + rtc.join(', '), 'sys');
   }
-  rtc.forEach(function (ip) { addBase(_subnetBase(ip)); });
+  rtc.forEach(function (ip) { addBase(primaryBases, _subnetBase(ip)); });
   prioritizeAround((localStorage.getItem('esp32ip') || '').trim());
   prioritizeAround((localStorage.getItem('esp32ip_a') || '').trim());
   prioritizeAround((localStorage.getItem('esp32ip_b') || '').trim());
   if (_isEspIpv4(ESP32_HOST)) prioritizeAround(ESP32_HOST);
   if (_isEspIpv4(ESP32_HOST_B)) prioritizeAround(ESP32_HOST_B);
-  // Hotspots Android / Windows / Linux fréquents (+ 10.x SoftAP Android aléatoire via WebRTC)
-  ['192.168.43', '192.168.137', '10.42.0', '192.168.173', '192.168.1',
-   '192.168.0', '192.168.44', '192.168.49', '172.20.10'].forEach(addBase);
 
-  Object.keys(bases).forEach(function (b) {
+  // Fallbacks seulement si on n'a aucun sous-réseau hotspot (pas de RTC / pas d'IP connue)
+  ['192.168.43', '192.168.137', '10.42.0', '192.168.173', '192.168.1',
+   '192.168.0', '192.168.44', '192.168.49', '172.20.10'].forEach(function (b) {
+    addBase(fallbackBases, b);
+  });
+
+  const useBases = Object.keys(primaryBases).length ? primaryBases : fallbackBases;
+  // Compléter le /24 du hotspot (après le voisinage déjà en tête de liste)
+  Object.keys(useBases).forEach(function (b) {
     for (let i = 1; i <= 254; i++) addHost(b + '.' + i);
   });
 
   if (typeof termAddLine === 'function') {
-    termAddLine('[scan] ' + hosts.length + ' hôtes, ' + Object.keys(bases).length +
-      ' sous-réseau(x)' + (stopAfter ? (', stop@' + stopAfter) : ''), 'sys');
+    termAddLine('[scan] ' + hosts.length + ' hôtes, ' + Object.keys(useBases).length +
+      ' sous-réseau(x)' + (stopAfter ? (', stop@' + stopAfter) : '') +
+      ' t=' + timeoutMs + 'ms', 'sys');
   }
 
   const found = [];
   let idx = 0;
+  function shouldStop() {
+    if (stopAfter <= 0) return false;
+    if (!Object.keys(ignoreForStop).length) return found.length >= stopAfter;
+    // A déjà associé : ne pas s'arrêter sur lui seul — exiger au moins 1 IP nouvelle
+    let neu = 0;
+    for (let i = 0; i < found.length; i++) {
+      if (!ignoreForStop[found[i]]) neu++;
+    }
+    return neu >= 1 && found.length >= stopAfter;
+  }
   async function worker() {
     while (idx < hosts.length) {
       if (isAborted() || stopScan) return;
       const i = idx++;
       const h = hosts[i];
       if (await pingEspHost(h, timeoutMs)) {
-        if (found.indexOf(h) < 0) found.push(h);
-        if (stopAfter > 0 && found.length >= stopAfter) stopScan = true;
+        if (found.indexOf(h) < 0) {
+          found.push(h);
+          if (typeof termAddLine === 'function') {
+            termAddLine('[scan] trouvé ' + h, 'ok');
+          }
+        }
+        if (shouldStop()) stopScan = true;
       }
     }
   }
@@ -515,9 +544,10 @@ async function discoverEspHost() {
   }
   try {
     const found = await scanEspSubnet({
-      timeoutMs: 450,
-      concurrency: 36,
-      stopAfter: 2
+      timeoutMs: 900,
+      concurrency: 14,
+      stopAfter: 2,
+      knownHosts: [ESP32_HOST, ESP32_HOST_B, ESP32_IP].filter(Boolean)
     });
     if (found.length) {
       const slots = await assignHostsByProbeRole(found);
@@ -563,9 +593,10 @@ async function findEspAndPrompt() {
   let found = [];
   try {
     found = await scanEspSubnet({
-      timeoutMs: 450,
-      concurrency: 36,
+      timeoutMs: 900,
+      concurrency: 14,
       stopAfter: 2,
+      knownHosts: [ESP32_HOST, ESP32_HOST_B, ESP32_IP].filter(Boolean),
       isAborted: function () { return !!abort.aborted; }
     });
   } catch (e) {
@@ -580,7 +611,7 @@ async function findEspAndPrompt() {
   }
   if (!found.length) {
     line(t('app.noneFound'), 'sys');
-    line('Astuce: entre l\'IP affichée au Serial USB (WIFI_IP=…) — le scan a besoin du bon /24 (WebRTC).', 'sys');
+    line('Astuce: IP Serial (WIFI_IP=…). Page HTTPS peut bloquer le scan HTTP — ouvrir via http://IP-ESP/ ou GitHub + IP manuelle.', 'sys');
     return { empty: true };
   }
   line(t('app.foundList', { n: found.length }), 'ok');
@@ -1405,26 +1436,34 @@ function handleTextB(raw) {
 
     // Marqueurs tach post-temporel B — ignorer le bruit jusqu'à END
     if (rxStateB === 'an_tach') {
-      if (line === 'ANAL_TACH_BEGIN') {
-        rxHeadersB.tachIdx = [];
-        rxHeadersB.tachStarted = true;
-        return;
-      }
-      if (line.startsWith('NTACH=')) return;
-      if (line === 'ANAL_TACH_END') {
-        const idx = rxHeadersB.tachIdx || [];
-        const monoB = (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB());
-        if (monoB && typeof analyseSetTachMarks === 'function') analyseSetTachMarks(idx);
-        else if (typeof analyseSetTachMarksB === 'function') analyseSetTachMarksB(idx);
+      // Nouveau transfert : ne pas avaler BINARY_MODE (Bump sans TACH_END → stuck)
+      if (line === 'BINARY_MODE' || line === 'LIVE_FFT_BLOC' ||
+          line === 'HARM_BIN' || line === 'BAL_TOUR' ||
+          line === 'BODE_BIN' || line === 'SYNC_BIN') {
         rxStateB = 'text';
-        return;
+        // retomber dans le switch normal ci-dessous
+      } else {
+        if (line === 'ANAL_TACH_BEGIN') {
+          rxHeadersB.tachIdx = [];
+          rxHeadersB.tachStarted = true;
+          return;
+        }
+        if (line.startsWith('NTACH=')) return;
+        if (line === 'ANAL_TACH_END') {
+          const idx = rxHeadersB.tachIdx || [];
+          const monoB = (typeof ProbeMode !== 'undefined' && ProbeMode.isMonoB());
+          if (monoB && typeof analyseSetTachMarks === 'function') analyseSetTachMarks(idx);
+          else if (typeof analyseSetTachMarksB === 'function') analyseSetTachMarksB(idx);
+          rxStateB = 'text';
+          return;
+        }
+        if (rxHeadersB.tachStarted && /^\d+$/.test(line)) {
+          if (!rxHeadersB.tachIdx) rxHeadersB.tachIdx = [];
+          rxHeadersB.tachIdx.push(parseInt(line, 10));
+          return;
+        }
+        return; // ne pas abort sur lignes parasites (OK / ACQ…)
       }
-      if (rxHeadersB.tachStarted && /^\d+$/.test(line)) {
-        if (!rxHeadersB.tachIdx) rxHeadersB.tachIdx = [];
-        rxHeadersB.tachIdx.push(parseInt(line, 10));
-        return;
-      }
-      return; // ne pas abort sur lignes parasites (OK / ACQ…)
     }
 
     // Mode mono B : NAV_ACK / SYS_STATE comme sur A
@@ -2234,25 +2273,34 @@ function handleText(raw) {
     // Marqueurs tach post-temporel — ignorer le bruit jusqu'à END
     // (sinon OK/ACQ_PROGRESS abortaient an_tach trop tôt → mono A/B sans 1X)
     if (rxState === 'an_tach') {
-      if (line === 'ANAL_TACH_BEGIN') {
-        rxHeaders.tachIdx = [];
-        rxHeaders.tachStarted = true;
-        return;
-      }
-      if (line.startsWith('NTACH=')) return;
-      if (line === 'ANAL_TACH_END') {
-        if (typeof analyseSetTachMarks === 'function') {
-          analyseSetTachMarks(rxHeaders.tachIdx || []);
-        }
+      // Bump (et autres) sans ANAL_TACH_END laissaient an_tach collé →
+      // le BINARY_MODE suivant était avalé → UI restait en preview.
+      if (line === 'BINARY_MODE' || line === 'LIVE_FFT_BLOC' ||
+          line === 'HARM_BIN' || line === 'BAL_TOUR' ||
+          line === 'BODE_BIN' || line === 'SYNC_BIN') {
         rxState = 'text';
+        // continuer vers les handlers ci-dessous
+      } else {
+        if (line === 'ANAL_TACH_BEGIN') {
+          rxHeaders.tachIdx = [];
+          rxHeaders.tachStarted = true;
+          return;
+        }
+        if (line.startsWith('NTACH=')) return;
+        if (line === 'ANAL_TACH_END') {
+          if (typeof analyseSetTachMarks === 'function') {
+            analyseSetTachMarks(rxHeaders.tachIdx || []);
+          }
+          rxState = 'text';
+          return;
+        }
+        if (rxHeaders.tachStarted && /^\d+$/.test(line.trim())) {
+          if (!rxHeaders.tachIdx) rxHeaders.tachIdx = [];
+          rxHeaders.tachIdx.push(parseInt(line.trim(), 10));
+          return;
+        }
         return;
       }
-      if (rxHeaders.tachStarted && /^\d+$/.test(line.trim())) {
-        if (!rxHeaders.tachIdx) rxHeaders.tachIdx = [];
-        rxHeaders.tachIdx.push(parseInt(line.trim(), 10));
-        return;
-      }
-      return;
     }
 
     // ── HARM_BIN → mode binaire harmonique (doit être avant BAL_ général) ──
