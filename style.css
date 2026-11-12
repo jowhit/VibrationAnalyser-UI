@@ -187,6 +187,16 @@ body { display: flex; flex-direction: column; }
 .an-time-cursors .tc1 { color: #cc0000; font-weight: bold; }
 .an-time-cursors .tc2 { color: #0055aa; font-weight: bold; }
 .an-time-cursors .tc-delta { color: #2a7a35; font-weight: bold; }
+.an-time-cursors .tc-snap-btn {
+  margin-right: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  border: 1px solid #8899aa;
+  border-radius: 4px;
+  background: #eef3f8;
+  color: #234;
+  cursor: pointer;
+}
 #an-stats {
   display: flex; gap: 12px; padding: 4px 10px;
   background: #f8f8f8; border-bottom: 1px solid #ddd;

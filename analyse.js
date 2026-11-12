@@ -276,6 +276,15 @@ let anCursorX = -1;
 /** Curseurs temporels : {t, amp} | null — clic1 puis clic2 → Δt / RPM */
 let anTimeC1 = null;
 let anTimeC2 = null;
+/** Snap pic local (sinon placement exact au sample sous le doigt). */
+let anTimeCursorSnap = (function () {
+  try {
+    const v = localStorage.getItem('anTimeCursorSnap');
+    if (v === '0') return false;
+    if (v === '1') return true;
+  } catch (e) {}
+  return true;
+})();
 let _bumpStatusLines = ['Mode pret - appuyez DEMARRER', ''];
 let bumpLiveG = 2;
 let bumpLiveRunning = false;
@@ -1444,6 +1453,21 @@ function _anClearTimeCursors() {
   _anUpdateTimeCursorBar();
 }
 
+function _anFmtTimeCursorT(t) {
+  // Plus de décimales si zoom / Δt fins (ex. 30 kRPM → 2 ms)
+  if (!isFinite(t)) return '0';
+  if (Math.abs(t) < 0.02) return t.toFixed(6);
+  if (Math.abs(t) < 0.2) return t.toFixed(5);
+  return t.toFixed(4);
+}
+
+function _anToggleTimeCursorSnap() {
+  anTimeCursorSnap = !anTimeCursorSnap;
+  try { localStorage.setItem('anTimeCursorSnap', anTimeCursorSnap ? '1' : '0'); } catch (e) {}
+  _anUpdateTimeCursorBar();
+}
+window._anToggleTimeCursorSnap = _anToggleTimeCursorSnap;
+
 function _anUpdateTimeCursorBar() {
   const el = document.getElementById('an-time-cursors');
   if (!el) return;
@@ -1453,20 +1477,30 @@ function _anUpdateTimeCursorBar() {
     return;
   }
   el.style.display = 'block';
-  let html = '';
+  const snapLbl = anTimeCursorSnap ? 'Snap pic: ON' : 'Snap pic: OFF';
+  let html = '<button type="button" class="tc-snap-btn" onclick="_anToggleTimeCursorSnap()"' +
+    ' title="ON = colle au pic local (fenêtre serrée). OFF = sample exact sous le doigt (plus précis pour Δt / RPM).">' +
+    snapLbl + '</button> ';
   if (anTimeC1) {
-    html += '<span class="tc1">C1</span> t=' + anTimeC1.t.toFixed(4) + ' s  ' +
+    html += '<span class="tc1">C1</span> t=' + _anFmtTimeCursorT(anTimeC1.t) + ' s  ' +
       anTimeC1.amp.toFixed(anUnit === 'g' ? 4 : 3) + ' ' + _anUnitShort();
   }
   if (anTimeC2) {
-    html += ' &nbsp;|&nbsp; <span class="tc2">C2</span> t=' + anTimeC2.t.toFixed(4) + ' s  ' +
+    html += ' &nbsp;|&nbsp; <span class="tc2">C2</span> t=' + _anFmtTimeCursorT(anTimeC2.t) + ' s  ' +
       anTimeC2.amp.toFixed(anUnit === 'g' ? 4 : 3) + ' ' + _anUnitShort();
     const dt = Math.abs(anTimeC2.t - anTimeC1.t);
-    if (dt > 1e-9) {
+    if (dt > 1e-12) {
       const rpm = 60 / dt;
       const hz = 1 / dt;
-      html += ' &nbsp;|&nbsp; <span class="tc-delta">Δt=' + dt.toFixed(4) + ' s → ' +
-        rpm.toFixed(1) + ' RPM</span> (' + hz.toFixed(2) + ' Hz)';
+      const dtStr = (dt < 0.02) ? dt.toFixed(6) : dt.toFixed(4);
+      const rpmStr = (rpm >= 10000) ? rpm.toFixed(0) : (rpm >= 1000 ? rpm.toFixed(1) : rpm.toFixed(2));
+      const hzStr = (hz >= 100) ? hz.toFixed(1) : hz.toFixed(2);
+      html += ' &nbsp;|&nbsp; <span class="tc-delta">Δt=' + dtStr + ' s → ' +
+        rpmStr + ' RPM</span> (' + hzStr + ' Hz)';
+      if (anP && anP.fs > 0) {
+        const dSamp = Math.round(dt * anP.fs);
+        html += ' <span style="color:#888">[' + dSamp + ' smp]</span>';
+      }
     }
   } else {
     html += ' <span style="color:#888">— clic 2ᵉ point pour Δt / RPM</span>';
@@ -1474,19 +1508,31 @@ function _anUpdateTimeCursorBar() {
   el.innerHTML = html;
 }
 
-/** Snap au pic local (|amp| max) autour du clic. */
+/**
+ * Placement curseur temporel.
+ * - Toujours quantifié au sample (limite physique = 1/Fs).
+ * - Snap pic optionnel, fenêtre serrée (max ~1.5 ms) pour ne pas
+ *   « sauter » d'un pic à l'autre quand on vise un Δt fin (ex. 30 kRPM = 2 ms).
+ */
 function _anSnapTimePeak(tClick) {
   _anEnsureTimeIntegrated();
   const sig = _anTimeSigA();
-  if (!sig || !anP.fs) return { t: tClick, amp: 0 };
+  if (!sig || !anP.fs) return { t: tClick, amp: 0, ampAbs: 0 };
   const fs = anP.fs;
   const n = Math.min(anP.n, sig.length);
   let idx = Math.round(tClick * fs);
   idx = Math.max(0, Math.min(n - 1, idx));
-  // fenêtre ~2 % de la vue, min 3 samples, max ~20 ms
+
+  if (!anTimeCursorSnap) {
+    const a = sig[idx];
+    return { t: idx / fs, amp: a, ampAbs: Math.abs(a) };
+  }
+
+  // ~0.4 % de la vue, plafonné à 1.5 ms (avant : 2 % / 20 ms → trop large)
   const span = Math.max(anZMax - anZMin, 1e-6);
-  let win = Math.round(span * 0.02 * fs);
-  win = Math.max(3, Math.min(win, Math.round(0.02 * fs)));
+  let win = Math.round(span * 0.004 * fs);
+  const maxWin = Math.max(2, Math.round(0.0015 * fs));
+  win = Math.max(2, Math.min(win, maxWin));
   const lo = Math.max(0, idx - win);
   const hi = Math.min(n - 1, idx + win);
   let best = idx, bestA = Math.abs(sig[idx]);
